@@ -6,5 +6,5 @@ defmodule GravitonMQ.AMQP10.SASL do
   Milestone 0.
   """
 
-  @type mechanism :: binary()
+  @type mechanism :: GravitonMQ.AMQP10.Value.symbol_value()
 end

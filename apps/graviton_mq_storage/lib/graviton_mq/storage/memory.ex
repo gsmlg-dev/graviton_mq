@@ -1,10 +1,8 @@
 defmodule GravitonMQ.Storage.Memory do
   @moduledoc """
-  Future in-memory implementation of `GravitonMQ.Core.Storage`.
+  Boundary for a future in-memory implementation of `GravitonMQ.Core.Storage`.
 
-  Milestone 0 declares the implementation boundary without exposing fake
-  reads, writes, or acknowledgements.
+  It does not claim the behaviour until all mandatory durability and recovery
+  operations have real semantics.
   """
-
-  @behaviour GravitonMQ.Core.Storage
 end

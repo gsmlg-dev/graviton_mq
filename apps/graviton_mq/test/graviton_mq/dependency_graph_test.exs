@@ -37,6 +37,26 @@ defmodule GravitonMQ.DependencyGraphTest do
     assert length(project_modules) == length(Enum.uniq(project_modules))
   end
 
+  test "root and child projects expose one centralized Elixir requirement" do
+    shared_config = Path.join(@repo_root, "build/project.exs")
+    assert File.exists?(shared_config)
+
+    Code.require_file(shared_config)
+    expected_requirement = GravitonMQ.Build.elixir_requirement()
+    assert "~> 1.18.4" == expected_requirement
+
+    project_files = [
+      "mix.exs" | Enum.map(Map.keys(@expected_dependencies), &"apps/#{&1}/mix.exs")
+    ]
+
+    assert Enum.all?(project_files, fn relative_path ->
+             @repo_root
+             |> Path.join(relative_path)
+             |> declared_elixir_requirement()
+             |> Kernel.==(expected_requirement)
+           end)
+  end
+
   defp child_apps do
     @repo_root
     |> Path.join("apps/*/mix.exs")
@@ -83,5 +103,19 @@ defmodule GravitonMQ.DependencyGraphTest do
       end)
 
     module
+  end
+
+  defp declared_elixir_requirement(path) do
+    ast = path |> File.read!() |> Code.string_to_quoted!()
+
+    {_ast, requirement_ast} =
+      Macro.prewalk(ast, nil, fn
+        {:elixir, expression} = node, nil -> {node, expression}
+        node, accumulator -> {node, accumulator}
+      end)
+
+    assert requirement_ast != nil, "missing :elixir requirement in #{path}"
+    {requirement, []} = Code.eval_quoted(requirement_ast)
+    requirement
   end
 end

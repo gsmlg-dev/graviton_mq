@@ -1,10 +1,14 @@
 defmodule GravitonMQ.AMQP10.Performative do
   @moduledoc """
-  Names AMQP 1.0 performative data without parsing or protocol execution.
+  Defines typed AMQP 1.0 performative data independently of protocol execution.
 
-  Connection, session, link, flow, transfer, and disposition performatives are
-  protocol-layer concepts. They are not broker-core queue commands.
+  Only the Open and Begin schemas are modeled by the bounded codec foundation.
+  The structs carry exact tagged AMQP field values; they do not negotiate a
+  connection, transition session state, or perform broker work.
   """
+
+  alias GravitonMQ.AMQP10.Performative.Begin
+  alias GravitonMQ.AMQP10.Performative.Open
 
   @type name ::
           :open
@@ -17,5 +21,5 @@ defmodule GravitonMQ.AMQP10.Performative do
           | :end
           | :close
 
-  @type t :: {name(), map()}
+  @type t :: Open.t() | Begin.t()
 end

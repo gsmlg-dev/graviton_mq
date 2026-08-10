@@ -1,8 +1,10 @@
 defmodule GravitonMQ.Supervisor do
   @moduledoc """
-  Public top-level supervisor for the embedded broker application.
+  Public top-level supervisor for one standalone or embedded instance.
 
-  Its only Milestone 0 child is `GravitonMQ.Runtime.Supervisor`.
+  Its only Milestone 0 child is `GravitonMQ.Runtime.Supervisor`. Both process
+  names are exact options supplied through the public lifecycle; the module
+  never derives atoms from external identifiers.
   """
 
   use Supervisor
