@@ -11,8 +11,16 @@ of implemented recovery behavior.
 
 Explicit ownership determines which process may mutate operational state:
 
-- the public `GravitonMQ.Application` owns the product supervision tree;
-- `GravitonMQ.Runtime.Supervisor` will own runtime subsystems;
+- in standalone mode, `GravitonMQ.Application` starts the default instance
+  through `GravitonMQ.start_link/1`;
+- in embedded mode, the host supervisor owns the instance started from
+  `{GravitonMQ, options}`; a dependency configured with `runtime: false` does
+  not also start an application-owned instance;
+- each instance has its own public supervisor and empty
+  `GravitonMQ.Runtime.Supervisor`, registered under the exact names supplied in
+  its options;
+- `GravitonMQ.Runtime.Supervisor` will own that instance's future runtime
+  subsystems;
 - each accepted connection will receive a connection tree;
 - one Writer per connection will serialize outbound writes;
 - each AMQP Session will be represented by one process;
@@ -24,6 +32,17 @@ Explicit ownership determines which process may mutate operational state:
 
 These rules avoid shared socket ownership and prevent a connection failure
 from directly owning durable queue state.
+
+The standalone and embedded paths deliberately use the same public lifecycle.
+Starting a second instance with the same registered top-level name fails with
+the standard `{:error, {:already_started, pid}}` result; it does not attach to
+or silently reuse the existing tree. Coexisting instances therefore need
+distinct top-level and runtime supervisor names. Names are caller-supplied OTP
+names, not atoms derived from arbitrary strings.
+
+Milestone 0 starts only these empty supervision boundaries. It starts no
+listener, connection, session, queue, storage, recovery, or effect-executor
+process.
 
 ## Intended fault domains
 
@@ -65,13 +84,53 @@ A future publisher acceptance may be sent only after the selected durability
 effects have completed. Process termination, storage errors, or uncertain
 writes before that boundary must not result in a success disposition.
 
+## Append, durability, and uncertainty
+
+The core storage contract separates ordered append from durable completion. An
+append submits a non-empty ordered batch of logical queue events and returns a
+commit reference for the final event. That result proves that the events have
+positions in the storage stream; it does not prove that the bytes are durable.
+Commit references are ordered within one storage stream and are not comparable
+across streams.
+
+A later synchronization request names a previously returned commit reference.
+Successful synchronization reports the highest contiguous commit reference
+known durable through that point. `durable_through/1` exposes that boundary so
+append results can be correlated with later durability. A returned error is a
+known failure. A timeout, caller crash, or lost reply may leave synchronization
+completion uncertain even if storage eventually crossed the requested
+boundary. Runtime code must query or reconcile the durable-through position
+before retrying or reporting publisher acceptance; it must not manufacture a
+successful result.
+
+No Memory or WAL backend implements this contract yet. Milestone 0 defines the
+mandatory operations and their failure semantics without claiming append,
+synchronization, or filesystem behavior.
+
+## Recovery boundary
+
+Core owns serializable, protocol-independent `GravitonMQ.Queue.Event` values.
+Storage owns physical records, including future format versions, encoded event
+bytes, positions, checksums, and segment metadata. A future storage backend
+will validate and decode physical records, then expose ordered commit
+references and logical queue events through the core storage fold contract.
+
+Recovery is fold-based so a caller can rebuild state incrementally or stop
+early without loading an entire log into memory. `:origin` yields the first
+record, while a supplied commit reference is an exclusive checkpoint cursor;
+subsequent events are yielded with ascending references. A future queue machine
+will consume the recovered logical events; it will not inspect physical record
+metadata. Recovery must not reconstruct durable identity from AMQP channels,
+link handles, delivery IDs, process identifiers, references, or socket state.
+
 ## Protocol failure versus broker failure
 
 AMQP Connection, Session, Link, Flow, Transfer, and Disposition state remains
 in the protocol layer. Queue message lifecycle remains in the broker core.
 Transient delivery IDs and link handles are not recovery keys for durable
-messages. Recovery reconstructs broker state from broker records; protocol
-state is re-established through AMQP interactions.
+messages. Recovery reconstructs broker state from core logical events decoded
+from storage-owned physical records; protocol state is re-established through
+AMQP interactions.
 
 ## Management isolation
 

@@ -10,6 +10,7 @@ defmodule GravitonMQ.Application do
 
   @impl true
   def start(_type, _arguments) do
-    GravitonMQ.Supervisor.start_link()
+    options = Application.get_env(:graviton_mq, :default_instance, [])
+    GravitonMQ.start_link(options)
   end
 end

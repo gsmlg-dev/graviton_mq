@@ -4,6 +4,10 @@ defmodule GravitonMQ.Core.BoundariesTest do
   @modules [
     GravitonMQ.Core,
     GravitonMQ.Core.Message,
+    GravitonMQ.Core.MessageId,
+    GravitonMQ.Core.NodeId,
+    GravitonMQ.Core.DeliveryRef,
+    GravitonMQ.Core.CommitRef,
     GravitonMQ.Core.Delivery,
     GravitonMQ.Core.Outcome,
     GravitonMQ.Core.Address,
@@ -12,6 +16,8 @@ defmodule GravitonMQ.Core.BoundariesTest do
     GravitonMQ.Queue.Machine,
     GravitonMQ.Queue.Command,
     GravitonMQ.Queue.Effect,
+    GravitonMQ.Queue.Event,
+    GravitonMQ.Queue.EventId,
     GravitonMQ.Queue.State
   ]
 

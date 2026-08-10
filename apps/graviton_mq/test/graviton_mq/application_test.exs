@@ -27,21 +27,91 @@ defmodule GravitonMQ.ApplicationTest do
            ] = Supervisor.which_children(public_supervisor)
   end
 
-  test "an isolated top-level supervision tree stops cleanly" do
+  test "an explicitly named instance starts through the public API and stops cleanly" do
     assert {:ok, supervisor} =
-             GravitonMQ.Supervisor.start_link(name: nil, runtime_supervisor_name: nil)
+             GravitonMQ.start_link(
+               name: :graviton_mq_test_named_instance,
+               runtime_supervisor_name: :graviton_mq_test_named_runtime
+             )
 
     Process.unlink(supervisor)
 
+    assert ^supervisor = Process.whereis(:graviton_mq_test_named_instance)
+    runtime = Process.whereis(:graviton_mq_test_named_runtime)
+    assert is_pid(runtime)
+
     assert [
-             {GravitonMQ.Runtime.Supervisor, runtime, :supervisor,
+             {GravitonMQ.Runtime.Supervisor, ^runtime, :supervisor,
               [GravitonMQ.Runtime.Supervisor]}
            ] =
              Supervisor.which_children(supervisor)
 
-    assert is_pid(runtime)
+    assert [] = Supervisor.which_children(runtime)
     assert :ok = Supervisor.stop(supervisor)
     refute Process.alive?(supervisor)
     refute Process.alive?(runtime)
+  end
+
+  test "two differently named empty instances coexist" do
+    assert {:ok, first} =
+             GravitonMQ.start_link(
+               name: :graviton_mq_test_first_instance,
+               runtime_supervisor_name: :graviton_mq_test_first_runtime
+             )
+
+    assert {:ok, second} =
+             GravitonMQ.start_link(
+               name: :graviton_mq_test_second_instance,
+               runtime_supervisor_name: :graviton_mq_test_second_runtime
+             )
+
+    Process.unlink(first)
+    Process.unlink(second)
+
+    assert first != second
+
+    assert [] =
+             :graviton_mq_test_first_runtime
+             |> Process.whereis()
+             |> Supervisor.which_children()
+
+    assert [] =
+             :graviton_mq_test_second_runtime
+             |> Process.whereis()
+             |> Supervisor.which_children()
+
+    assert :ok = Supervisor.stop(first)
+    assert :ok = Supervisor.stop(second)
+  end
+
+  test "a duplicate instance name fails predictably" do
+    options = [
+      name: :graviton_mq_test_duplicate_instance,
+      runtime_supervisor_name: :graviton_mq_test_duplicate_runtime
+    ]
+
+    assert {:ok, supervisor} = GravitonMQ.start_link(options)
+    Process.unlink(supervisor)
+
+    assert {:error, {:already_started, ^supervisor}} = GravitonMQ.start_link(options)
+    assert :ok = Supervisor.stop(supervisor)
+  end
+
+  test "child specifications are scoped by the explicit top-level name" do
+    first =
+      GravitonMQ.child_spec(
+        name: :graviton_mq_test_child_one,
+        runtime_supervisor_name: :graviton_mq_test_child_runtime_one
+      )
+
+    second =
+      GravitonMQ.child_spec(
+        name: :graviton_mq_test_child_two,
+        runtime_supervisor_name: :graviton_mq_test_child_runtime_two
+      )
+
+    assert first.id != second.id
+    assert {GravitonMQ, :start_link, [_]} = first.start
+    assert :supervisor = first.type
   end
 end

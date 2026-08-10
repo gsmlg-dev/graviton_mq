@@ -6,11 +6,11 @@ defmodule GravitonMQ.AMQP10.Error do
   """
 
   @enforce_keys [:condition]
-  defstruct [:condition, :description, info: %{}]
+  defstruct [:condition, :description, :info]
 
   @type t :: %__MODULE__{
           condition: GravitonMQ.AMQP10.Types.symbol(),
-          description: String.t() | nil,
-          info: map()
+          description: GravitonMQ.AMQP10.Value.string_value() | nil,
+          info: GravitonMQ.AMQP10.Value.map_value() | nil
         }
 end
