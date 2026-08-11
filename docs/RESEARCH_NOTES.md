@@ -114,6 +114,10 @@ implementation:
   field values, validate ordered fields and mandatory types, materialize the
   specification defaults, and leave Connection and Session context rules to
   later state-transition work.
+- Choose End, Close, and nested Error as the first post-Milestone-1 extension
+  because their schemas require no Value-codec widening and prepare later
+  Connection and Session transition design without implementing those
+  transitions.
 - Enforce the process-free codec boundary through compiler references and
   parsed syntax rather than convention alone.
 

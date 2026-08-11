@@ -64,6 +64,18 @@ commands. Source-level checks enforce the process-free codec namespace. This
 milestone does not claim full protocol compatibility or begin queue-machine
 behavior.
 
+## Post-Milestone-1: End, Close, and Error codec slice
+
+This completed slice provides:
+
+- Encode and decode End and Close as dedicated immutable structs.
+- Validate their optional nested Error composite without whitelisting condition
+  symbols or widening the bounded value subset.
+- Preserve the process-free codec, opaque-frame, structured-error, and exact
+  remainder boundaries.
+- Do not add protocol transitions, other performatives, message sections,
+  transport, queues, or storage.
+
 ## Later milestones
 
 Later work should proceed in independently verifiable increments:

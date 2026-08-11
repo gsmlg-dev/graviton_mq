@@ -2,11 +2,11 @@
 
 ## Status
 
-GravitonMQ is at Milestone 1. The repository retains the hardened data,
-dependency, durability, and OTP composition boundaries from Milestone 0 and
-adds a bounded, process-free AMQP 1.0 codec foundation. It still does not
-contain a functioning broker, AMQP listener, protocol state machine, queue
-machine, or storage engine.
+GravitonMQ has completed Milestone 1 and its first post-Milestone-1 codec
+slice. The repository retains the hardened data, dependency, durability, and
+OTP composition boundaries from Milestone 0 and provides a bounded,
+process-free AMQP 1.0 codec foundation. It still does not contain a functioning
+broker, AMQP listener, protocol state machine, queue machine, or storage engine.
 
 GravitonMQ targets AMQP 1.0. AMQP 0-9-1 operations and concepts such as
 exchanges, bindings, `basic.publish`, `basic.consume`, and AMQP 0-9-1 channels
@@ -25,7 +25,7 @@ to the public composition root:
 | --- | --- |
 | `graviton_mq_core` | Protocol-independent broker types, logical queue events, outcomes, durable identities, and the storage behaviour |
 | `graviton_mq_storage` | Physical storage records and future concrete implementations of the core storage contract |
-| `graviton_mq_amqp10` | Exact AMQP 1.0 values, bounded pure value and Open/Begin schema codecs, protocol data, and declarative protocol-facing state |
+| `graviton_mq_amqp10` | Exact AMQP 1.0 values, bounded pure value and Open/Begin/End/Close schema codecs, nested Error protocol data, and declarative protocol-facing state |
 | `graviton_mq_runtime` | OTP composition and future effect execution across the lower layers |
 | `graviton_mq` | Public lifecycle, configuration, architecture tooling, and the product Application callback |
 
@@ -72,7 +72,8 @@ described arrays retain both the common descriptor and common underlying
 semantic type. Float and double values retain exact IEEE-754 bit patterns so
 special values and signed zero remain representable.
 
-The Milestone 1 codec surface is intentionally narrow:
+The current pure codec surface builds on the intentionally narrow Milestone 1
+foundation:
 
 - `Codec.ProtocolHeader.recognize/1` recognizes only raw AMQP protocol ID 0,
   version 1.0.0, and does not negotiate;
@@ -81,9 +82,10 @@ The Milestone 1 codec surface is intentionally narrow:
 - `Codec.Value.decode/2` and `encode/2` support `null`, `ushort`, `uint`,
   `ulong`, `string`, `symbol`, `list`, ordered `map`, symbol arrays, and
   described values recursively composed from that subset;
-- `Codec.Performative.decode/2` and `encode/2` validate only the Open and Begin
-  composite schemas and return dedicated immutable structs whose present
-  fields remain exact tagged AMQP values; and
+- `Codec.Performative.decode/2` and `encode/2` validate the Open, Begin, End,
+  and Close composite schemas and return dedicated immutable structs whose
+  present fields remain exact tagged AMQP values, with an optional validated
+  nested Error in End or Close; and
 - immutable limits bound frames, values, compound counts, and nesting.
 
 The performative codec accepts Open's numeric descriptor `0x10` or symbolic
@@ -97,6 +99,22 @@ descriptor `amqp:begin:list`. Open's ordered fields are `container_id`,
 Mandatory fields, exact field types, positional nulls, multiple symbol values,
 symbol-keyed property maps, field counts, and Open's minimum frame size are
 validated without applying Connection or Session transition rules.
+
+End accepts numeric descriptor `0x17` or symbolic descriptor `amqp:end:list`,
+and Close accepts numeric descriptor `0x18` or symbolic descriptor
+`amqp:close:list`. Each has one optional Error field. The nested Error accepts
+numeric descriptor `0x1D` or symbolic descriptor `amqp:error:list`; its three
+positions are mandatory tagged symbol `condition`, optional tagged string
+`description`, and optional ordered symbol-keyed tagged map `info`. Extension
+condition symbols are accepted. Canonical encoding emits numeric descriptors
+and preserves the map entry order and any required interior null.
+
+End and Close remain immutable protocol data. Decoding them does not end a
+Session, close a Connection, dispatch a frame, or affect runtime ownership.
+
+Error is unsupported as a top-level performative. Attach, Flow, Transfer,
+Disposition, Detach, and message sections remain outside the current schema
+codec.
 
 Decoding materializes the specification defaults as tagged values: Open's
 `max_frame_size` is `uint(4_294_967_295)`, Open's `channel_max` is

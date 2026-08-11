@@ -240,3 +240,29 @@ No module or test should imply that these capabilities work or that the
 bounded value and Open/Begin schema subset is complete AMQP compatibility. Any
 next performative codec slice requires separate design and review and remains
 pure, bounded, and independent of protocol processes and transport.
+
+## Post-Milestone-1 End/Close codec slice
+
+The first post-Milestone-1 slice adds End with numeric descriptor `0x17` and
+symbolic descriptor `amqp:end:list`, plus Close with numeric descriptor `0x18`
+and symbolic descriptor `amqp:close:list`. Each outer composite is a one-field
+schema containing one optional Error value.
+
+Error is nested protocol data with numeric descriptor `0x1D` and symbolic
+descriptor `amqp:error:list`. Its three-field positional schema contains a
+mandatory exact tagged symbol `condition`, an optional exact tagged string
+`description`, and an optional exact tagged ordered map `info`. Every `info`
+key must be a tagged symbol, while its tagged values remain within the existing
+bounded Value subset. Entry order is retained. Condition symbols are not
+whitelisted, so extension conditions are accepted.
+
+Decoding accepts the numeric and symbolic descriptors for End, Close, and the
+nested Error. Canonical encoding emits their numeric descriptors, preserves an
+interior null description when `info` is present, and omits trailing nulls. The
+bounded Value subset is unchanged.
+
+Error remains unsupported as a top-level performative. Decoding End or Close
+does not end a Session, close a Connection, dispatch a frame, or execute any
+protocol transition. Attach, Flow, Transfer, Disposition, Detach, message
+sections, protocol and SASL negotiation, transport, runtime processes, queue
+behavior, storage, recovery, and clustering remain unimplemented.

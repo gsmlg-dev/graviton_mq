@@ -5,7 +5,10 @@ defmodule GravitonMQ.AMQP10.Codec.PerformativeContractTest do
   alias GravitonMQ.AMQP10.Codec.Limits
   alias GravitonMQ.AMQP10.Codec.Performative
   alias GravitonMQ.AMQP10.Codec.Value
+  alias GravitonMQ.AMQP10.Error, as: ProtocolError
   alias GravitonMQ.AMQP10.Performative.Begin
+  alias GravitonMQ.AMQP10.Performative.Close
+  alias GravitonMQ.AMQP10.Performative.End
   alias GravitonMQ.AMQP10.Performative.Open
   alias GravitonMQ.AMQP10.Value, as: AMQPValue
 
@@ -51,6 +54,19 @@ defmodule GravitonMQ.AMQP10.Codec.PerformativeContractTest do
 
     assert %{__struct__: ^module} = begin_performative
     assert Map.from_struct(begin_performative) == fields
+  end
+
+  test "End and Close retain an optional typed protocol error" do
+    error = %ProtocolError{
+      condition: AMQPValue.symbol("vendor:condition"),
+      description: AMQPValue.string("diagnostic"),
+      info: AMQPValue.map([{AMQPValue.symbol("code"), AMQPValue.uint(7)}])
+    }
+
+    assert %End{error: ^error} = %End{error: error}
+    assert %Close{error: ^error} = %Close{error: error}
+    assert %End{error: nil} = %End{}
+    assert %Close{error: nil} = %Close{}
   end
 
   test "structured errors identify the performative schema boundary" do

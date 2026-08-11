@@ -59,11 +59,12 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
   every signed and unsigned integer type, are distinct values. Compact wire
   constructors such as `smalluint` are encoder choices, not semantic value
   types.
-- The bounded performative codec supports only Open and Begin. Decode their
-  standard numeric and symbolic descriptors into dedicated immutable structs;
-  encode the standard numeric descriptors. Keep every present field as an
-  exact tagged AMQP value and use `nil` only for absent or explicitly null
-  optional fields.
+- The bounded performative codec supports Open, Begin, End, and Close. Decode
+  their standard numeric and symbolic descriptors into dedicated immutable
+  structs and encode the standard numeric descriptors. End and Close carry
+  only an optional nested `GravitonMQ.AMQP10.Error`; Error is protocol data, not
+  a top-level performative, and its condition, description, and info fields
+  retain exact tagged AMQP values.
 - Open fields are `container_id`, `hostname`, `max_frame_size`, `channel_max`,
   `idle_time_out`, `outgoing_locales`, `incoming_locales`,
   `offered_capabilities`, `desired_capabilities`, and `properties`. Begin
@@ -75,6 +76,12 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
   `uint(4_294_967_295)` and `ushort(65_535)`, and Begin's `handle_max` default
   as tagged `uint(4_294_967_295)`. Canonical encoding may remove trailing nulls
   but must preserve interior positional holes.
+- End and Close each have one optional `error` field. A nested Error has
+  mandatory tagged `symbol` condition, optional tagged `string` description,
+  and optional ordered tagged `map` info with symbol keys. Accept numeric and
+  symbolic Error descriptors only in that nested position; encode the numeric
+  descriptor. Do not whitelist error-condition symbols or widen the bounded
+  value subset for Error info.
 - Keep frame and authoritative message content opaque. Frame decoding must not
   invoke performative or message decoding implicitly. Malformed, unsupported,
   limit-exceeded, invalid-value, and incomplete results remain explicit; do
@@ -133,15 +140,16 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
 
 ## Current milestone exclusions
 
-Milestone 1 is limited to process-free raw AMQP 1.0 header recognition, frame
-envelope validation, the documented bounded value subset, and the Open/Begin
-schema codec above. Do not extend it to protocol or SASL negotiation, other
-performative schemas, message-section parsing, Connection/Session/Link
-behavior, Flow, Transfer, Disposition, queue transitions or scheduling,
-publisher or consumer delivery, TCP/TLS/WebSocket, filesystem
-WAL/segments/fsync/recovery, Raft, clustering, Phoenix, management APIs or UI,
-MQTT, or AMQP 0-9-1. Do not add Phoenix, Ra, Khepri, Ranch, Bandit, or
-speculative runtime dependencies. Do not claim full AMQP 1.0 compatibility.
+The approved post-Milestone-1 End/Close codec slice extends the process-free
+codec only with the End and Close performative schemas and their nested Error
+composite. Milestone 1 remains the completed Open/Begin foundation. Do not
+extend the current slice to other performative schemas, message-section
+parsing, protocol or SASL negotiation, Connection/Session/Link behavior, Flow,
+Transfer, Disposition, queue transitions or scheduling, publisher or consumer
+delivery, TCP/TLS/WebSocket, filesystem WAL/segments/fsync/recovery, Raft,
+clustering, Phoenix, management APIs or UI, MQTT, or AMQP 0-9-1. Do not add
+Phoenix, Ra, Khepri, Ranch, Bandit, or speculative runtime dependencies. Do not
+claim full AMQP 1.0 compatibility.
 
 ## Required verification
 

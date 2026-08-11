@@ -16,6 +16,8 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
     GravitonMQ.AMQP10.Performative,
     GravitonMQ.AMQP10.Performative.Open,
     GravitonMQ.AMQP10.Performative.Begin,
+    GravitonMQ.AMQP10.Performative.End,
+    GravitonMQ.AMQP10.Performative.Close,
     GravitonMQ.AMQP10.Message,
     GravitonMQ.AMQP10.ConnectionState,
     GravitonMQ.AMQP10.SessionState,
@@ -33,7 +35,7 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
     end)
   end
 
-  test "Milestone 1 exposes only the bounded codec foundation" do
+  test "current bounded codec foundation modules load" do
     for module <- [
           GravitonMQ.AMQP10.Codec.ProtocolHeader,
           GravitonMQ.AMQP10.Codec.Frame,
@@ -41,6 +43,8 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
           GravitonMQ.AMQP10.Codec.Performative,
           GravitonMQ.AMQP10.Performative.Open,
           GravitonMQ.AMQP10.Performative.Begin,
+          GravitonMQ.AMQP10.Performative.End,
+          GravitonMQ.AMQP10.Performative.Close,
           GravitonMQ.AMQP10.Performative
         ] do
       assert Code.ensure_loaded?(module)
@@ -61,7 +65,9 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
     for module <- [
           GravitonMQ.AMQP10.Codec.Performative,
           GravitonMQ.AMQP10.Performative.Open,
-          GravitonMQ.AMQP10.Performative.Begin
+          GravitonMQ.AMQP10.Performative.Begin,
+          GravitonMQ.AMQP10.Performative.End,
+          GravitonMQ.AMQP10.Performative.Close
         ] do
       refute function_exported?(module, :start_link, 1)
       refute function_exported?(module, :child_spec, 1)
