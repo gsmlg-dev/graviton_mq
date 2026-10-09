@@ -25,7 +25,7 @@ to the public composition root:
 | --- | --- |
 | `graviton_mq_core` | Protocol-independent broker types, logical queue events, outcomes, durable identities, and the storage behaviour |
 | `graviton_mq_storage` | Physical storage records and future concrete implementations of the core storage contract |
-| `graviton_mq_amqp10` | Exact AMQP 1.0 values, bounded pure value and Open/Begin/End/Close schema codecs, nested Error protocol data, and declarative protocol-facing state |
+| `graviton_mq_amqp10` | Exact AMQP 1.0 values, bounded pure value and Open/Begin/Detach/End/Close schema codecs, nested Error protocol data, and declarative protocol-facing state |
 | `graviton_mq_runtime` | OTP composition and future effect execution across the lower layers |
 | `graviton_mq` | Public lifecycle, configuration, architecture tooling, and the product Application callback |
 
@@ -79,13 +79,13 @@ foundation:
   version 1.0.0, and does not negotiate;
 - `Codec.Frame.decode/2` validates one AMQP frame envelope while preserving
   its extended header, body, and trailing input exactly;
-- `Codec.Value.decode/2` and `encode/2` support `null`, `ushort`, `uint`,
-  `ulong`, `string`, `symbol`, `list`, ordered `map`, symbol arrays, and
+- `Codec.Value.decode/2` and `encode/2` support `null`, `boolean`, `ushort`,
+  `uint`, `ulong`, `string`, `symbol`, `list`, ordered `map`, symbol arrays, and
   described values recursively composed from that subset;
-- `Codec.Performative.decode/2` and `encode/2` validate the Open, Begin, End,
-  and Close composite schemas and return dedicated immutable structs whose
+- `Codec.Performative.decode/2` and `encode/2` validate the Open, Begin, Detach,
+  End, and Close composite schemas and return dedicated immutable structs whose
   present fields remain exact tagged AMQP values, with an optional validated
-  nested Error in End or Close; and
+  nested Error in Detach, End, or Close; and
 - immutable limits bound frames, values, compound counts, and nesting.
 
 The performative codec accepts Open's numeric descriptor `0x10` or symbolic
@@ -112,14 +112,29 @@ and preserves the map entry order and any required interior null.
 End and Close remain immutable protocol data. Decoding them does not end a
 Session, close a Connection, dispatch a frame, or affect runtime ownership.
 
+Detach accepts numeric descriptor `0x16` or symbolic descriptor
+`amqp:detach:list`. Its positions are required tagged `uint` `handle`, tagged
+Boolean `closed` defaulting to false, and optional Error. Canonical encoding
+omits the false default while preserving a null hole when Error is present.
+Shared Error validation reports Detach's outer Error field at index `2`,
+preserving End/Close's index `0` and the nested Error's own indexes. Decoding
+Detach does not interpret a handle in Session state or detach a live Link.
+
+Boolean scalar constructors normalize to the existing tagged Boolean type.
+Encoding uses compact `0x41` and `0x42`; `0x56` accepts only payload `0` or `1`.
+The shared Boolean subset includes recursive lists, maps, described values,
+Open/Begin properties, and nested Error info. Schema map keys remain symbols,
+arrays remain symbol-only, and descriptor types remain `ulong` or `symbol`.
+
 Error is unsupported as a top-level performative. Attach, Flow, Transfer,
-Disposition, Detach, and message sections remain outside the current schema
+Disposition and message sections remain outside the current schema
 codec.
 
 Decoding materializes the specification defaults as tagged values: Open's
 `max_frame_size` is `uint(4_294_967_295)`, Open's `channel_max` is
-`ushort(65_535)`, and Begin's `handle_max` is `uint(4_294_967_295)`. Canonical
-encoding uses the numeric descriptors, inserts nulls only for required
+`ushort(65_535)`, Begin's `handle_max` is `uint(4_294_967_295)`, and Detach's
+`closed` is tagged Boolean false. Canonical encoding uses the numeric
+descriptors, inserts nulls only for required
 positional holes, and trims trailing nulls. Incomplete prefixes return a
 positive byte requirement, while malformed, unsupported, limit-exceeded, and
 invalid-value cases return structured error data. Unknown described values

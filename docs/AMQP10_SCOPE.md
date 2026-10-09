@@ -8,6 +8,9 @@ small semantic-value subset plus schema validation for only the Open and Begin
 performatives. It does not claim complete protocol compatibility, parse AMQP
 messages, negotiate a protocol, or own a listener.
 
+Subsequent bounded slices add End, Close, nested Error, Boolean scalar wire
+support, and Detach. These extend only the pure codec surface.
+
 AMQP 0-9-1 is outside the product foundation. In particular,
 `exchange.declare`, `queue.bind`, `basic.publish`, `basic.consume`, and AMQP
 0-9-1 channels do not define the GravitonMQ protocol model. RabbitMQ is used
@@ -177,16 +180,16 @@ semantic types from invalid values. Frame size, value size, compound count,
 and nesting limits are immutable caller data rather than negotiated or
 process-owned state.
 
-The semantic subset is exactly `null`, `ushort`, `uint`, `ulong`, `string`,
-`symbol`, `list`, ordered `map`, symbol arrays, and recursively composed
-described values with `ulong` or `symbol` descriptors. Signed integers,
-booleans, binary, floating and decimal values, timestamps, UUIDs, general
+The current semantic subset is exactly `null`, `boolean`, `ushort`, `uint`,
+`ulong`, `string`, `symbol`, `list`, ordered `map`, symbol arrays, and recursively
+composed described values with `ulong` or `symbol` descriptors. Signed integers,
+binary, floating and decimal values, timestamps, UUIDs, general
 arrays, and the rest of the full AMQP type system return explicit unsupported
 errors at this boundary even though the Milestone 0 algebra can represent
 them.
 
-The performative facade recognizes the numeric and symbolic descriptors for
-Open (`0x10` and `amqp:open:list`) and Begin (`0x11` and
+The Milestone 1 performative facade recognizes the numeric and symbolic
+descriptors for Open (`0x10` and `amqp:open:list`) and Begin (`0x11` and
 `amqp:begin:list`). Open's ten positions are `container_id`, `hostname`,
 `max_frame_size`, `channel_max`, `idle_time_out`, `outgoing_locales`,
 `incoming_locales`, `offered_capabilities`, `desired_capabilities`, and
@@ -259,10 +262,40 @@ whitelisted, so extension conditions are accepted.
 Decoding accepts the numeric and symbolic descriptors for End, Close, and the
 nested Error. Canonical encoding emits their numeric descriptors, preserves an
 interior null description when `info` is present, and omits trailing nulls. The
-bounded Value subset is unchanged.
+bounded Value subset was unchanged by this first extension.
 
 Error remains unsupported as a top-level performative. Decoding End or Close
 does not end a Session, close a Connection, dispatch a frame, or execute any
-protocol transition. Attach, Flow, Transfer, Disposition, Detach, message
+protocol transition. Attach, Flow, Transfer, Disposition, message
 sections, protocol and SASL negotiation, transport, runtime processes, queue
 behavior, storage, recovery, and clustering remain unimplemented.
+
+## Post-Milestone-1 Boolean/Detach codec slice
+
+The next slice adds Boolean to the shared bounded Value subset. Constructors
+`0x41` and `0x42` decode as tagged true and false; `0x56` consumes one payload
+octet, accepting only `0` or `1`. Other payload octets are malformed; a missing
+payload is incomplete. Canonical scalar encoding uses `0x41` or `0x42`.
+
+Boolean values are accepted recursively in lists, ordered maps, and described
+values, including Open/Begin properties and Error info in Detach, End, and
+Close. Symbol-key restrictions remain in those schema maps. Arrays remain
+symbol-only, and only tagged `ulong` or `symbol` can be descriptors. No other
+primitive wire type is added.
+
+Detach has numeric descriptor `0x16` and symbolic descriptor
+`amqp:detach:list`. Its three positions are mandatory tagged `uint` `handle`,
+optional tagged Boolean `closed` with default false, and optional nested Error.
+The decoder materializes absent or null `closed` as tagged Boolean false.
+Canonical encoding emits the numeric descriptor, omits the false default and
+trailing nulls, and preserves the interior `closed` null when Error is present.
+
+Detach reuses the existing Error composite. Outer Error diagnostics use field
+index `2` for Detach and `0` for End/Close; condition, description, and info keep
+their own internal indexes. Top-level Error remains unsupported. Schema and
+value errors, every incomplete prefix, remainders, and existing limits retain
+their established behavior.
+
+Detach is immutable protocol data. Its codec does not interpret Session-local
+handles, detach a Link, dispatch a frame, or change runtime ownership. The
+remaining exclusions above continue to apply.

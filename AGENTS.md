@@ -59,10 +59,10 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
   every signed and unsigned integer type, are distinct values. Compact wire
   constructors such as `smalluint` are encoder choices, not semantic value
   types.
-- The bounded performative codec supports Open, Begin, End, and Close. Decode
-  their standard numeric and symbolic descriptors into dedicated immutable
-  structs and encode the standard numeric descriptors. End and Close carry
-  only an optional nested `GravitonMQ.AMQP10.Error`; Error is protocol data, not
+- The bounded performative codec supports Open, Begin, Detach, End, and Close.
+  Decode their standard numeric and symbolic descriptors into dedicated
+  immutable structs and encode the standard numeric descriptors. Detach, End, and Close
+  carry an optional nested `GravitonMQ.AMQP10.Error`; Error is protocol data, not
   a top-level performative, and its condition, description, and info fields
   retain exact tagged AMQP values.
 - Open fields are `container_id`, `hostname`, `max_frame_size`, `channel_max`,
@@ -79,9 +79,19 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
 - End and Close each have one optional `error` field. A nested Error has
   mandatory tagged `symbol` condition, optional tagged `string` description,
   and optional ordered tagged `map` info with symbol keys. Accept numeric and
-  symbolic Error descriptors only in that nested position; encode the numeric
-  descriptor. Do not whitelist error-condition symbols or widen the bounded
-  value subset for Error info.
+  symbolic Error descriptors only in a nested Error position; encode the
+  numeric descriptor. Do not whitelist error-condition symbols. Error info uses the
+  shared bounded value subset, including the approved Boolean scalar support.
+- Detach fields are `handle`, `closed`, and `error`. Require an exact tagged
+  `uint` handle, materialize omitted/null `closed` as tagged Boolean false,
+  and retain the optional nested Error at outer field index `2`. End/Close
+  keep Error at index `0`; Error's internal indexes remain `0`, `1`, and `2`.
+  Canonical encoding may omit the false default while preserving its interior
+  null when Error is present. Do not interpret handles or detach live Links.
+- Boolean values decode from `0x41`, `0x42`, and `0x56` with payload `0` or `1`;
+  reject other payload octets as malformed and encode canonically with `0x41`
+  or `0x42`. Boolean joins the shared bounded subset recursively, including
+  Open/Begin properties and Error info. Arrays remain symbol-only.
 - Keep frame and authoritative message content opaque. Frame decoding must not
   invoke performative or message decoding implicitly. Malformed, unsupported,
   limit-exceeded, invalid-value, and incomplete results remain explicit; do
@@ -140,9 +150,11 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
 
 ## Current milestone exclusions
 
-The approved post-Milestone-1 End/Close codec slice extends the process-free
-codec only with the End and Close performative schemas and their nested Error
-composite. Milestone 1 remains the completed Open/Begin foundation. Do not
+The approved post-Milestone-1 Boolean/Detach codec slice extends the completed
+End/Close/Error codec with Boolean scalar wire values and only the Detach
+performative schema. Its scope is recorded in
+`docs/superpowers/specs/2026-10-09-boolean-detach-codec-design.md`.
+Milestone 1 remains the completed Open/Begin foundation. Do not
 extend the current slice to other performative schemas, message-section
 parsing, protocol or SASL negotiation, Connection/Session/Link behavior, Flow,
 Transfer, Disposition, queue transitions or scheduling, publisher or consumer

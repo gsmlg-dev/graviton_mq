@@ -76,12 +76,28 @@ This completed slice provides:
 - Do not add protocol transitions, other performatives, message sections,
   transport, queues, or storage.
 
+## Post-Milestone-1: Boolean and Detach codec slice
+
+This completed slice provides:
+
+- Decode all three Boolean constructors into the existing exact tagged type,
+  reject undefined payload octets, and encode with compact constructors.
+- Extend the shared bounded subset recursively, including Open/Begin properties
+  and End/Close/Detach Error info, while keeping arrays symbol-only.
+- Encode and decode Detach's required `uint` handle, defaulted Boolean `closed`,
+  and optional nested Error with its correct outer field index.
+- Preserve canonical numeric descriptors, positional nulls, explicit errors,
+  incomplete prefixes, exact remainders, limits, and opaque frame bodies.
+- Keep protocol transitions, other schemas, transport, queues, and storage out
+  of this slice.
+
 ## Later milestones
 
 Later work should proceed in independently verifiable increments:
 
 1. Complete the remaining required AMQP performative and message-section codec
-   surface in separately bounded slices.
+   surface in separately bounded slices. Flow is the recommended next schema,
+   followed by Attach with its Source/Target composites.
 2. Add pure Connection and Session transition models, keeping Link state owned
    by Session state.
 3. Define a minimal protocol-independent queue machine using commands, logical

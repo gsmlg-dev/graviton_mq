@@ -3,7 +3,7 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   Pure schema codec for the bounded AMQP 1.0 performative surface.
 
   Binary constructor work is delegated to `GravitonMQ.AMQP10.Codec.Value`.
-  Open, Begin, End, and Close are encoded and decoded as immutable protocol
+  Open, Begin, Detach, End, and Close are encoded and decoded as immutable protocol
   data with validated ordered fields, without performing protocol transitions.
   """
 
@@ -14,6 +14,7 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   alias GravitonMQ.AMQP10.Error, as: ProtocolError
   alias GravitonMQ.AMQP10.Performative.Begin
   alias GravitonMQ.AMQP10.Performative.Close
+  alias GravitonMQ.AMQP10.Performative.Detach
   alias GravitonMQ.AMQP10.Performative.End
   alias GravitonMQ.AMQP10.Performative.Open
   alias GravitonMQ.AMQP10.Value, as: AMQPValue
@@ -27,6 +28,10 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   @begin_descriptor 0x11
   @begin_symbol "amqp:begin:list"
   @begin_field_count 8
+
+  @detach_descriptor 0x16
+  @detach_symbol "amqp:detach:list"
+  @detach_field_count 3
 
   @end_descriptor 0x17
   @end_symbol "amqp:end:list"
@@ -47,9 +52,10 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
             when is_nil(value) or
                    (is_struct(value, AMQPValue) and value.type == :null and is_nil(value.value))
 
-  @spec decode(binary()) :: Codec.decode_result(Open.t() | Begin.t() | End.t() | Close.t())
+  @spec decode(binary()) ::
+          Codec.decode_result(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t())
   @spec decode(binary(), Limits.t()) ::
-          Codec.decode_result(Open.t() | Begin.t() | End.t() | Close.t())
+          Codec.decode_result(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t())
   def decode(input, limits \\ Limits.default())
 
   def decode(input, limits) when is_binary(input) do
@@ -71,8 +77,8 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   def decode(_input, _limits),
     do: schema_error(:performative_decode, :invalid_value, :invalid_performative)
 
-  @spec encode(Open.t() | Begin.t() | End.t() | Close.t()) :: Codec.encode_result()
-  @spec encode(Open.t() | Begin.t() | End.t() | Close.t(), Limits.t()) ::
+  @spec encode(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t()) :: Codec.encode_result()
+  @spec encode(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t(), Limits.t()) ::
           Codec.encode_result()
   def encode(performative, limits \\ Limits.default())
 
@@ -98,11 +104,29 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
     end
   end
 
+  def encode(%Detach{} = detach, limits) do
+    with {:ok, normalized} <-
+           validate_detach_fields(
+             [detach.handle, detach.closed, detach.error],
+             :performative_encode,
+             :invalid_value
+           ),
+         {:ok, error_value} <-
+           nested_error_value(detach.error, :detach, 2, :performative_encode, :invalid_value) do
+      encode_fields(
+        [normalized.handle, omit_default(normalized.closed, :boolean, false), error_value],
+        @detach_descriptor,
+        limits
+      )
+    end
+  end
+
   def encode(%End{} = end_performative, limits) do
     with {:ok, error_value} <-
-           termination_error_value(
+           nested_error_value(
              end_performative.error,
              :end,
+             0,
              :performative_encode,
              :invalid_value
            ) do
@@ -112,9 +136,10 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
 
   def encode(%Close{} = close_performative, limits) do
     with {:ok, error_value} <-
-           termination_error_value(
+           nested_error_value(
              close_performative.error,
              :close,
+             0,
              :performative_encode,
              :invalid_value
            ) do
@@ -132,6 +157,7 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
     case descriptor_name(descriptor) do
       :open -> decode_body(:open, body)
       :begin -> decode_body(:begin, body)
+      :detach -> decode_body(:detach, body)
       :end -> decode_body(:end, body)
       :close -> decode_body(:close, body)
       :unknown -> unknown_descriptor(descriptor)
@@ -147,13 +173,20 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   defp decode_body(:begin, %AMQPValue{type: :list, value: fields}) when is_list(fields),
     do: validate_begin(fields, :performative_decode, :malformed)
 
+  defp decode_body(:detach, %AMQPValue{type: :list, value: fields}) when is_list(fields) do
+    with {:ok, detach} <- validate_detach_fields(fields, :performative_decode, :malformed),
+         {:ok, error} <- nested_error_field(fields, :detach, 2, :performative_decode, :malformed) do
+      {:ok, %{detach | error: error}}
+    end
+  end
+
   defp decode_body(:end, %AMQPValue{type: :list, value: fields}) when is_list(fields),
     do: validate_end(fields, :performative_decode, :malformed)
 
   defp decode_body(:close, %AMQPValue{type: :list, value: fields}) when is_list(fields),
     do: validate_close(fields, :performative_decode, :malformed)
 
-  defp decode_body(name, body) when name in [:end, :close] do
+  defp decode_body(name, body) when name in [:detach, :end, :close] do
     outer_schema_error(name, :performative_decode, :malformed, :invalid_performative_body,
       expected: :list,
       actual: semantic_type(body)
@@ -167,6 +200,8 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   defp descriptor_name(%AMQPValue{type: :symbol, value: @open_symbol}), do: :open
   defp descriptor_name(%AMQPValue{type: :ulong, value: @begin_descriptor}), do: :begin
   defp descriptor_name(%AMQPValue{type: :symbol, value: @begin_symbol}), do: :begin
+  defp descriptor_name(%AMQPValue{type: :ulong, value: @detach_descriptor}), do: :detach
+  defp descriptor_name(%AMQPValue{type: :symbol, value: @detach_symbol}), do: :detach
   defp descriptor_name(%AMQPValue{type: :ulong, value: @end_descriptor}), do: :end
   defp descriptor_name(%AMQPValue{type: :symbol, value: @end_symbol}), do: :end
   defp descriptor_name(%AMQPValue{type: :ulong, value: @close_descriptor}), do: :close
@@ -265,60 +300,87 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
     end
   end
 
+  defp validate_detach_fields(fields, operation, class) do
+    result =
+      with :ok <-
+             validate_outer_field_count(fields, @detach_field_count, :detach, operation, class),
+           {:ok, handle} <- required_field(fields, 0, :handle, :uint, operation, class),
+           {:ok, closed} <-
+             default_field(
+               fields,
+               1,
+               :closed,
+               :boolean,
+               AMQPValue.boolean(false),
+               operation,
+               class
+             ) do
+        {:ok, %Detach{handle: handle, closed: closed}}
+      end
+
+    case result do
+      {:ok, _detach} = success ->
+        success
+
+      {:error, %Error{} = error} ->
+        {:error, %{error | details: Map.put(error.details, :performative, :detach)}}
+    end
+  end
+
   defp validate_end(fields, operation, class) do
     with :ok <-
-           validate_termination_field_count(fields, @end_field_count, :end, operation, class),
-         {:ok, error} <- termination_error_field(fields, :end, operation, class) do
+           validate_outer_field_count(fields, @end_field_count, :end, operation, class),
+         {:ok, error} <- nested_error_field(fields, :end, 0, operation, class) do
       {:ok, %End{error: error}}
     end
   end
 
   defp validate_close(fields, operation, class) do
     with :ok <-
-           validate_termination_field_count(
+           validate_outer_field_count(
              fields,
              @close_field_count,
              :close,
              operation,
              class
            ),
-         {:ok, error} <- termination_error_field(fields, :close, operation, class) do
+         {:ok, error} <- nested_error_field(fields, :close, 0, operation, class) do
       {:ok, %Close{error: error}}
     end
   end
 
-  defp validate_termination_field_count(fields, maximum, _performative, _operation, _class)
+  defp validate_outer_field_count(fields, maximum, _performative, _operation, _class)
        when length(fields) <= maximum,
        do: :ok
 
-  defp validate_termination_field_count(fields, maximum, performative, operation, class) do
+  defp validate_outer_field_count(fields, maximum, performative, operation, class) do
     outer_schema_error(performative, operation, class, :too_many_fields,
       actual: length(fields),
       maximum: maximum
     )
   end
 
-  defp termination_error_field(fields, performative, operation, class) do
-    case Enum.at(fields, 0) do
+  defp nested_error_field(fields, performative, index, operation, class) do
+    case Enum.at(fields, index) do
       value when absent?(value) ->
         {:ok, nil}
 
       %AMQPValue{type: :described} = value ->
-        decode_protocol_error(value, performative, operation, class)
+        decode_protocol_error(value, performative, index, operation, class)
 
       value ->
         outer_schema_error(performative, operation, class, :field_type_mismatch,
           field: :error,
-          index: 0,
+          index: index,
           expected: :error,
           actual: semantic_type(value)
         )
     end
   end
 
-  defp termination_error_value(nil, _performative, _operation, _class), do: {:ok, nil}
+  defp nested_error_value(nil, _performative, _index, _operation, _class), do: {:ok, nil}
 
-  defp termination_error_value(%ProtocolError{} = error, performative, operation, class) do
+  defp nested_error_value(%ProtocolError{} = error, performative, _index, operation, class) do
     fields = [error.condition, error.description, error.info]
 
     with {:ok, validated} <-
@@ -327,10 +389,10 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
     end
   end
 
-  defp termination_error_value(value, performative, operation, class) do
+  defp nested_error_value(value, performative, index, operation, class) do
     outer_schema_error(performative, operation, class, :field_type_mismatch,
       field: :error,
-      index: 0,
+      index: index,
       expected: :error,
       actual: semantic_type(value)
     )
@@ -349,6 +411,7 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
            value: %Described{descriptor: descriptor, value: body}
          },
          performative,
+         index,
          operation,
          class
        ) do
@@ -360,7 +423,7 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
         value ->
           nested_schema_error(performative, operation, class, :invalid_error_body,
             field: :error,
-            index: 0,
+            index: index,
             expected: :list,
             actual: semantic_type(value)
           )
@@ -368,7 +431,7 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
     else
       outer_schema_error(performative, operation, class, :invalid_error_descriptor,
         field: :error,
-        index: 0,
+        index: index,
         expected: :error,
         actual: :described,
         descriptor: descriptor

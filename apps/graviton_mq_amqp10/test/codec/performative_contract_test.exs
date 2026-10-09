@@ -121,7 +121,7 @@ defmodule GravitonMQ.AMQP10.Codec.PerformativeContractTest do
 
     open = %Open{
       container_id: AMQPValue.string("c"),
-      properties: AMQPValue.map([{AMQPValue.symbol("flag"), AMQPValue.boolean(true)}])
+      properties: AMQPValue.map([{AMQPValue.symbol("flag"), AMQPValue.ubyte(1)}])
     }
 
     assert {:error,
@@ -129,7 +129,59 @@ defmodule GravitonMQ.AMQP10.Codec.PerformativeContractTest do
               operation: :value_encode,
               class: :unsupported,
               reason: :semantic_type,
-              details: %{type: :boolean}
+              details: %{type: :ubyte}
             }} = Performative.encode(open)
+  end
+
+  test "Open and Begin properties accept all Boolean constructors with canonical bytes" do
+    suffix = <<0xDE, 0xAD>>
+
+    for {wire, boolean, canonical} <- [
+          {<<0x41>>, true, <<0x41>>},
+          {<<0x42>>, false, <<0x42>>},
+          {<<0x56, 0>>, false, <<0x42>>},
+          {<<0x56, 1>>, true, <<0x41>>}
+        ] do
+      properties = AMQPValue.map([{AMQPValue.symbol("k"), AMQPValue.boolean(boolean)}])
+      property_wire = <<0xC1, 4 + byte_size(wire), 2, 0xA3, 1, "k", wire::binary>>
+      canonical_properties = <<0xC1, 5, 2, 0xA3, 1, "k", canonical::binary>>
+
+      open_prefix = <<0xA1, 1, "c", 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40>>
+      begin_prefix = <<0x40, 0x43, 0x43, 0x43, 0x40, 0x40, 0x40>>
+
+      fixtures = [
+        {0x10, 10, open_prefix,
+         %Open{
+           container_id: AMQPValue.string("c"),
+           max_frame_size: AMQPValue.uint(4_294_967_295),
+           channel_max: AMQPValue.ushort(65_535),
+           properties: properties
+         }},
+        {0x11, 8, begin_prefix,
+         %Begin{
+           next_outgoing_id: AMQPValue.uint(0),
+           incoming_window: AMQPValue.uint(0),
+           outgoing_window: AMQPValue.uint(0),
+           handle_max: AMQPValue.uint(4_294_967_295),
+           properties: properties
+         }}
+      ]
+
+      for {descriptor, count, prefix, expected} <- fixtures do
+        size = 1 + byte_size(prefix) + byte_size(property_wire)
+
+        fixture =
+          <<0x00, 0x53, descriptor, 0xC0, size, count, prefix::binary, property_wire::binary>>
+
+        canonical_size = 1 + byte_size(prefix) + byte_size(canonical_properties)
+
+        canonical_fixture =
+          <<0x00, 0x53, descriptor, 0xC0, canonical_size, count, prefix::binary,
+            canonical_properties::binary>>
+
+        assert {:ok, ^expected, ^suffix} = Performative.decode(fixture <> suffix)
+        assert {:ok, ^canonical_fixture} = Performative.encode(expected)
+      end
+    end
   end
 end

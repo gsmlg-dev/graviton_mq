@@ -16,6 +16,7 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
     GravitonMQ.AMQP10.Performative,
     GravitonMQ.AMQP10.Performative.Open,
     GravitonMQ.AMQP10.Performative.Begin,
+    GravitonMQ.AMQP10.Performative.Detach,
     GravitonMQ.AMQP10.Performative.End,
     GravitonMQ.AMQP10.Performative.Close,
     GravitonMQ.AMQP10.Message,
@@ -43,6 +44,7 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
           GravitonMQ.AMQP10.Codec.Performative,
           GravitonMQ.AMQP10.Performative.Open,
           GravitonMQ.AMQP10.Performative.Begin,
+          GravitonMQ.AMQP10.Performative.Detach,
           GravitonMQ.AMQP10.Performative.End,
           GravitonMQ.AMQP10.Performative.Close,
           GravitonMQ.AMQP10.Performative
@@ -66,6 +68,7 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
           GravitonMQ.AMQP10.Codec.Performative,
           GravitonMQ.AMQP10.Performative.Open,
           GravitonMQ.AMQP10.Performative.Begin,
+          GravitonMQ.AMQP10.Performative.Detach,
           GravitonMQ.AMQP10.Performative.End,
           GravitonMQ.AMQP10.Performative.Close
         ] do

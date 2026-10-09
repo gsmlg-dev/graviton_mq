@@ -124,8 +124,8 @@ defmodule GravitonMQ.AMQP10.Codec.ValueCompoundTest do
   end
 
   test "preserves unsupported nested wire constructors" do
-    assert_error(Value.decode(<<0xC0, 2, 1, 0x41>>), :value_decode, :unsupported, :format_code)
-    assert_error(Value.decode(<<0x41>>), :value_decode, :unsupported, :format_code)
+    assert_error(Value.decode(<<0xC0, 3, 1, 0x50, 1>>), :value_decode, :unsupported, :format_code)
+    assert_error(Value.decode(<<0x50, 1>>), :value_decode, :unsupported, :format_code)
   end
 
   test "canonically encodes independent list and map fixtures" do
@@ -285,10 +285,10 @@ defmodule GravitonMQ.AMQP10.Codec.ValueCompoundTest do
   end
 
   test "preserves unsupported nested semantic types" do
-    nested_boolean = AMQPValue.boolean(true)
+    nested_ubyte = AMQPValue.ubyte(1)
 
     assert_error(
-      Value.encode(AMQPValue.list([nested_boolean])),
+      Value.encode(AMQPValue.list([nested_ubyte])),
       :value_encode,
       :unsupported,
       :semantic_type

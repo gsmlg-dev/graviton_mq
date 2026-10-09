@@ -9,6 +9,9 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
   @supported_format_codes [
     0x00,
     0x40,
+    0x41,
+    0x42,
+    0x56,
     0x60,
     0x43,
     0x52,
@@ -31,6 +34,10 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
 
   @primitive_fixtures [
     {<<0x40>>, AMQPValue.null()},
+    {<<0x41>>, AMQPValue.boolean(true)},
+    {<<0x42>>, AMQPValue.boolean(false)},
+    {<<0x56, 0>>, AMQPValue.boolean(false)},
+    {<<0x56, 1>>, AMQPValue.boolean(true)},
     {<<0x60, 0x12, 0x34>>, AMQPValue.ushort(0x1234)},
     {<<0x43>>, AMQPValue.uint(0)},
     {<<0x52, 0xFF>>, AMQPValue.uint(255)},
@@ -186,7 +193,7 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
   test "rejects unsupported wire format codes with numeric code details" do
     unsupported_codes = Enum.to_list(0..255) -- @supported_format_codes
 
-    assert length(unsupported_codes) == 236
+    assert length(unsupported_codes) == 233
 
     for format_code <- unsupported_codes do
       assert {:error,
@@ -203,7 +210,19 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
   test "rejects unsupported semantic types with type details" do
     unsupported_types =
       AMQPValue.semantic_types() --
-        [:null, :ushort, :uint, :ulong, :string, :symbol, :list, :map, :array, :described]
+        [
+          :null,
+          :boolean,
+          :ushort,
+          :uint,
+          :ulong,
+          :string,
+          :symbol,
+          :list,
+          :map,
+          :array,
+          :described
+        ]
 
     for type <- unsupported_types do
       value = %AMQPValue{type: type, value: nil}
@@ -245,7 +264,7 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
   defp expected_more(_fixture, 0), do: 1
 
   defp expected_more(<<format_code, _rest::binary>> = fixture, prefix_size)
-       when format_code in [0x40, 0x43, 0x44, 0x52, 0x53, 0x60, 0x70, 0x80] do
+       when format_code in [0x40, 0x41, 0x42, 0x43, 0x44, 0x52, 0x53, 0x56, 0x60, 0x70, 0x80] do
     byte_size(fixture) - prefix_size
   end
 

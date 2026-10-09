@@ -118,6 +118,10 @@ implementation:
   because their schemas require no Value-codec widening and prepare later
   Connection and Session transition design without implementing those
   transitions.
+- Choose Boolean scalar support and Detach as the following small codec slice.
+  Reuse the nested Error schema, preserve exact uint handles and Boolean
+  defaults, and approve Boolean recursively in the shared subset, including
+  properties and Error info. Keep Link behavior outside this schema work.
 - Enforce the process-free codec boundary through compiler references and
   parsed syntax rather than convention alone.
 
@@ -137,6 +141,7 @@ nodes.
 | 0 hardening | AMQP 1.0 semantic requirements, OTP embedding requirements, and broker durability and recovery constraints | Exact protocol value and directional identity models; stable core identities and events; meaningful storage, message-preservation, lifecycle, and source-dependency boundaries |
 | 1 codec foundation | OASIS AMQP 1.0 Part 1 Types and Part 2 Transport | Hand-built header, frame, primitive, and compound fixtures; bounded pure decoding and encoding with explicit incomplete, malformed, unsupported, and limit errors |
 | 1 Open/Begin schemas | OASIS AMQP 1.0 Part 1 composite rules and Part 2 Open and Begin definitions | Dedicated tagged Open and Begin values; numeric and symbolic descriptor recognition; positional, mandatory-field, type, default, and canonical-encoding checks without protocol state or transport |
+| Post-1 Boolean/Detach | OASIS AMQP 1.0 Types section 1.6.2 and Transport sections 2.7.7, 2.8.4, 2.8.13, 2.8.14 | Exact Boolean constructor validation and recursive subset expansion; immutable Detach with tagged uint handle, false default, and shared nested Error, without Link transitions |
 
 Future entries should name the public specification section or documentation
 page consulted, summarize the observation in original words, and record the

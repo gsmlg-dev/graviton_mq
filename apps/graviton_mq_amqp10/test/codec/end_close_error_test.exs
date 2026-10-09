@@ -202,7 +202,7 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
     value = %End{
       error: %ProtocolError{
         condition: AMQPValue.symbol("x"),
-        info: AMQPValue.map([{AMQPValue.symbol("flag"), AMQPValue.boolean(true)}])
+        info: AMQPValue.map([{AMQPValue.symbol("flag"), AMQPValue.ubyte(1)}])
       }
     }
 
@@ -211,8 +211,35 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
               operation: :value_encode,
               class: :unsupported,
               reason: :semantic_type,
-              details: %{type: :boolean}
+              details: %{type: :ubyte}
             }} = Performative.encode(value)
+  end
+
+  test "End and Close Error info accept Boolean values and canonicalize their wire forms" do
+    suffix = <<0xDE, 0xAD>>
+
+    for {wire, boolean, canonical} <- [
+          {<<0x41>>, true, <<0x41>>},
+          {<<0x42>>, false, <<0x42>>},
+          {<<0x56, 0>>, false, <<0x42>>},
+          {<<0x56, 1>>, true, <<0x41>>}
+        ] do
+      info = AMQPValue.map([{AMQPValue.symbol("k"), AMQPValue.boolean(boolean)}])
+      error = %ProtocolError{condition: AMQPValue.symbol("x"), info: info}
+      fields = <<0xA3, 1, "x", 0x40, 0xC1, 4 + byte_size(wire), 2, 0xA3, 1, "k", wire::binary>>
+      canonical_fields = <<0xA3, 1, "x", 0x40, 0xC1, 5, 2, 0xA3, 1, "k", canonical::binary>>
+
+      for {expected, wrap} <- [
+            {%End{error: error}, &end_with_error/1},
+            {%Close{error: error}, &close_with_error/1}
+          ] do
+        fixture = fields |> numeric_error(3) |> wrap.()
+        canonical_fixture = canonical_fields |> numeric_error(3) |> wrap.()
+
+        assert {:ok, ^expected, ^suffix} = Performative.decode(fixture <> suffix)
+        assert {:ok, ^canonical_fixture} = Performative.encode(expected)
+      end
+    end
   end
 
   test "rejects an unknown nested Error descriptor as malformed End data" do
@@ -420,8 +447,8 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
       |> numeric_error(2)
       |> end_with_error()
 
-    unsupported_boolean =
-      <<0xA3, 1, "x", 0x40, 0xC1, 5, 2, 0xA3, 1, "k", 0x41>>
+    unsupported_ubyte =
+      <<0xA3, 1, "x", 0x40, 0xC1, 6, 2, 0xA3, 1, "k", 0x50, 1>>
       |> numeric_error(3)
       |> end_with_error()
 
@@ -440,8 +467,8 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
               class: :unsupported,
               reason: :format_code,
               offset: 0,
-              details: %{format_code: 0x41}
-            }} = Performative.decode(unsupported_boolean)
+              details: %{format_code: 0x50}
+            }} = Performative.decode(unsupported_ubyte)
   end
 
   test "propagates duplicate ordered-map keys from the value decoder" do

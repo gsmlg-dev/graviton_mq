@@ -1,7 +1,7 @@
 defmodule GravitonMQ.AMQP10.Codec.Value do
   @moduledoc """
-  Encodes and decodes the bounded AMQP 1.0 values needed by the initial Open
-  and Begin codec foundation.
+  Encodes and decodes the shared bounded AMQP 1.0 value subset, including
+  Boolean scalars and symbol-only arrays.
 
   Wire constructor widths are normalized into semantic values when decoding.
   Encoding makes the canonical width choice for each supported semantic type.
@@ -14,6 +14,7 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
 
   @supported_semantic_types [
     :null,
+    :boolean,
     :ushort,
     :uint,
     :ulong,
@@ -45,6 +46,25 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
 
   defp decode_value(<<0x40, rest::binary>>, _limits, _depth),
     do: {:ok, AMQPValue.null(), rest}
+
+  defp decode_value(<<0x41, rest::binary>>, _limits, _depth),
+    do: {:ok, AMQPValue.boolean(true), rest}
+
+  defp decode_value(<<0x42, rest::binary>>, _limits, _depth),
+    do: {:ok, AMQPValue.boolean(false), rest}
+
+  defp decode_value(<<0x56>>, _limits, _depth), do: {:more, 1}
+
+  defp decode_value(<<0x56, value, rest::binary>>, _limits, _depth) when value in [0, 1],
+    do: {:ok, AMQPValue.boolean(value == 1), rest}
+
+  defp decode_value(<<0x56, value, _rest::binary>>, _limits, _depth) do
+    {:error,
+     Error.new(:value_decode, :malformed, :invalid_boolean,
+       offset: 1,
+       details: %{value: value}
+     )}
+  end
 
   defp decode_value(<<0x43, rest::binary>>, _limits, _depth),
     do: {:ok, AMQPValue.uint(0), rest}
@@ -306,6 +326,12 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
   end
 
   defp encode_value(%AMQPValue{type: :null, value: nil}, _limits, _depth), do: {:ok, <<0x40>>}
+
+  defp encode_value(%AMQPValue{type: :boolean, value: true}, _limits, _depth),
+    do: {:ok, <<0x41>>}
+
+  defp encode_value(%AMQPValue{type: :boolean, value: false}, _limits, _depth),
+    do: {:ok, <<0x42>>}
 
   defp encode_value(%AMQPValue{type: :ushort, value: value}, _limits, _depth)
        when is_integer(value) and value in 0..65_535,

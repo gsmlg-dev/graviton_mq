@@ -5,7 +5,8 @@ Elixir/OTP. Milestone 0 established exact data identity, process ownership,
 durability contracts, lifecycle composition, and enforceable application
 boundaries. Milestone 1 now provides a deliberately bounded, process-free codec
 foundation. The first post-Milestone-1 codec slice extends that foundation with
-End, Close, and nested Error schema handling.
+End, Close, and nested Error schema handling. The subsequent bounded slice adds
+Boolean scalar wire support and the Detach schema.
 
 RabbitMQ informs architectural study only. GravitonMQ is independently
 implemented and does not copy, translate, transliterate, or mechanically port
@@ -18,10 +19,10 @@ protocol foundation.
 The repository recognizes the raw AMQP 1.0 protocol header, validates AMQP
 frame envelopes without interpreting their bodies, and encodes or decodes a
 small semantic-value subset. A bounded schema codec also encodes and decodes
-Open, Begin, End, and Close as dedicated immutable structs with exact tagged
-AMQP field values. End and Close may contain one validated Error value. The
-codec does not negotiate protocols or SASL, parse message sections, open a
-listener, execute Connection/Session/Link behavior, transition a queue, accept
+Open, Begin, Detach, End, and Close as dedicated immutable structs with exact
+tagged AMQP field values. Detach, End, and Close may contain one validated Error
+value. The codec does not negotiate protocols or SASL, parse message sections,
+open a listener, execute Connection/Session/Link behavior, transition a queue, accept
 a publisher delivery, deliver to a consumer, persist data, or recover a log.
 
 No module should be read as claiming those features are operational.
@@ -111,42 +112,51 @@ GravitonMQ.AMQP10.Codec.Frame.decode(bytes, limits)
 GravitonMQ.AMQP10.Codec.Value.decode(bytes, limits)
 GravitonMQ.AMQP10.Codec.Value.encode(value, limits)
 GravitonMQ.AMQP10.Codec.Performative.decode(bytes, limits)
-GravitonMQ.AMQP10.Codec.Performative.encode(open_or_begin_or_end_or_close, limits)
+GravitonMQ.AMQP10.Codec.Performative.encode(performative, limits)
 ```
 
 Decode operations return `{:ok, value, rest}`, `{:more, n}`, or a structured
 `Codec.Error`; encode returns `{:ok, bytes}` or a structured error. The
-supported semantic subset is `null`, `ushort`, `uint`, `ulong`, `string`,
-`symbol`, `list`, ordered `map`, symbol arrays, and described values composed
-from that subset with `ulong` or `symbol` descriptors.
+supported semantic subset is `null`, `boolean`, `ushort`, `uint`, `ulong`,
+`string`, `symbol`, `list`, ordered `map`, symbol arrays, and described values
+composed from that subset with `ulong` or `symbol` descriptors.
 
 `Codec.Performative` recognizes the standard numeric and symbolic descriptors
 for Open (`0x10` and `amqp:open:list`), Begin (`0x11` and
-`amqp:begin:list`), End (`0x17` and `amqp:end:list`), and Close (`0x18` and
-`amqp:close:list`). It validates the specification's positional fields and
-exact tagged types. Open names `container_id`, `hostname`, `max_frame_size`,
+`amqp:begin:list`), Detach (`0x16` and `amqp:detach:list`), End (`0x17` and
+`amqp:end:list`), and Close (`0x18` and `amqp:close:list`). It validates the
+specification's positional fields and exact tagged types. Open names
+`container_id`, `hostname`, `max_frame_size`,
 `channel_max`, `idle_time_out`, `outgoing_locales`, `incoming_locales`,
 `offered_capabilities`, `desired_capabilities`, and `properties`; Begin names
 `remote_channel`, `next_outgoing_id`, `incoming_window`, `outgoing_window`,
 `handle_max`, `offered_capabilities`, `desired_capabilities`, and `properties`.
-End and Close each have one optional Error field. Multiple symbol fields and
-symbol-keyed property maps retain tagged values.
+Detach fields are mandatory tagged `uint` `handle`, defaulted tagged Boolean
+`closed`, and optional Error. End and Close each have one optional Error field.
+Multiple symbol fields and symbol-keyed property maps retain tagged values.
 
 Error is nested protocol data rather than a top-level performative. Its
 mandatory condition is an exact tagged symbol; its optional description and
 info retain tagged string and ordered symbol-keyed map values from the bounded
 value subset. The codec accepts numeric and symbolic Error descriptors only
-inside End or Close and canonically emits the numeric descriptor.
+inside Detach, End, or Close and canonically emits the numeric descriptor.
+
+Boolean constructors `0x41`, `0x42`, and `0x56` with payload `0` or `1`
+normalize to tagged Boolean values; other `0x56` payload octets are malformed.
+Canonical encoding uses `0x41` and `0x42`. Boolean is supported recursively in
+the shared value subset, including Open/Begin properties and nested Error info.
+Arrays remain symbol-only.
 
 Absent defaults materialize as tagged values: Open uses
 `uint(4_294_967_295)` for `max_frame_size` and `ushort(65_535)` for
-`channel_max`, while Begin uses `uint(4_294_967_295)` for `handle_max`.
+`channel_max`, while Begin uses `uint(4_294_967_295)` for `handle_max` and
+Detach uses tagged Boolean false for `closed`.
 Encoding emits the numeric descriptor, preserves positional nulls required by
 later fields, and omits trailing nulls. Schema failures and unsupported
 descriptors return explicit structured errors; incomplete input continues to
 return `{:more, n}`. Unknown described values remain lossless in the generic
-value codec, but the performative facade accepts only Open, Begin, End, and
-Close, with Error accepted only in its nested field.
+value codec, but the performative facade accepts only Open, Begin, Detach, End,
+and Close, with Error accepted only in its nested field.
 
 Decoding a frame never invokes the performative codec automatically. Frame
 bodies, trailing input, and authoritative encoded message content remain
@@ -334,13 +344,13 @@ CI runs the same substantive checks with Elixir 1.18.4 and OTP 28.5.0.1.
 
 ## Next milestone
 
-The current post-Milestone-1 slice stops after the bounded Open, Begin, End,
-Close, and nested Error schema codec. The recommended next task is a separately
-designed and reviewed pure codec slice for the next required AMQP 1.0
-performative schemas. Attach, Flow, Transfer, Disposition, Detach, and message
-sections remain unimplemented. Any next slice must not add protocol state or
-negotiation, SASL, TCP, OTP protocol processes, queue behavior, storage
-behavior, or a claim of full AMQP compatibility.
+The current post-Milestone-1 slice stops after Boolean wire support and the
+bounded Open, Begin, Detach, End, Close, and nested Error schema codec. The
+recommended next task is a separately designed and reviewed pure Flow codec
+slice, followed by Attach with its Source/Target composites. Attach, Flow,
+Transfer, Disposition, and message sections remain unimplemented. Any next
+slice must not add protocol state or negotiation, SASL, TCP, OTP protocol
+processes, queue behavior, storage behavior, or a claim of full AMQP compatibility.
 
 No project license has been selected. License selection remains an explicit
 project-owner decision.
