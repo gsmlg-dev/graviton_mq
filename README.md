@@ -332,6 +332,44 @@ mix xref graph --format cycles --fail-above 0
 
 CI runs the same substantive checks with Elixir 1.18.4 and OTP 28.5.0.1.
 
+## Releases and Hex packages
+
+`VERSION` is the canonical version for the umbrella and all five child
+applications. The manual **Release** workflow accepts a SemVer `version`
+(without a `v` prefix or build metadata) and a `git_ref` branch, defaulting to
+`main`. Configure the repository or organization secret `HEX_API_KEY` with
+permission to publish all five packages, and allow the workflow token to push
+the release commit and tag to the selected branch.
+
+The workflow updates `VERSION`, checks the source, builds every package, and
+compiles and starts an isolated consumer from the unpacked archives. It then
+publishes `graviton_mq_core`, `graviton_mq_storage`, `graviton_mq_amqp10`,
+`graviton_mq_runtime`, and `graviton_mq` in dependency order. Each package has
+the same version and exact requirements on that version of its internal
+dependencies. Only after every Hex publication succeeds does the workflow
+commit the version, push the commit and `v<version>` tag together, and create
+a GitHub Release containing the five Hex archives. Prerelease versions create
+GitHub prereleases.
+
+Package staging preserves the source umbrella dependency graph while producing
+self-contained Mix projects with registry dependencies, a README, and the MIT
+license. To build and verify packages locally without publishing, choose a
+new staging directory:
+
+```bash
+elixir scripts/stage_hex.exs /tmp/graviton_mq_hex
+elixir scripts/build_hex.exs /tmp/graviton_mq_hex
+```
+
+CI checks formatting, compilation, architecture, and cycles on every branch.
+The Tests workflow runs unit tests and the package archive checks on pushes
+to `main` and pull requests targeting `main`.
+
+Hex publication is sequential and cannot be atomic across packages. A failed
+or cancelled release may have published a subset; inspect Hex before retrying.
+Existing Git tags are rejected, and published package versions are never
+automatically replaced.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
@@ -352,5 +390,4 @@ Transfer, Disposition, and message sections remain unimplemented. Any next
 slice must not add protocol state or negotiation, SASL, TCP, OTP protocol
 processes, queue behavior, storage behavior, or a claim of full AMQP compatibility.
 
-No project license has been selected. License selection remains an explicit
-project-owner decision.
+GravitonMQ is licensed under the [MIT License](LICENSE).

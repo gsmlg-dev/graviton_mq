@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.2.3)"
+        required: true
+        type: string
+      git_ref:
+        description: "Git ref to release from (must be a branch)"
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MIX_ENV: prod
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_REF: ${{ inputs.git_ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Validate release prerequisites
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          test -n "$HEX_API_KEY" || { echo "HEX_API_KEY must be configured" >&2; exit 1; }
+          git check-ref-format "refs/heads/$RELEASE_REF"
+          remote_sha=$(git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_REF" | cut -f1)
+          test "$remote_sha" = "$(git rev-parse HEAD)" || { echo "git_ref must name the checked-out branch" >&2; exit 1; }
+          elixir scripts/set_version.exs "$RELEASE_VERSION"
+          if git show-ref --verify --quiet "refs/tags/v$RELEASE_VERSION"; then
+            echo "Release tag already exists: v$RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Cache dependencies and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-prod-${{ hashFiles('.tool-versions', '**/mix.exs', 'mix.lock', 'VERSION', 'build/project.exs') }}
+
+      - name: Validate release source
+        run: |
+          mix deps.get
+          mix format --check-formatted
+          mix compile --warnings-as-errors
+          MIX_ENV=test mix test
+          mix graviton_mq.check_architecture
+          mix xref graph --format cycles --fail-above 0
+
+      - name: Stage standalone Hex packages
+        run: elixir scripts/stage_hex.exs "$RUNNER_TEMP/graviton_mq_hex"
+
+      - name: Build and verify every archive before publishing
+        run: elixir scripts/build_hex.exs "$RUNNER_TEMP/graviton_mq_hex"
+
+      - name: Publish all packages to Hex in dependency order
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          while IFS= read -r package; do
+            (cd "$RUNNER_TEMP/graviton_mq_hex/$package" && mix hex.publish package --yes)
+          done < "$RUNNER_TEMP/graviton_mq_hex/packages.txt"
+
+      - name: Commit and push synchronized version and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- VERSION
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v$RELEASE_VERSION"
+          fi
+          git tag -a "v$RELEASE_VERSION" -m "Release v$RELEASE_VERSION"
+          git push --atomic origin "HEAD:refs/heads/$RELEASE_REF" "refs/tags/v$RELEASE_VERSION"
+
+      - name: Create GitHub Release with Hex archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_options=()
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            release_options+=(--prerelease)
+          fi
+          gh release create "v$RELEASE_VERSION" \
+            --verify-tag --generate-notes --title "v$RELEASE_VERSION" \
+            "${release_options[@]}" "$RUNNER_TEMP/graviton_mq_hex/artifacts/"*.tar

@@ -6,7 +6,9 @@ defmodule GravitonMQCore.MixProject do
   def project do
     [
       app: :graviton_mq_core,
-      version: "0.1.0",
+      version: GravitonMQ.Build.version(),
+      description: "Protocol-independent data and storage contracts for GravitonMQ",
+      package: GravitonMQ.Build.package(),
       elixir: GravitonMQ.Build.elixir_requirement(),
       build_path: "../../_build",
       config_path: "../../config/config.exs",

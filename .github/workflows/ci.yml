@@ -7,8 +7,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,9 +22,16 @@ jobs:
       - name: Set up Erlang and Elixir
         uses: erlef/setup-beam@v1
         with:
-          otp-version: "28.5.0.1"
-          elixir-version: "1.18.4"
+          version-file: .tool-versions
           version-type: strict
+
+      - name: Cache dependencies and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-dev-${{ hashFiles('.tool-versions', '**/mix.exs', 'mix.lock', 'VERSION', 'build/project.exs') }}
 
       - name: Fetch dependencies
         run: mix deps.get
@@ -30,9 +41,6 @@ jobs:
 
       - name: Compile without warnings
         run: mix compile --warnings-as-errors
-
-      - name: Run tests
-        run: mix test
 
       - name: Check architecture
         run: mix graviton_mq.check_architecture

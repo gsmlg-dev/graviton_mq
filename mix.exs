@@ -6,7 +6,7 @@ defmodule GravitonMQ.Umbrella.MixProject do
   def project do
     [
       apps_path: "apps",
-      version: "0.1.0",
+      version: GravitonMQ.Build.version(),
       elixir: GravitonMQ.Build.elixir_requirement(),
       start_permanent: Mix.env() == :prod,
       deps: []

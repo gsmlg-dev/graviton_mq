@@ -1,0 +1,51 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MIX_ENV: test
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Erlang and Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache dependencies and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-test-${{ hashFiles('.tool-versions', '**/mix.exs', 'mix.lock', 'VERSION', 'build/project.exs') }}
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Run unit tests
+        run: mix test
+
+      - name: Stage standalone Hex packages
+        run: elixir scripts/stage_hex.exs "$RUNNER_TEMP/graviton_mq_hex"
+
+      - name: Build and verify package archives
+        run: elixir scripts/build_hex.exs "$RUNNER_TEMP/graviton_mq_hex"

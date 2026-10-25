@@ -6,7 +6,9 @@ defmodule GravitonMQRuntime.MixProject do
   def project do
     [
       app: :graviton_mq_runtime,
-      version: "0.1.0",
+      version: GravitonMQ.Build.version(),
+      description: "OTP integration and instance supervision for GravitonMQ",
+      package: GravitonMQ.Build.package(),
       elixir: GravitonMQ.Build.elixir_requirement(),
       build_path: "../../_build",
       config_path: "../../config/config.exs",
