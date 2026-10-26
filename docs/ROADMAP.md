@@ -1,12 +1,12 @@
 # Roadmap
 
-The roadmap preserves the separation between AMQP 1.0 protocol work, broker
-semantics, storage, and runtime processes. A milestone must not advertise
+The roadmap preserves the separation between AMQP 1.0 and MQTT protocol work,
+broker semantics, storage, and runtime processes. A milestone must not advertise
 capability until its tests exercise that capability.
 
 ## Milestone 0: repository baseline and architecture hardening
 
-- Create the five-application Mix umbrella and exact dependency graph.
+- Create the original five-application Mix umbrella and exact dependency graph.
 - Establish protocol, core, storage, runtime, and public API boundaries.
 - Represent AMQP values by semantic type, including distinct binary, string,
   symbol, and signed and unsigned integer values, without implementing their
@@ -91,7 +91,38 @@ This completed slice provides:
 - Keep protocol transitions, other schemas, transport, queues, and storage out
   of this slice.
 
-## Later milestones
+## MQTT M0: pure CONNECT/CONNACK codec foundation
+
+The completed, owner-approved M0 slice adds a sixth library application
+depending only on core, with runtime composition and source-enforced protocol isolation. It
+provides the opaque common packet envelope, MQTT 3.1.1/5.0 CONNECT/CONNACK,
+version-specific validation, ordered MQTT 5 properties, configured limits,
+and explicit incomplete/malformed/unsupported/limit/invalid-value results.
+Package qualification includes six archives and separate standalone and
+host-supervised clean consumers. No runtime broker behavior is added.
+
+Qualification on 2026-10-26 passed the complete root verification sequence:
+290 tests, zero failures (76 MQTT tests), warning-free compilation, architecture
+analysis across six applications, and no xref cycles. All six archives and
+both clean consumers passed; see the
+[M0 evidence](superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md#m0-implementation-qualification--2026-10-26).
+
+The [approved MQTT design](superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md)
+separates the later stages:
+
+| Stage | Future deliverable |
+| --- | --- |
+| M1 | Remaining packet schemas and their property/direction validation |
+| M2 | Pure topic/session/routing/retained/Will/expiry semantics and effects |
+| M3 | Embedded MQTT 5 broker, opt-in TCP/TLS, authentication, QoS 0/1, in-memory reconnects |
+| M4 | QoS 2 and operational MQTT 3.1.1 semantics |
+| M5 | Separately designed persistent state, recovery, and durability qualification |
+
+These stages require independent acceptance evidence; codec tests do not
+establish network-client interoperability or a functioning broker. See
+[MQTT scope](MQTT_SCOPE.md) for the exact M0 API and exclusions.
+
+## Later AMQP and shared broker milestones
 
 Later work should proceed in independently verifiable increments:
 
@@ -115,6 +146,6 @@ Later work should proceed in independently verifiable increments:
    are stable.
 9. Add management capabilities outside the message hot path.
 
-TLS, WebSocket transport, clustering, Raft, alternative protocols, and a
+TLS, WebSocket transport, clustering, Raft, other protocol extensions, and a
 management UI are intentionally deferred until their prerequisite semantics
 are demonstrated.

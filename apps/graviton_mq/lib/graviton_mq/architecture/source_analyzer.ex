@@ -11,6 +11,37 @@ defmodule GravitonMQ.Architecture.SourceAnalyzer do
 
   @direct_process_primitives [:spawn, :spawn_link, :spawn_monitor, :send, :receive]
 
+  @mqtt_process_primitives [
+    :spawn_opt,
+    :spawn_request,
+    :self,
+    :exit,
+    :monitor,
+    :demonitor,
+    :link,
+    :unlink,
+    :register,
+    :unregister,
+    :whereis,
+    :process_flag,
+    :process_info,
+    :send_after,
+    :start_timer,
+    :cancel_timer,
+    :read_timer
+  ]
+  @mqtt_clock_primitives [
+    :monotonic_time,
+    :system_time,
+    :time_offset,
+    :timestamp,
+    :now,
+    :date,
+    :time,
+    :localtime,
+    :universaltime
+  ]
+
   @spec references(atom(), binary(), binary()) :: [Reference.t()]
   def references(source_app, source_file, source) do
     ast = Code.string_to_quoted!(source, file: source_file, columns: true)
@@ -18,6 +49,30 @@ defmodule GravitonMQ.Architecture.SourceAnalyzer do
 
     {_ast, references} =
       Macro.prewalk(ast, [], fn
+        {{:., _dot_meta, [:erlang, function]}, call_meta, arguments} = node, references
+        when source_app == :graviton_mq_mqtt and function in @mqtt_clock_primitives and
+               is_list(arguments) ->
+          {node,
+           [
+             reference(source_app, source_module, System, source_file, call_meta[:line])
+             | references
+           ]}
+
+        {{:., _dot_meta, [:erlang, function]}, call_meta, arguments} = node, references
+        when source_app == :graviton_mq_mqtt and function in @mqtt_process_primitives and
+               is_list(arguments) ->
+          {node,
+           [
+             reference(source_app, source_module, Process, source_file, call_meta[:line])
+             | references
+           ]}
+
+        {function, meta, arguments} = node, references
+        when source_app == :graviton_mq_mqtt and function in @mqtt_process_primitives and
+               is_list(arguments) ->
+          {node,
+           [reference(source_app, source_module, Process, source_file, meta[:line]) | references]}
+
         {{:., _dot_meta, [{:__aliases__, _alias_meta, [:Kernel]}, function]}, call_meta,
          arguments} = node,
         references

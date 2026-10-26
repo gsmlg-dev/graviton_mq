@@ -16,6 +16,8 @@ defmodule GravitonMQ.ArchitectureTest do
       ref(:graviton_mq_runtime, Example.Runtime, :graviton_mq_core, GravitonMQ.Core.Message),
       ref(:graviton_mq_runtime, Example.Runtime, :graviton_mq_storage, GravitonMQ.Storage.Record),
       ref(:graviton_mq_runtime, Example.Runtime, :graviton_mq_amqp10, GravitonMQ.AMQP10.Value),
+      ref(:graviton_mq_runtime, Example.Runtime, :graviton_mq_mqtt, GravitonMQ.MQTT.Frame),
+      ref(:graviton_mq_mqtt, Example.MQTT, :graviton_mq_core, GravitonMQ.Core.Outcome),
       ref(:graviton_mq_storage, Example.Storage, :graviton_mq_core, GravitonMQ.Queue.Event),
       ref(:graviton_mq_amqp10, Example.Protocol, :graviton_mq_core, GravitonMQ.Core.Outcome)
     ]
@@ -26,6 +28,7 @@ defmodule GravitonMQ.ArchitectureTest do
   test "a core reference to AMQP, storage, runtime, or composition code is rejected" do
     for {target_app, target_module} <- [
           {:graviton_mq_amqp10, GravitonMQ.AMQP10.Value},
+          {:graviton_mq_mqtt, GravitonMQ.MQTT.Frame},
           {:graviton_mq_storage, GravitonMQ.Storage.Record},
           {:graviton_mq_runtime, GravitonMQ.Runtime.Supervisor},
           {:graviton_mq, GravitonMQ}
@@ -126,6 +129,7 @@ defmodule GravitonMQ.ArchitectureTest do
     assert :graviton_mq_core = Architecture.owner_for_module(GravitonMQ.Queue.Event)
     assert :graviton_mq_storage = Architecture.owner_for_module(GravitonMQ.Storage.Record)
     assert :graviton_mq_amqp10 = Architecture.owner_for_module(GravitonMQ.AMQP10.Value)
+    assert :graviton_mq_mqtt = Architecture.owner_for_module(GravitonMQ.MQTT.Codec.Packet)
     assert :graviton_mq_runtime = Architecture.owner_for_module(GravitonMQ.Runtime.Supervisor)
     assert :graviton_mq = Architecture.owner_for_module(GravitonMQ.Application)
     assert nil == Architecture.owner_for_module(:gen_tcp)
@@ -171,6 +175,75 @@ defmodule GravitonMQ.ArchitectureTest do
 
       assert {:error, violations} = Architecture.check(references)
       assert Enum.any?(violations, &match?({:forbidden_process_dependency, _}, &1))
+    end
+  end
+
+  test "MQTT depends only on core and protocol adapters never reference each other" do
+    for {source_app, source_module, target_app, target_module} <- [
+          {:graviton_mq_mqtt, GravitonMQ.MQTT.Frame, :graviton_mq_amqp10,
+           GravitonMQ.AMQP10.Value},
+          {:graviton_mq_mqtt, GravitonMQ.MQTT.Frame, :graviton_mq_storage,
+           GravitonMQ.Storage.Record},
+          {:graviton_mq_mqtt, GravitonMQ.MQTT.Frame, :graviton_mq_runtime,
+           GravitonMQ.Runtime.Supervisor},
+          {:graviton_mq_mqtt, GravitonMQ.MQTT.Frame, :graviton_mq, GravitonMQ},
+          {:graviton_mq_amqp10, GravitonMQ.AMQP10.Value, :graviton_mq_mqtt,
+           GravitonMQ.MQTT.Frame},
+          {:graviton_mq_storage, GravitonMQ.Storage.Record, :graviton_mq_mqtt,
+           GravitonMQ.MQTT.Frame}
+        ] do
+      assert {:error, [{:forbidden_application_dependency, _}]} =
+               Architecture.check([ref(source_app, source_module, target_app, target_module)])
+    end
+  end
+
+  test "all MQTT modules reject process, transport, and clock dependencies" do
+    for source_module <- [GravitonMQ.MQTT.Frame, GravitonMQ.MQTT.Codec.Packet],
+        {target, violation} <- [
+          {Process, :forbidden_process_dependency},
+          {GenServer, :forbidden_process_dependency},
+          {:gen_statem, :forbidden_process_dependency},
+          {:gen_tcp, :forbidden_transport_dependency},
+          {Ranch.Transport, :forbidden_transport_dependency},
+          {System, :forbidden_clock_dependency},
+          {:timer, :forbidden_clock_dependency},
+          {:os, :forbidden_clock_dependency}
+        ] do
+      assert {:error, [{^violation, _}]} =
+               Architecture.check([ref(:graviton_mq_mqtt, source_module, nil, target)])
+    end
+  end
+
+  test "parsed MQTT syntax catches typespec-only cross-protocol references" do
+    source = """
+    defmodule GravitonMQ.MQTT.Packet.Connect do
+      @type leaked :: GravitonMQ.AMQP10.Value.t()
+    end
+    """
+
+    references = SourceAnalyzer.references(:graviton_mq_mqtt, "lib/connect.ex", source)
+    assert {:error, [{:forbidden_application_dependency, _}]} = Architecture.check(references)
+  end
+
+  test "parsed MQTT syntax catches direct Erlang process and clock primitives" do
+    for {expression, kind} <- [
+          {"spawn(fun)", :forbidden_process_dependency},
+          {":erlang.spawn_opt(fun, [])", :forbidden_process_dependency},
+          {":erlang.send_after(1, pid, :tick)", :forbidden_process_dependency},
+          {":erlang.self()", :forbidden_process_dependency},
+          {":erlang.monotonic_time()", :forbidden_clock_dependency},
+          {":erlang.system_time(:millisecond)", :forbidden_clock_dependency},
+          {":erlang.timestamp()", :forbidden_clock_dependency}
+        ] do
+      source = """
+      defmodule GravitonMQ.MQTT.Frame do
+        def impure(fun, pid), do: #{expression}
+      end
+      """
+
+      references = SourceAnalyzer.references(:graviton_mq_mqtt, "lib/frame.ex", source)
+      assert {:error, violations} = Architecture.check(references)
+      assert Enum.any?(violations, fn {violation, _} -> violation == kind end), expression
     end
   end
 

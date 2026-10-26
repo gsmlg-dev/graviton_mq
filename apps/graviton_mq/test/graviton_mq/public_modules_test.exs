@@ -7,14 +7,17 @@ defmodule GravitonMQ.PublicModulesTest do
           GravitonMQ.Application,
           GravitonMQ.Supervisor,
           GravitonMQ.Config,
-          GravitonMQ.Architecture
+          GravitonMQ.Architecture,
+          GravitonMQ.MQTT.Frame,
+          GravitonMQ.MQTT.Codec.Frame,
+          GravitonMQ.MQTT.Codec.Packet
         ] do
       assert Code.ensure_loaded?(module), "expected #{inspect(module)} to load"
     end
   end
 
   test "no unimplemented broker operations are exposed" do
-    for {function, arity} <- [publish: 3, consume: 3, declare_queue: 2, ack: 2] do
+    for {function, arity} <- [publish: 3, subscribe: 3, consume: 3, declare_queue: 2, ack: 2] do
       refute function_exported?(GravitonMQ, function, arity)
     end
   end

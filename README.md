@@ -1,12 +1,13 @@
 # GravitonMQ
 
-GravitonMQ is an embeddable AMQP 1.0 message broker being designed in
+GravitonMQ is an embeddable AMQP 1.0 and MQTT message broker being designed in
 Elixir/OTP. Milestone 0 established exact data identity, process ownership,
 durability contracts, lifecycle composition, and enforceable application
 boundaries. Milestone 1 now provides a deliberately bounded, process-free codec
 foundation. The first post-Milestone-1 codec slice extends that foundation with
 End, Close, and nested Error schema handling. The subsequent bounded slice adds
-Boolean scalar wire support and the Detach schema.
+Boolean scalar wire support and the Detach schema. MQTT M0 adds a pure
+MQTT 3.1.1/5.0 packet envelope and CONNECT/CONNACK codec foundation.
 
 RabbitMQ informs architectural study only. GravitonMQ is independently
 implemented and does not copy, translate, transliterate, or mechanically port
@@ -24,6 +25,10 @@ tagged AMQP field values. Detach, End, and Close may contain one validated Error
 value. The codec does not negotiate protocols or SASL, parse message sections,
 open a listener, execute Connection/Session/Link behavior, transition a queue, accept
 a publisher delivery, deliver to a consumer, persist data, or recover a log.
+
+The separate MQTT library validates packet envelopes and CONNECT/CONNACK for
+protocol levels 4 and 5. It has no listener, client registration, session,
+routing, or publish/subscribe behavior. See [MQTT scope](docs/MQTT_SCOPE.md).
 
 No module should be read as claiming those features are operational.
 
@@ -46,27 +51,22 @@ not claimed until it is tested.
 | `graviton_mq_core` | Protocol-independent messages, durable identities, outcomes, logical queue events, and the storage contract |
 | `graviton_mq_storage` | Physical record boundary and namespaces for future concrete storage implementations |
 | `graviton_mq_amqp10` | Exact AMQP 1.0 values, bounded pure codec operations, protocol data, and declarative directional state |
+| `graviton_mq_mqtt` | Pure MQTT 3.1.1/5.0 envelopes, CONNECT/CONNACK data, codecs, and limits |
 | `graviton_mq_runtime` | OTP integration boundary and intentionally empty per-instance runtime supervisor |
 | `graviton_mq` | Public startup API, configuration, composition supervisor, and sole Application callback |
 
 An arrow points from a consumer toward the child application it depends on:
 
 ```text
-                         graviton_mq_core
-                         ▲             ▲
-                         │             │
-              graviton_mq_storage   graviton_mq_amqp10
-                         ▲             ▲
-                         └──────┬──────┘
-                                │
-                      graviton_mq_runtime
-                                ▲
-                                │
-                         graviton_mq
+graviton_mq         -> graviton_mq_runtime
+graviton_mq_runtime -> graviton_mq_core
+graviton_mq_runtime -> graviton_mq_storage -> graviton_mq_core
+graviton_mq_runtime -> graviton_mq_amqp10  -> graviton_mq_core
+graviton_mq_runtime -> graviton_mq_mqtt    -> graviton_mq_core
 ```
 
-Core has no GravitonMQ child dependency. Storage and AMQP 1.0 depend only on
-core. Runtime composes core, storage, and AMQP 1.0. The public application
+Core has no GravitonMQ child dependency. Storage, AMQP 1.0, and MQTT depend only
+on core. Runtime composes core, storage, AMQP 1.0, and MQTT. The public application
 depends only on runtime. Only `GravitonMQ.Application` owns a product
 Application callback.
 
@@ -75,7 +75,9 @@ only `mix.exs` declarations. It combines references from compiler xref
 manifests with parsed-AST references, catches typespec-only edges and transport
 calls, rejects forbidden child-application edges, detects child cycles, and
 prevents codec modules from depending on OTP or BEAM process facilities.
-The separate Mix xref cycle check remains part of CI.
+All MQTT modules additionally reject process, transport, and clock dependencies,
+including direct Erlang primitives. The protocol libraries cannot reference
+one another. The separate Mix xref cycle check remains part of CI.
 
 ## Hardened data model
 
@@ -334,21 +336,23 @@ CI runs the same substantive checks with Elixir 1.18.4 and OTP 28.5.0.1.
 
 ## Releases and Hex packages
 
-`VERSION` is the canonical version for the umbrella and all five child
+`VERSION` is the canonical version for the umbrella and all six child
 applications. The manual **Release** workflow accepts a SemVer `version`
 (without a `v` prefix or build metadata) and a `git_ref` branch, defaulting to
 `main`. Configure the repository or organization secret `HEX_API_KEY` with
-permission to publish all five packages, and allow the workflow token to push
+permission to publish all six packages, and allow the workflow token to push
 the release commit and tag to the selected branch.
 
 The workflow updates `VERSION`, checks the source, builds every package, and
-compiles and starts an isolated consumer from the unpacked archives. It then
+compiles separate standalone and host-supervised consumers from the unpacked
+archives. Both decode a literal MQTT CONNECT; the host consumer also proves
+that `runtime: false` prevents default-instance startup. It then
 publishes `graviton_mq_core`, `graviton_mq_storage`, `graviton_mq_amqp10`,
-`graviton_mq_runtime`, and `graviton_mq` in dependency order. Each package has
-the same version and exact requirements on that version of its internal
-dependencies. Only after every Hex publication succeeds does the workflow
+`graviton_mq_mqtt`, `graviton_mq_runtime`, and `graviton_mq` in dependency order.
+Each package has the same version and exact requirements on that version of its
+internal dependencies. Only after every Hex publication succeeds does the workflow
 commit the version, push the commit and `v<version>` tag together, and create
-a GitHub Release containing the five Hex archives. Prerelease versions create
+a GitHub Release containing the six Hex archives. Prerelease versions create
 GitHub prereleases.
 
 Package staging preserves the source umbrella dependency graph while producing
@@ -374,16 +378,39 @@ automatically replaced.
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [AMQP 1.0 scope](docs/AMQP10_SCOPE.md)
+- [MQTT codec scope and future stages](docs/MQTT_SCOPE.md)
 - [Delivery semantics](docs/DELIVERY_SEMANTICS.md)
 - [Failure model](docs/FAILURE_MODEL.md)
 - [Clean-room research notes](docs/RESEARCH_NOTES.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Architecture decision records](docs/adr/)
 
-## Next milestone
+## MQTT codec API
 
-The current post-Milestone-1 slice stops after Boolean wire support and the
-bounded Open, Begin, Detach, End, Close, and nested Error schema codec. The
+```elixir
+GravitonMQ.MQTT.Codec.Frame.decode(bytes, limits)
+GravitonMQ.MQTT.Codec.Frame.encode(frame, limits)
+GravitonMQ.MQTT.Codec.Packet.decode(bytes, :auto, limits)
+GravitonMQ.MQTT.Codec.Packet.encode(packet, limits)
+```
+
+Limits default to `GravitonMQ.MQTT.Codec.Limits.default()`. `:auto` discovers
+CONNECT's explicit protocol level; other packet decoding requires `:v3_1_1`
+or `:v5`. Only CONNECT and CONNACK schemas are implemented. Envelope decoding
+keeps the body opaque and never invokes a schema decoder. Decode returns
+`{:ok, value, rest}`, `{:more, positive_count}`, or a structured codec error.
+Encode returns `{:ok, bytes}` or a structured codec error. Errors distinguish
+malformed, unsupported, configured-limit, and invalid-semantic-value failures.
+
+Properties are ordered `{name, value}` pairs; repeated User Properties retain
+order. Password, Will payload, and binary properties remain bytes. The codec
+does not implement their broker semantics. The existing standalone and
+host-supervised lifecycle remains empty below the composition boundaries.
+
+## Next AMQP slice
+
+The completed AMQP post-Milestone-1 slice stops after Boolean wire support and
+the bounded Open, Begin, Detach, End, Close, and nested Error schema codec. The
 recommended next task is a separately designed and reviewed pure Flow codec
 slice, followed by Attach with its Source/Target composites. Attach, Flow,
 Transfer, Disposition, and message sections remain unimplemented. Any next

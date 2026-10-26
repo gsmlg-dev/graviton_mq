@@ -7,7 +7,7 @@ defmodule GravitonMQ.MixProject do
     [
       app: :graviton_mq,
       version: GravitonMQ.Build.version(),
-      description: "Embeddable GravitonMQ foundation with bounded AMQP 1.0 codecs",
+      description: "Embeddable GravitonMQ foundation with bounded AMQP 1.0 and MQTT codecs",
       package: GravitonMQ.Build.package(),
       elixir: GravitonMQ.Build.elixir_requirement(),
       build_path: "../../_build",

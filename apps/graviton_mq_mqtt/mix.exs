@@ -1,0 +1,23 @@
+Code.require_file("../../build/project.exs", __DIR__)
+
+defmodule GravitonMQMQTT.MixProject do
+  use Mix.Project
+
+  def project do
+    [
+      app: :graviton_mq_mqtt,
+      version: GravitonMQ.Build.version(),
+      description: "Bounded, pure MQTT 3.1.1 and 5.0 codecs for GravitonMQ",
+      package: GravitonMQ.Build.package(),
+      elixir: GravitonMQ.Build.elixir_requirement(),
+      build_path: "../../_build",
+      config_path: "../../config/config.exs",
+      deps_path: "../../deps",
+      lockfile: "../../mix.lock",
+      start_permanent: Mix.env() == :prod,
+      deps: deps()
+    ]
+  end
+
+  defp deps, do: [{:graviton_mq_core, in_umbrella: true}]
+end

@@ -2,15 +2,17 @@
 
 ## Status
 
-GravitonMQ has completed Milestone 1 and its first post-Milestone-1 codec
-slice. The repository retains the hardened data, dependency, durability, and
-OTP composition boundaries from Milestone 0 and provides a bounded,
-process-free AMQP 1.0 codec foundation. It still does not contain a functioning
-broker, AMQP listener, protocol state machine, queue machine, or storage engine.
+GravitonMQ has completed Milestone 1 and its bounded End/Close/Error
+and Boolean/Detach codec slices. The repository retains the hardened data,
+dependency, durability, and OTP composition boundaries from Milestone 0 and
+provides a bounded, process-free AMQP 1.0 codec foundation. MQTT M0 adds only a pure packet
+envelope and CONNECT/CONNACK schemas for MQTT 3.1.1 and 5.0. It still does not
+contain a functioning broker, listener, protocol state machine, queue machine,
+or storage engine.
 
-GravitonMQ targets AMQP 1.0. AMQP 0-9-1 operations and concepts such as
-exchanges, bindings, `basic.publish`, `basic.consume`, and AMQP 0-9-1 channels
-are not the foundation of this design. RabbitMQ is an architectural reference
+GravitonMQ targets AMQP 1.0 and MQTT 3.1.1/5.0. AMQP 0-9-1 operations and
+concepts such as exchanges, bindings, `basic.publish`, `basic.consume`, and
+AMQP 0-9-1 channels are not the foundation of this design. RabbitMQ is an architectural reference
 for ownership, supervision, state-machine/effect separation, storage
 boundaries, and fault isolation only. GravitonMQ source is independently
 designed and is not copied, translated, transliterated, or mechanically ported
@@ -18,7 +20,7 @@ from RabbitMQ.
 
 ## Umbrella applications
 
-The umbrella has five child applications, ordered from stable domain concepts
+The umbrella has six child applications, ordered from stable domain concepts
 to the public composition root:
 
 | Application | Responsibility |
@@ -26,6 +28,7 @@ to the public composition root:
 | `graviton_mq_core` | Protocol-independent broker types, logical queue events, outcomes, durable identities, and the storage behaviour |
 | `graviton_mq_storage` | Physical storage records and future concrete implementations of the core storage contract |
 | `graviton_mq_amqp10` | Exact AMQP 1.0 values, bounded pure value and Open/Begin/Detach/End/Close schema codecs, nested Error protocol data, and declarative protocol-facing state |
+| `graviton_mq_mqtt` | Pure MQTT packet envelope, CONNECT/CONNACK data and codecs, and limits |
 | `graviton_mq_runtime` | OTP composition and future effect execution across the lower layers |
 | `graviton_mq` | Public lifecycle, configuration, architecture tooling, and the product Application callback |
 
@@ -37,12 +40,13 @@ graviton_mq         -> graviton_mq_runtime
 graviton_mq_runtime -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_storage -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_amqp10  -> graviton_mq_core
+graviton_mq_runtime -> graviton_mq_mqtt    -> graviton_mq_core
 ```
 
-Core knows neither AMQP 1.0 nor runtime or physical-storage modules. Storage
-and AMQP 1.0 each depend only on core and do not depend on one another. Runtime
-is the first layer allowed to compose all three. The public application depends
-only on runtime.
+Core knows neither protocol library nor runtime or physical-storage modules.
+Storage, AMQP 1.0, and MQTT each depend only on core and do not depend on one
+another. Runtime is the first layer allowed to compose all four. The public
+application depends only on runtime.
 
 `mix graviton_mq.check_architecture` enforces these rules against actual source
 references. It combines compiler xref manifests with parsed Elixir syntax so
@@ -51,7 +55,21 @@ application cycles and transport/socket references from the pure AMQP
 application. Within the codec namespace it additionally rejects OTP and BEAM
 process modules plus direct `spawn`, `spawn_link`, `spawn_monitor`, `send`, and
 `receive` forms. This supplements, rather than replaces, the declared
-dependency tests and Mix's xref cycle check.
+dependency tests and Mix's xref cycle check. All MQTT modules reject process,
+transport/socket, and clock dependencies; parsed syntax detects direct Erlang
+process/timer and clock primitives as well as typespec-only protocol edges.
+
+## MQTT M0 boundary
+
+`graviton_mq_mqtt` owns `GravitonMQ.MQTT` and has no Application callback.
+`Codec.Frame` validates the common packet envelope and preserves the body and
+suffix as opaque bytes. `Codec.Packet` decodes and encodes only CONNECT and
+CONNACK, using `:v3_1_1` or `:v5`; `:auto` only discovers CONNECT's level.
+Ordered properties, exact binary fields, configured limits, and explicit
+incomplete/error results are protocol data. No decode starts processes or
+runs clocks, sockets, authentication, client registration, or broker actions.
+See [MQTT scope](MQTT_SCOPE.md) and the
+[approved design](superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md).
 
 ## AMQP protocol state
 
@@ -341,8 +359,8 @@ behavior; Link attach, Transfer assembly, Flow, or settlement behavior; a
 working queue machine, publisher acceptance, consumer delivery, or Accepted
 disposition; filesystem storage, WAL, segments, persistence, fsync, or
 recovery; Raft, the `ra` dependency, Khepri, or clustering; Phoenix, a
-management UI or REST API; MQTT; or AMQP 0-9-1. The semantic codec subset is
-not complete AMQP 1.0 support.
+management UI or REST API; MQTT broker behavior; or AMQP 0-9-1. The semantic
+codec subset is not complete AMQP 1.0 support.
 
 The runtime starts no fake listeners, connection workers, queue workers,
 storage workers, effect executors, data directories, or speculative Registries.

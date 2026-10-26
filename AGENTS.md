@@ -4,15 +4,15 @@ These instructions apply to the entire repository.
 
 ## Product and clean-room boundaries
 
-- GravitonMQ implements AMQP 1.0. Do not use AMQP 0-9-1 methods, exchanges,
-  bindings, channels, `basic.publish`, or `basic.consume` as the protocol
-  foundation.
+- GravitonMQ targets AMQP 1.0 and MQTT 3.1.1/5.0. Do not use AMQP 0-9-1
+  methods, exchanges, bindings, channels, `basic.publish`, or `basic.consume`
+  as the protocol foundation.
 - RabbitMQ is an architectural reference only, for process ownership,
   supervision, connection and session boundaries, queue-type abstraction,
   state machines and effects, storage boundaries, and fault isolation.
 - Do not copy, translate, transliterate, mechanically port, or disguise
-  RabbitMQ source. Protocol behavior comes from the AMQP 1.0 specification and
-  independent tests.
+  RabbitMQ source. Protocol behavior comes from the AMQP 1.0 and MQTT
+  specifications and independent tests.
 - Do not select or add a project license without an explicit owner decision.
 
 ## Umbrella dependency direction
@@ -20,32 +20,31 @@ These instructions apply to the entire repository.
 An arrow points from a consumer toward the child application it depends on:
 
 ```text
-                         graviton_mq_core
-                         ▲             ▲
-                         │             │
-              graviton_mq_storage   graviton_mq_amqp10
-                         ▲             ▲
-                         └──────┬──────┘
-                                │
-                      graviton_mq_runtime
-                                ▲
-                                │
-                         graviton_mq
+graviton_mq         -> graviton_mq_runtime
+graviton_mq_runtime -> graviton_mq_core
+graviton_mq_runtime -> graviton_mq_storage -> graviton_mq_core
+graviton_mq_runtime -> graviton_mq_amqp10  -> graviton_mq_core
+graviton_mq_runtime -> graviton_mq_mqtt    -> graviton_mq_core
 ```
 
 - `graviton_mq_core` has no dependency on another GravitonMQ child.
 - `graviton_mq_storage` depends only on core.
 - `graviton_mq_amqp10` depends only on core.
-- `graviton_mq_runtime` may depend on core, storage, and AMQP 1.0.
+- `graviton_mq_mqtt` depends only on core and owns `GravitonMQ.MQTT`.
+- `graviton_mq_runtime` may depend on core, storage, AMQP 1.0, and MQTT.
 - `graviton_mq` depends only on runtime.
 - Do not introduce dependency cycles. Only `graviton_mq` owns the top-level
   `Application` callback.
 
 The source-level rules are stricter than declarations in `mix.exs`:
 
-- core must not reference AMQP 1.0 modules, concrete storage modules, runtime
-  modules, or the public composition application;
-- storage must not reference AMQP 1.0 or runtime modules;
+- core must not reference AMQP 1.0 or MQTT modules, concrete storage modules,
+  runtime modules, or the public composition application;
+- storage must not reference AMQP 1.0, MQTT, or runtime modules;
+- AMQP and MQTT must not reference one another;
+- all MQTT modules remain pure: no process, transport/socket, or clock
+  dependencies, and no references to storage, runtime, or the public
+  composition application;
 - pure AMQP type and codec modules must not reference runtime, storage, TCP,
   sockets, or transport libraries; and
 - the application graph must remain acyclic.
@@ -150,18 +149,28 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
 
 ## Current milestone exclusions
 
-The approved post-Milestone-1 Boolean/Detach codec slice extends the completed
-End/Close/Error codec with Boolean scalar wire values and only the Detach
-performative schema. Its scope is recorded in
-`docs/superpowers/specs/2026-10-09-boolean-detach-codec-design.md`.
-Milestone 1 remains the completed Open/Begin foundation. Do not
-extend the current slice to other performative schemas, message-section
-parsing, protocol or SASL negotiation, Connection/Session/Link behavior, Flow,
-Transfer, Disposition, queue transitions or scheduling, publisher or consumer
-delivery, TCP/TLS/WebSocket, filesystem WAL/segments/fsync/recovery, Raft,
-clustering, Phoenix, management APIs or UI, MQTT, or AMQP 0-9-1. Do not add
-Phoenix, Ra, Khepri, Ranch, Bandit, or speculative runtime dependencies. Do not
-claim full AMQP 1.0 compatibility.
+The completed AMQP foundation supports only Open, Begin, Detach, End, and Close
+performative schemas, nested Error, and its bounded value subset. Preserve its
+existing semantics and historical milestone records. Milestone 1 remains the
+completed Open/Begin foundation; the completed Boolean/Detach slice is recorded
+in `docs/superpowers/specs/2026-10-09-boolean-detach-codec-design.md`.
+
+The owner-approved MQTT M0 scope is recorded in
+`docs/superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md` and
+`docs/superpowers/plans/2026-10-26-mqtt-connect-connack-codec.md`. It adds only a
+sixth library application, a pure opaque packet envelope, MQTT 3.1.1/5.0
+CONNECT/CONNACK data and codecs, limits, architecture checks, and package/scope
+integration. Decode does not authenticate, register clients, create sessions,
+run timers, or invoke broker behavior. Keep credentials out of error details.
+
+Do not extend M0 to other MQTT packet schemas, publish/subscribe APIs, topic
+matching, session transitions, listeners, TCP/TLS/WebSocket, queues, concrete
+storage, or runtime workers. Existing AMQP exclusions remain: other
+performative schemas, message sections, protocol/SASL negotiation,
+Connection/Session/Link behavior, scheduling, delivery, filesystem
+WAL/segments/fsync/recovery, Raft, clustering, management APIs/UI, or AMQP
+0-9-1. Do not add Phoenix, Ra, Khepri, Ranch, Bandit, or speculative runtime
+dependencies. Do not claim a working MQTT broker or full protocol compatibility.
 
 ## Required verification
 

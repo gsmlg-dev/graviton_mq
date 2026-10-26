@@ -7,7 +7,13 @@ defmodule GravitonMQ.ReleaseTest do
     graviton_mq_core: [],
     graviton_mq_storage: [:graviton_mq_core],
     graviton_mq_amqp10: [:graviton_mq_core],
-    graviton_mq_runtime: [:graviton_mq_core, :graviton_mq_storage, :graviton_mq_amqp10],
+    graviton_mq_mqtt: [:graviton_mq_core],
+    graviton_mq_runtime: [
+      :graviton_mq_core,
+      :graviton_mq_storage,
+      :graviton_mq_amqp10,
+      :graviton_mq_mqtt
+    ],
     graviton_mq: [:graviton_mq_runtime]
   }
 
@@ -49,7 +55,7 @@ defmodule GravitonMQ.ReleaseTest do
     assert status == 0, output
 
     assert File.read!(Path.join(staging, "packages.txt")) ==
-             "graviton_mq_core\ngraviton_mq_storage\ngraviton_mq_amqp10\ngraviton_mq_runtime\ngraviton_mq\n"
+             "graviton_mq_core\ngraviton_mq_storage\ngraviton_mq_amqp10\ngraviton_mq_mqtt\ngraviton_mq_runtime\ngraviton_mq\n"
 
     for {app, dependencies} <- @dependencies do
       package = Path.join(staging, Atom.to_string(app))

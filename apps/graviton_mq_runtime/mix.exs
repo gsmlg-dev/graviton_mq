@@ -23,7 +23,8 @@ defmodule GravitonMQRuntime.MixProject do
     [
       {:graviton_mq_core, in_umbrella: true},
       {:graviton_mq_storage, in_umbrella: true},
-      {:graviton_mq_amqp10, in_umbrella: true}
+      {:graviton_mq_amqp10, in_umbrella: true},
+      {:graviton_mq_mqtt, in_umbrella: true}
     ]
   end
 end
