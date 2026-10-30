@@ -1,13 +1,24 @@
 # GravitonMQ
 
-GravitonMQ is an embeddable AMQP 1.0 and MQTT message broker being designed in
-Elixir/OTP. Milestone 0 established exact data identity, process ownership,
+GravitonMQ provides independently usable AMQP 1.0 and MQTT 5.0 brokers and
+native Elixir/OTP network clients under the profiles documented below. This
+project implements their protocol behavior using standard OTP networking/TLS primitives.
+The network client runs independently of a local broker; both roles
+share pure protocol codecs and have separate runtime owners.
+
+The owner-authorized [G0–G7 Goal](docs/ACTIVE_SCOPE.md) advances beyond the
+historical codec milestones. [Current capabilities](docs/CAPABILITIES.md)
+distinguish implementation, unit checks, independent-peer interoperability,
+and recovery evidence for each role. [ADR 0007](docs/adr/0007-independent-network-client-application.md)
+defines an independently installable client library without broker dependencies.
+
+Milestone 0 established exact data identity, process ownership,
 durability contracts, lifecycle composition, and enforceable application
 boundaries. Milestone 1 now provides a deliberately bounded, process-free codec
 foundation. The first post-Milestone-1 codec slice extends that foundation with
 End, Close, and nested Error schema handling. The subsequent bounded slice adds
 Boolean scalar wire support and the Detach schema. MQTT M0 adds a pure
-MQTT 3.1.1/5.0 packet envelope and CONNECT/CONNACK codec foundation.
+MQTT 5.0 packet envelope and CONNECT/CONNACK codec foundation.
 
 RabbitMQ informs architectural study only. GravitonMQ is independently
 implemented and does not copy, translate, transliterate, or mechanically port
@@ -15,22 +26,42 @@ RabbitMQ source. This project implements AMQP 1.0, not AMQP 0-9-1; exchanges,
 bindings, AMQP 0-9-1 channels, `basic.publish`, and `basic.consume` are not its
 protocol foundation.
 
-## Current status: bounded pure codec foundation
+## Current status: MQTT5 and AMQP1 brokers and independent clients
 
 The repository recognizes the raw AMQP 1.0 protocol header, validates AMQP
-frame envelopes without interpreting their bodies, and encodes or decodes a
-small semantic-value subset. A bounded schema codec also encodes and decodes
-Open, Begin, Detach, End, and Close as dedicated immutable structs with exact
-tagged AMQP field values. Detach, End, and Close may contain one validated Error
-value. The codec does not negotiate protocols or SASL, parse message sections,
-open a listener, execute Connection/Session/Link behavior, transition a queue, accept
-a publisher delivery, deliver to a consumer, persist data, or recover a log.
+frame envelopes without interpreting their bodies, and encodes or decodes
+bounded semantic values, including all scalar families and homogeneous arrays.
+A bounded schema codec also encodes and decodes
+all nine transport performatives as dedicated immutable structs with exact
+tagged fields, Source/Target and delivery-state/outcome data. A separate message
+codec validates format-0 sections and retains the authoritative original bytes.
+Pure Endpoint/SessionEngine transitions add bounded channels, Session-owned
+Links, credit/windows, fragmented transfer, settlement and explicit effects.
+`GravitonMQ.AMQP10Client` interprets those effects over outgoing TCP/verified
+TLS without broker dependencies. Its initial no-SASL, volatile format-zero
+profile has real Artemis/Proton send/receive and failure evidence. An opt-in
+AMQP memory broker adds named queues, bounded admission/credit/settlement,
+release/redelivery, peer-disconnect responsibility and TCP/TLS. Its independent
+Proton qualification and remaining limits are recorded in the matrix.
+AMQP client reconnect/resumption remains unavailable. The opt-in broker
+`local_durable` profile adds queue event replay through the real WAL and sync
+boundary; see [ADR 0008](docs/adr/0008-local-durability-profiles.md).
 
-The separate MQTT library validates packet envelopes and CONNECT/CONNACK for
-protocol levels 4 and 5. It has no listener, client registration, session,
-routing, or publish/subscribe behavior. See [MQTT scope](docs/MQTT_SCOPE.md).
-
-No module should be read as claiming those features are operational.
+The separate MQTT library provides CONNECT/CONNACK, MQTT5 QoS0/1/2 packet
+schemas, topic matching and separate pure client/broker transitions. Historical MQTT3.1.1 CONNECT/CONNACK
+codec compatibility is retained; MQTT3.1 and legacy runtime are unsupported.
+`graviton_mq_client` adds a host-supervised MQTT5 TCP/TLS client with bounded
+operations/deliveries, keep alive and controlled memory-session reconnect.
+An opt-in MQTT5 memory broker provides topics, sessions, retained publications,
+Will/expiry, bounded host operations, explicit auth callbacks and TCP/TLS.
+See the [client guide](docs/MQTT_CLIENT.md), [broker guide](docs/MQTT_BROKER.md)
+and [qualification matrix](docs/CAPABILITIES.md). The [AMQP client guide](docs/AMQP10_CLIENT.md)
+documents admission, outcomes, credit and its bounded profile; the
+[AMQP broker guide](docs/AMQP10_BROKER.md) covers queue responsibility and embedding.
+Opt-in local persistence adds MQTT session/retained/Will/inflight recovery and
+client operation identities. Its sync and recovery evidence is tracked
+separately from memory behavior. The selected profiles and their actual
+qualification limits are recorded in the capability matrix.
 
 ## Supported toolchain
 
@@ -48,12 +79,13 @@ not claimed until it is tested.
 
 | Application | Responsibility |
 | --- | --- |
-| `graviton_mq_core` | Protocol-independent messages, durable identities, outcomes, logical queue events, and the storage contract |
-| `graviton_mq_storage` | Physical record boundary and namespaces for future concrete storage implementations |
+| `graviton_mq_core` | Protocol-independent messages, durable identities, outcomes, deterministic queue transitions, logical events, and the storage contract |
+| `graviton_mq_storage` | Bounded Linux WAL, checksums, explicit sync/durable-through, streaming recovery and physical records |
 | `graviton_mq_amqp10` | Exact AMQP 1.0 values, bounded pure codec operations, protocol data, and declarative directional state |
-| `graviton_mq_mqtt` | Pure MQTT 3.1.1/5.0 envelopes, CONNECT/CONNACK data, codecs, and limits |
-| `graviton_mq_runtime` | OTP integration boundary and intentionally empty per-instance runtime supervisor |
-| `graviton_mq` | Public startup API, configuration, composition supervisor, and sole Application callback |
+| `graviton_mq_mqtt` | Pure MQTT packet codecs, limits, topics and role transitions; historical 3.1.1 CONNECT/CONNACK codec |
+| `graviton_mq_client` | Independent host-supervised AMQP1/MQTT5 network clients; no broker dependencies or Application callback |
+| `graviton_mq_runtime` | Instance-owned MQTT/AMQP brokers, memory/local durability profiles, queue owners, auth integration, bounded TCP/TLS connections and writers |
+| `graviton_mq` | Public startup and broker host APIs, configuration, composition, and sole Application callback |
 
 An arrow points from a consumer toward the child application it depends on:
 
@@ -63,19 +95,21 @@ graviton_mq_runtime -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_storage -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_amqp10  -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_mqtt    -> graviton_mq_core
+graviton_mq_client  -> graviton_mq_core / graviton_mq_amqp10 / graviton_mq_mqtt
 ```
 
 Core has no GravitonMQ child dependency. Storage, AMQP 1.0, and MQTT depend only
 on core. Runtime composes core, storage, AMQP 1.0, and MQTT. The public application
 depends only on runtime. Only `GravitonMQ.Application` owns a product
-Application callback.
+Application callback. The independent client library depends only on core and
+pure protocol libraries; using it never starts the broker product.
 
 `mix graviton_mq.check_architecture` enforces actual source references, not
 only `mix.exs` declarations. It combines references from compiler xref
 manifests with parsed-AST references, catches typespec-only edges and transport
 calls, rejects forbidden child-application edges, detects child cycles, and
 prevents codec modules from depending on OTP or BEAM process facilities.
-All MQTT modules additionally reject process, transport, and clock dependencies,
+All AMQP and MQTT modules reject process, transport, and clock dependencies,
 including direct Erlang primitives. The protocol libraries cannot reference
 one another. The separate Mix xref cycle check remains part of CI.
 
@@ -111,6 +145,7 @@ The pure codec API is:
 ```elixir
 GravitonMQ.AMQP10.Codec.ProtocolHeader.recognize(bytes)
 GravitonMQ.AMQP10.Codec.Frame.decode(bytes, limits)
+GravitonMQ.AMQP10.Codec.Frame.encode(frame, limits)
 GravitonMQ.AMQP10.Codec.Value.decode(bytes, limits)
 GravitonMQ.AMQP10.Codec.Value.encode(value, limits)
 GravitonMQ.AMQP10.Codec.Performative.decode(bytes, limits)
@@ -119,13 +154,17 @@ GravitonMQ.AMQP10.Codec.Performative.encode(performative, limits)
 
 Decode operations return `{:ok, value, rest}`, `{:more, n}`, or a structured
 `Codec.Error`; encode returns `{:ok, bytes}` or a structured error. The
-supported semantic subset is `null`, `boolean`, `ushort`, `uint`, `ulong`,
-`string`, `symbol`, `list`, ordered `map`, symbol arrays, and described values
-composed from that subset with `ulong` or `symbol` descriptors.
+supported semantic subset is `null`, `boolean`, all signed/unsigned integer
+types, exact-bit `float`, `double`, and decimal types, Unicode scalar `char`,
+`timestamp`, `uuid`, `binary`, `string`, `symbol`, `list`, ordered `map`,
+homogeneous arrays, and described values composed from that subset with
+`ulong` or `symbol` descriptors.
 
 `Codec.Performative` recognizes the standard numeric and symbolic descriptors
 for Open (`0x10` and `amqp:open:list`), Begin (`0x11` and
-`amqp:begin:list`), Detach (`0x16` and `amqp:detach:list`), End (`0x17` and
+`amqp:begin:list`), Attach (`0x12` and `amqp:attach:list`), Flow (`0x13` and
+`amqp:flow:list`), Transfer (`0x14` and `amqp:transfer:list`), Disposition
+(`0x15` and `amqp:disposition:list`), Detach (`0x16` and `amqp:detach:list`), End (`0x17` and
 `amqp:end:list`), and Close (`0x18` and `amqp:close:list`). It validates the
 specification's positional fields and exact tagged types. Open names
 `container_id`, `hostname`, `max_frame_size`,
@@ -141,13 +180,17 @@ Error is nested protocol data rather than a top-level performative. Its
 mandatory condition is an exact tagged symbol; its optional description and
 info retain tagged string and ordered symbol-keyed map values from the bounded
 value subset. The codec accepts numeric and symbolic Error descriptors only
-inside Detach, End, or Close and canonically emits the numeric descriptor.
+inside Detach, End, Close, Rejected or a reserved rejected delivery annotation
+and canonically emits the numeric descriptor for typed data.
 
 Boolean constructors `0x41`, `0x42`, and `0x56` with payload `0` or `1`
 normalize to tagged Boolean values; other `0x56` payload octets are malformed.
 Canonical encoding uses `0x41` and `0x42`. Boolean is supported recursively in
 the shared value subset, including Open/Begin properties and nested Error info.
-Arrays remain symbol-only.
+Homogeneous arrays support scalar, compound, nested-array and described
+constructors; null elements are forbidden by AMQP. Exact semantic types remain
+distinct. Float/double and decimal values carry bit binaries to preserve NaN
+payloads, signed zero and decimal encodings; char carries a Unicode scalar.
 
 Absent defaults materialize as tagged values: Open uses
 `uint(4_294_967_295)` for `max_frame_size` and `ushort(65_535)` for
@@ -157,8 +200,17 @@ Encoding emits the numeric descriptor, preserves positional nulls required by
 later fields, and omits trailing nulls. Schema failures and unsupported
 descriptors return explicit structured errors; incomplete input continues to
 return `{:more, n}`. Unknown described values remain lossless in the generic
-value codec, but the performative facade accepts only Open, Begin, Detach, End,
-and Close, with Error accepted only in its nested field.
+value codec. The performative facade accepts the nine transport performatives;
+Error, Source/Target, delivery states and outcomes remain nested data.
+
+`Codec.Message.decode/2` parses a complete format-0 message into an optional
+tagged section view without changing its original content. `encode/2` returns
+that authoritative content unchanged; `encode_sections/2` constructs a new
+message with validated section order and an aggregate byte budget checked
+before allocating child encodings. It must not replace forwarding the original
+bare-message bytes. The bounded application-properties profile supports simple
+scalar/null values. Other message section values use the shared bounded value
+codec, including homogeneous arrays.
 
 Decoding a frame never invokes the performative codec automatically. Frame
 bodies, trailing input, and authoritative encoded message content remain
@@ -203,7 +255,7 @@ AMQP handle, channel, or delivery ID is durable identity.
 Core owns protocol-independent `GravitonMQ.Queue.Event` values. Storage owns
 `GravitonMQ.Storage.Record`, including physical format version, record type,
 encoded logical event, commit position, checksum, and segment metadata. The
-intended later flow is:
+implemented AMQP queue flow is:
 
 ```text
 Queue.Machine
@@ -212,7 +264,9 @@ Queue.Machine
   -> Storage encodes the logical event as a physical Storage.Record
 ```
 
-No queue transition or record encoding is implemented yet.
+Queue.Machine now implements bounded queue transitions. The AMQP runtime
+interprets their effects; the opt-in local durable profile encodes and
+synchronizes logical events before successful responsibility effects.
 
 ### Storage contract
 
@@ -231,8 +285,9 @@ Append success establishes ordering, not durability. A later sync or
 durable-through result provides the correlation boundary. Batches preserve
 event order, references from different streams are incomparable, and expected
 failures return `{:error, reason}`. Fold-based recovery avoids loading a whole
-log into memory. The `Memory` and `WAL` namespaces do not claim to implement
-this behavior while they remain future boundaries.
+log into memory. `Storage.WAL` implements bounded local Linux append, sync,
+durable-through and streaming recovery. `Storage.Memory` remains a historical
+namespace; memory queue operation has no disk durability claim.
 
 ### Settlement instructions
 
@@ -248,8 +303,9 @@ encoded form is required so the translation cannot silently discard fields:
 | Modified | `Outcome.ModifyAndMakeAvailable` | delivery-failed, undeliverable-here, and opaque encoded annotation mutation |
 
 Opaque mutation bytes allow the AMQP adapter to preserve protocol detail
-without making core depend on AMQP structs. No settlement behavior is
-implemented.
+without making core depend on AMQP structs. Queue.Machine and the AMQP runtime
+implement retirement, release, discard-on-rejection and Modified redelivery.
+Dead-letter policy is explicitly unsupported in this profile.
 
 ### Message preservation
 
@@ -259,11 +315,12 @@ wire family and transfer message-format value, while `Index` contains only
 derived routing, policy, expiration, durability, and management fields needed
 by the broker.
 
-This permits future forwarding without reconstructing or rewriting unknown
-described values, annotations, properties, application properties, footers,
-body section kinds, multiple body sections, or exact nested AMQP values. Core
-does not import AMQP structs, and a decoded `body: term()` is not the message of
-record. Message-section parsing and reconstruction remain later work. See
+The AMQP forwarding view preserves bare-message properties, application
+properties, body sections and footer bytes exactly, including noncanonical
+encodings. Only mutable Header/annotation fields are adjusted according to
+delivery policy; the original queue record remains authoritative. Protocol
+message-section codecs validate their own schemas. Core does not import AMQP
+structs, and a decoded `body: term()` does not replace the message of record. See
 [ADR 0005](docs/adr/0005-preserve-amqp-message-as-opaque-content.md).
 
 ## Standalone and embedded lifecycle
@@ -312,9 +369,10 @@ Supervisor.start_link(children, strategy: :one_for_one)
 `:name` and `:runtime_supervisor_name` are exact OTP registration names. They
 are never generated by converting arbitrary strings to atoms. Two registered
 instances can coexist when both names differ; a duplicate top-level name
-fails with the ordinary `{:already_started, pid}` result. Each runtime
-supervisor is intentionally empty: starting an instance opens no listener and
-starts no queue or storage implementation. See
+fails with the ordinary `{:already_started, pid}` result. Without `:mqtt`
+configuration, each runtime retains the historical empty boundary. Explicit
+`:mqtt` options enable the memory broker and any configured listeners;
+no AMQP queue or storage engine starts. See
 [ADR 0006](docs/adr/0006-support-standalone-and-embedded-lifecycles.md).
 
 ## Development and verification
@@ -336,23 +394,26 @@ CI runs the same substantive checks with Elixir 1.18.4 and OTP 28.5.0.1.
 
 ## Releases and Hex packages
 
-`VERSION` is the canonical version for the umbrella and all six child
+`VERSION` is the canonical version for the umbrella and all seven child
 applications. The manual **Release** workflow accepts a SemVer `version`
 (without a `v` prefix or build metadata) and a `git_ref` branch, defaulting to
 `main`. Configure the repository or organization secret `HEX_API_KEY` with
-permission to publish all six packages, and allow the workflow token to push
+permission to publish all seven packages, and allow the workflow token to push
 the release commit and tag to the selected branch.
 
 The workflow updates `VERSION`, checks the source, builds every package, and
 compiles separate standalone and host-supervised consumers from the unpacked
-archives. Both decode a literal MQTT CONNECT; the host consumer also proves
-that `runtime: false` prevents default-instance startup. It then
+archives. Consumers verify standalone and embedded memory brokers, and the
+host consumer proves `runtime: false` prevents default-instance startup.
+A client-only consumer checks the dependency closure without broker packages.
+With the peer environment variables below, installation checks also exchange
+real network traffic. The release workflow then
 publishes `graviton_mq_core`, `graviton_mq_storage`, `graviton_mq_amqp10`,
-`graviton_mq_mqtt`, `graviton_mq_runtime`, and `graviton_mq` in dependency order.
+`graviton_mq_mqtt`, `graviton_mq_client`, `graviton_mq_runtime`, and `graviton_mq` in dependency order.
 Each package has the same version and exact requirements on that version of its
 internal dependencies. Only after every Hex publication succeeds does the workflow
 commit the version, push the commit and `v<version>` tag together, and create
-a GitHub Release containing the six Hex archives. Prerelease versions create
+a GitHub Release containing the seven Hex archives. Prerelease versions create
 GitHub prereleases.
 
 Package staging preserves the source umbrella dependency graph while producing
@@ -364,6 +425,13 @@ new staging directory:
 elixir scripts/stage_hex.exs /tmp/graviton_mq_hex
 elixir scripts/build_hex.exs /tmp/graviton_mq_hex
 ```
+
+Set `GRAVITON_MOSQUITTO_BIN` to Mosquitto 2.1.2 for broker archive network
+checks, and `GRAVITON_MQTT_TEST_PORT` to an isolated Mosquitto listener for the
+client-only archive exchange. Without them the script reports those network
+checks as NOT RUN. `ARTEMIS_HOST`/`ARTEMIS_PORT` additionally enable the
+independent AMQP archive client's real Artemis exchange. This builds local
+archives; it does not publish them.
 
 CI checks formatting, compilation, architecture, and cycles on every branch.
 The Tests workflow runs unit tests and the package archive checks on pushes
@@ -378,7 +446,9 @@ automatically replaced.
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [AMQP 1.0 scope](docs/AMQP10_SCOPE.md)
-- [MQTT codec scope and future stages](docs/MQTT_SCOPE.md)
+- [MQTT codec scope and client/broker stages](docs/MQTT_SCOPE.md)
+- [MQTT5 client guide](docs/MQTT_CLIENT.md)
+- [MQTT5 memory broker guide](docs/MQTT_BROKER.md)
 - [Delivery semantics](docs/DELIVERY_SEMANTICS.md)
 - [Failure model](docs/FAILURE_MODEL.md)
 - [Clean-room research notes](docs/RESEARCH_NOTES.md)
@@ -394,9 +464,11 @@ GravitonMQ.MQTT.Codec.Packet.decode(bytes, :auto, limits)
 GravitonMQ.MQTT.Codec.Packet.encode(packet, limits)
 ```
 
-Limits default to `GravitonMQ.MQTT.Codec.Limits.default()`. `:auto` discovers
-CONNECT's explicit protocol level; other packet decoding requires `:v3_1_1`
-or `:v5`. Only CONNECT and CONNACK schemas are implemented. Envelope decoding
+Limits default to `GravitonMQ.MQTT.Codec.Limits.default()`. `:auto` verifies
+CONNECT's protocol level is 5 or historical 3.1.1; CONNACK decoding requires
+an explicit version. Operational roles require MQTT5. CONNECT/CONNACK,
+PUBLISH/PUBACK, SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, PINGREQ/PINGRESP and
+DISCONNECT have schemas. Envelope decoding
 keeps the body opaque and never invokes a schema decoder. Decode returns
 `{:ok, value, rest}`, `{:more, positive_count}`, or a structured codec error.
 Encode returns `{:ok, bytes}` or a structured codec error. Errors distinguish
@@ -404,17 +476,23 @@ malformed, unsupported, configured-limit, and invalid-semantic-value failures.
 
 Properties are ordered `{name, value}` pairs; repeated User Properties retain
 order. Password, Will payload, and binary properties remain bytes. The codec
-does not implement their broker semantics. The existing standalone and
-host-supervised lifecycle remains empty below the composition boundaries.
+never executes their broker semantics. Configured broker runtime interprets
+pure role effects outside the codec.
 
-## Next AMQP slice
+## Active profiles and qualification
 
-The completed AMQP post-Milestone-1 slice stops after Boolean wire support and
-the bounded Open, Begin, Detach, End, Close, and nested Error schema codec. The
-recommended next task is a separately designed and reviewed pure Flow codec
-slice, followed by Attach with its Source/Target composites. Attach, Flow,
-Transfer, Disposition, and message sections remain unimplemented. Any next
-slice must not add protocol state or negotiation, SASL, TCP, OTP protocol
-processes, queue behavior, storage behavior, or a claim of full AMQP compatibility.
+Historical AMQP milestones stop at Boolean/Detach and nested Error. Active G3
+now includes required scalar wire types, frame encoding, all transport schemas,
+Source/Target, delivery states/outcomes, message sections, pure endpoints and
+the independent AMQP client. See [AMQP scope](docs/AMQP10_SCOPE.md), the
+[client guide](docs/AMQP10_CLIENT.md) and [capabilities](docs/CAPABILITIES.md).
+G4 adds the real Queue.Machine, runtime effects and memory broker, with
+independent Qpid Proton evidence. G5 adds MQTT QoS2 plus reviewed AMQP
+flow/drain, annotations and serial boundaries. G6 adds real WAL/sync/streaming
+recovery and the independent MQTT client store. G7 adds pinned independent
+peers, clause inventories, model/fuzz/resource checks, sustained traffic and
+clean installed consumers. The [qualification matrix](docs/CAPABILITIES.md)
+records the exact tested source and limits. Hosted CI for this uncommitted
+working tree is NOT RUN; no publication or deployment is inferred.
 
 GravitonMQ is licensed under the [MIT License](LICENSE).

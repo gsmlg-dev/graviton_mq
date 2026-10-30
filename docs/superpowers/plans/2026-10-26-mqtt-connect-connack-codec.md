@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Execute the approved M0 slice task by task using `scoped-prd-execution` and `test-driven-development`. Independent integration and codec work may run in the current checkout with explicit file ownership and separate build directories. No branch/worktree creation, commits, publication, or deployment is authorized.
 
-**Goal:** Add a sixth library application containing a bounded, pure MQTT packet envelope and MQTT 3.1.1/5.0 CONNECT/CONNACK codec, with architecture and standalone-package qualification.
+**Goal:** Add a sixth library application containing a bounded, pure MQTT packet envelope and MQTT 5.0-only CONNECT/CONNACK codec, with architecture and standalone-package qualification.
 
 **Architecture:** `graviton_mq_mqtt` depends only on core. Runtime composes the new library; the public application still depends only on runtime and owns the sole Application callback. Existing supervisors remain empty. Decode packet envelopes without implicitly decoding protocol schemas.
 
@@ -26,9 +26,9 @@ GravitonMQ.MQTT.Codec.Packet.decode(bytes, version \\ :auto, limits \\ Limits.de
 GravitonMQ.MQTT.Codec.Packet.encode(packet, limits \\ Limits.default())
 ```
 
-Versions are `:v3_1_1` and `:v5`. `:auto` recognizes CONNECT's explicit level;
-CONNACK requires the caller's version. A mismatched explicit CONNECT version
-is an error. Decode returns `{:ok, value, rest}`, `{:more, positive_count}`,
+The only version is `:v5`. `:auto` verifies CONNECT's explicit level is 5;
+CONNACK requires `:v5`. MQTT 3.1/3.1.1 wire packets and legacy caller version
+selectors are rejected. Decode returns `{:ok, value, rest}`, `{:more, positive_count}`,
 or `{:error, %Codec.Error{}}`; encode returns `{:ok, binary}` or an error.
 Decode complete envelopes with truncated internal fields as malformed,
 rather than requesting bytes belonging to the next packet.
@@ -45,8 +45,8 @@ Data modules:
 %GravitonMQ.MQTT.Packet.Connack{version: :v5, session_present: false, reason_code: 0, properties: []}
 ```
 
-`clean_start` stores the wire clean flag; for level 4 it denotes Clean Session,
-without implementing either version's session lifetime. Properties are an
+`clean_start` stores the MQTT 5.0 Clean Start flag without implementing
+session lifetime. Properties are an
 ordered list of `{predefined_property_name, value}` pairs. User Property
 values are `{utf8_name, utf8_value}` pairs; duplicates and order survive.
 Password, Authentication Data, Correlation Data, and Will payload are binary.
@@ -60,10 +60,8 @@ frame and packet encode/decode. Avoid including credentials in error details.
 
 The common envelope enforces the four-byte Remaining Length bound and fixed
 header rules, preserves opaque body and suffix, and records header size.
-MQTT 5 requires minimum-length VBI encoding. MQTT 3.1.1 has no such explicit
-minimum requirement; the packet facade can use decoded version and header
-size to enforce the MQTT 5 rule while preserving the legacy envelope form.
-Encoding always emits minimum-length VBIs. MQTT 5 Property Length and Property
+Both the opaque envelope and packet codec enforce MQTT 5 minimum-length VBI
+encoding. Encoding always emits minimum-length VBIs. MQTT 5 Property Length and Property
 Identifiers must also use minimum-length encoding.
 
 Properties supported by this slice:
@@ -125,9 +123,7 @@ Expected dependency declaration:
 - [x] Add ExUnit fixtures for the following literal standard packets, and observe failures because the MQTT codec is missing:
 
 ```elixir
-connect311 = <<0x10, 0x0D, 0, 4, "MQTT", 4, 2, 0, 60, 0, 1, "c">>
 connect5 = <<0x10, 0x0E, 0, 4, "MQTT", 5, 2, 0, 60, 0, 0, 1, "c">>
-connack311 = <<0x20, 2, 0, 0>>
 connack5 = <<0x20, 3, 0, 0, 0>>
 ```
 
@@ -138,16 +134,16 @@ connack5 = <<0x20, 3, 0, 0, 0>>
 ## Task 3: CONNECT fields and MQTT 5 properties
 
 - [x] Add decoding/encoding tests for the literal CONNECT fixtures and every strict prefix, concatenated input, Will/username/password fields, empty fields, non-normalized Unicode/BOM, and binary credentials/payload.
-- [x] Implement CONNECT level dispatch, explicit version checks, exact reserved/Will flag validation, v3 password/user dependency and empty Client ID/clean-flag rules. Keep server Client ID assignment/admission policy out of the codec.
+- [x] Accept only CONNECT level 5, reject legacy versions/selectors, and validate exact reserved/Will flags. Retain MQTT 5 password-without-username and empty Client ID behavior. Keep server Client ID assignment/admission policy out of the codec.
 - [x] Add independent MQTT 5 property fixtures that exercise every row above at CONNECT/Will locations, ordered duplicate User Properties, zero forbidden values, duplicate singletons, unknown IDs, wrong locations, invalid UTF-8, encoded lengths, property limits, and Authentication Data without Method.
 - [x] Implement shared typed property parsing/encoding with an explicit ID/type/location catalog. Encode semantic field failures as `:invalid_value` and malformed wire fields as `:malformed`. Do not rescue errors or ignore unknown fields.
 - [x] Run focused CONNECT tests, then the MQTT application's complete test set. Diagnose each failure before retrying; do not alter correct fixtures to fit implementation.
 
 ## Task 4: CONNACK schema and adversarial boundaries
 
-- [x] Add CONNACK literal fixtures for both versions, explicit-version requirement, version-specific reason-code sets, reserved flags, Session Present on failure, exact packet exhaustion, and every permitted CONNACK property.
+- [x] Add the MQTT 5 CONNACK literal fixture, explicit `:v5` requirement, MQTT 5 reason codes, reserved flags, Session Present on failure, exact packet exhaustion, and every permitted CONNACK property.
 - [x] Implement CONNACK encoding/decoding and packet facade dispatch for exactly CONNECT/CONNACK. Other well-framed schemas return explicit unsupported results; Frame decoding remains opaque.
-- [x] Add encode-side invalid values, limits with incorrect types, field maximum/excess boundaries, valid packets at all limit boundaries, malformed complete field lengths, canonical MQTT 5 VBIs, legacy Remaining Length behavior, and deterministic binary mutation/truncation coverage.
+- [x] Add encode-side invalid values, limits with incorrect types, field maximum/excess boundaries, valid packets at all limit boundaries, malformed complete field lengths, canonical MQTT 5 VBIs in both envelope and packet decoding, and deterministic binary mutation/truncation coverage.
 - [x] Run the full MQTT test directory and confirm errors never escape as exceptions for arbitrary peer bytes; do not introduce property-testing dependencies for this slice.
 
 ## Task 5: Scope documentation and distribution qualification
@@ -163,7 +159,10 @@ connack5 = <<0x20, 3, 0, 0, 0>>
 - [x] Review complete tracked and new-file changes against M0. Use an independent read-only review for specification compliance and codec robustness, resolve actionable findings, and rerun affected checks after code changes.
 - [x] Confirm no new runtime workers/listeners or fake broker operations, no changes to existing AMQP behavior, no unrelated files, and no commit/publication. Report exact test/archive outcomes and remaining milestone boundaries.
 
-## Completion evidence — 2026-10-26
+## Initial completion evidence — 2026-10-26
+
+These results record the original implementation before the MQTT 5.0-only
+amendment. The current contract above incorporates the owner's narrowed scope.
 
 - PASS: complete eight-command root sequence with Elixir 1.18.4 / OTP 28.5.0.1; warning-free compilation; 290 tests, zero failures, including 76 MQTT tests.
 - PASS: compiler-xref/parsed-syntax architecture check, 1,698 source references across six applications; no xref cycles.
@@ -171,3 +170,13 @@ connack5 = <<0x20, 3, 0, 0, 0>>
 - PASS: independent clean standalone and `runtime: false` embedding consumers compile with warnings as errors, decode the literal CONNECT fixture, and exercise startup/host-supervised shutdown.
 - PASS: independent read-only codec review and final combined source/diff review. Property-length overflow guard and the stale five-app release fixture were corrected; integrated verification passed afterward.
 - NOT IMPLEMENTED: M1–M5 packet expansion, broker behavior, sockets, and durability. No commit, publication, release, or deployment performed.
+
+## MQTT 5.0-only amendment — 2026-10-26
+
+- [x] Apply the owner's MQTT 5.0-only boundary to the implementation, active instructions, design, roadmap, and package examples; remove MQTT 3.1.1 codec branches and planned runtime support.
+- [x] Observe four failing boundary regressions for legacy packets/selectors and nonminimal envelope lengths, then make them pass. Retain MQTT 5 field, property, limit, and adversarial coverage.
+- [x] Run the complete eight-command root sequence: 294 tests, zero failures (80 MQTT), warning-free compilation, 1,690 source references across six apps, and no xref cycles.
+- [x] Rebuild six `0.1.0` archives in `/tmp/graviton-mqtt5-only-hex-Lxmk2J/packages`, inspect their exact-version metadata, and pass standalone/embedding consumers using MQTT 5.0 fixtures. Verify legacy rejection from unpacked archives.
+
+This amendment changes only the protocol boundary. M1–M5 broker/runtime
+work remains unimplemented. The amendment has not been committed or pushed.

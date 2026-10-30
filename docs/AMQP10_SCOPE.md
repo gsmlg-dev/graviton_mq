@@ -1,5 +1,71 @@
 # AMQP 1.0 Scope
 
+The foundation below records the completed codec milestones. The owner-approved
+[G0–G7 scope](ACTIVE_SCOPE.md) now authorizes later AMQP client/broker work.
+Preserve these historical guarantees and use the [capability matrix](CAPABILITIES.md)
+for current implementation and independent-peer evidence.
+
+## Active G3–G5 codec increments
+
+The current working tree adds binary, ubyte, byte, short, int, long, timestamp
+and UUID wire support to the historical subset. Signed compact constructors
+retain their semantic integer type; timestamp is signed 64-bit and UUID is
+16 opaque octets. Binary bytes remain distinct from string and symbol.
+Scalar and compound encoders check selected byte budgets before allocation.
+G5 adds float, double, decimal32/64/128 as exact bit binaries and char as a
+Unicode scalar. Homogeneous arrays cover scalars, compounds, nested arrays
+and described constructor chains. Their shared constructor, element identity,
+counts and depth/byte limits are preserved; null element types are invalid.
+`value_wire_completion_test.exs` includes independent Proton 0.40.0 vectors;
+the external producer/consumer qualification is recorded separately.
+
+`Codec.Frame.encode/1,2` validates an existing Frame's declared size, offset,
+type, channel, extended-header alignment and configured bounds before joining
+bytes. The header and body remain opaque; decoder behavior is preserved.
+SASL frame encoding remains explicitly unsupported. Frame/scalar regressions
+are in `test/codec/frame_encode_test.exs` and `value_scalar_extension_test.exs`.
+These codec increments qualify binary transformations. G3 additionally now
+has pure Endpoint/SessionEngine behavior and an independent network client,
+qualified separately against Artemis in the [client record](qualification/2026-10-30-g3-client.md).
+G4 adds a deterministic queue/effect runtime and a bounded AMQP memory broker;
+see the [broker guide](AMQP10_BROKER.md). The bounded
+[G6 local durability exit](qualification/2026-10-30-g6-local-durability.md)
+adds queue WAL/sync/recovery evidence. The later
+[clause inventory](qualification/2026-10-30-amqp10-requirement-inventory.md)
+and [G7 record](qualification/2026-10-30-g7-local-qualification.md) qualify the
+selected network profiles separately from codec or memory acceptance.
+
+The pure Flow schema is now available as `Performative.Flow` and through
+`Codec.Performative`. It accepts descriptors `0x13` and `amqp:flow:list`,
+validates eleven positional fields, materializes tagged Boolean false for
+drain/echo and encodes numeric descriptors with preserved interior nulls.
+Required incoming-window, next-outgoing-id and outgoing-window values and all
+optional numerical fields retain their exact tagged uint type; properties
+retain ordered symbol-keyed fields. Tests are in `flow_performative_test.exs`.
+This represents flow data; it does not execute credit, sequence or session
+transitions. The definition follows OASIS AMQP Transport §2.7.4 and §2.8.
+
+Attach/Source/Target, Transfer/Disposition and Received/Accepted/Rejected/
+Released/Modified are also available as pure schemas. Both standard descriptor
+forms decode; known typed composites encode numerically. Attach preserves
+separate handle data and validates sender initial-delivery-count. Source
+distribution modes admit custom symbols as data, without implying endpoint
+support; transaction schemas remain explicitly unsupported. Transfer retains
+an absent settled flag for continuation inheritance. Disposition does not
+numerically order delivery ranges across serial wraparound. Nested Error and
+Modified annotation source bytes survive decoding for lossless core mapping.
+
+`Codec.Message` adds all nine format-0 sections, exact tagged property fields,
+symbol/ulong annotation keys, string-keyed scalar/null application properties
+and section ordering. Its decoded Message retains original bytes; encoding an
+existing Message returns those bytes unchanged. Constructing new sections
+checks aggregate size before allocating encodings. It rejects forbidden
+content-encoding combinations and identity encoding. General homogeneous
+arrays use the shared bounded codec; application properties still require
+simple scalar/null values. Annotation
+understanding, durability acceptance and expiry are later endpoint/broker
+semantics. See the [G3 codec evidence](qualification/2026-10-30-g3-codec.md).
+
 ## Protocol target and clean-room constraint
 
 GravitonMQ targets AMQP 1.0. Milestone 1 provides only a bounded binary codec
@@ -180,7 +246,7 @@ semantic types from invalid values. Frame size, value size, compound count,
 and nesting limits are immutable caller data rather than negotiated or
 process-owned state.
 
-The current semantic subset is exactly `null`, `boolean`, `ushort`, `uint`,
+The historical pre-G3 subset is `null`, `boolean`, `ushort`, `uint`,
 `ulong`, `string`, `symbol`, `list`, ordered `map`, symbol arrays, and recursively
 composed described values with `ulong` or `symbol` descriptors. Signed integers,
 binary, floating and decimal values, timestamps, UUIDs, general

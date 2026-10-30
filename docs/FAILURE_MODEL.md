@@ -1,5 +1,12 @@
 # Failure Model
 
+This document preserves the Milestone 0 fault-domain design and its original
+qualification boundary. The [current architecture](ARCHITECTURE.md) specializes
+that design with running connection owners and pure Session-owned Link state;
+the [capability matrix](CAPABILITIES.md) and role guides record actual failure
+and recovery evidence. Future-tense and empty-supervisor statements below
+describe Milestone 0.
+
 ## Status
 
 Milestone 0 establishes fault-domain boundaries without starting operational

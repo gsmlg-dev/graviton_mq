@@ -4,9 +4,18 @@ These instructions apply to the entire repository.
 
 ## Product and clean-room boundaries
 
-- GravitonMQ targets AMQP 1.0 and MQTT 3.1.1/5.0. Do not use AMQP 0-9-1
+- GravitonMQ targets AMQP 1.0 and MQTT 5.0 only. Do not use AMQP 0-9-1
   methods, exchanges, bindings, channels, `basic.publish`, or `basic.consume`
   as the protocol foundation.
+- MQTT 3.1 is unsupported. Preserve historical MQTT 3.1.1 CONNECT/CONNACK
+  codec compatibility and regressions; its later runtime needs separate
+  acceptance. Operational roles in the active Goal target MQTT 5.0.
+- The MQTT product target includes our own network client and broker, with
+  independent lifecycles and a shared pure protocol layer. Implement MQTT
+  behavior from the specification; do not wrap another MQTT implementation
+  or substitute an external service for our broker. Standard Elixir/OTP networking
+  and TLS primitives are infrastructure; independent MQTT peers are allowed
+  for interoperability tests. The active G0–G7 Goal advances beyond historical M0.
 - RabbitMQ is an architectural reference only, for process ownership,
   supervision, connection and session boundaries, queue-type abstraction,
   state machines and effects, storage boundaries, and fault isolation.
@@ -25,6 +34,9 @@ graviton_mq_runtime -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_storage -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_amqp10  -> graviton_mq_core
 graviton_mq_runtime -> graviton_mq_mqtt    -> graviton_mq_core
+graviton_mq_client  -> graviton_mq_core
+graviton_mq_client  -> graviton_mq_amqp10
+graviton_mq_client  -> graviton_mq_mqtt
 ```
 
 - `graviton_mq_core` has no dependency on another GravitonMQ child.
@@ -33,6 +45,10 @@ graviton_mq_runtime -> graviton_mq_mqtt    -> graviton_mq_core
 - `graviton_mq_mqtt` depends only on core and owns `GravitonMQ.MQTT`.
 - `graviton_mq_runtime` may depend on core, storage, AMQP 1.0, and MQTT.
 - `graviton_mq` depends only on runtime.
+- `graviton_mq_client` depends only on core and the two pure protocol libraries;
+  it must not reference broker runtime, storage, or public composition.
+  It owns `GravitonMQ.Client`, `GravitonMQ.MQTTClient`, and
+  `GravitonMQ.AMQP10Client`, with no Application callback or implicit broker.
 - Do not introduce dependency cycles. Only `graviton_mq` owns the top-level
   `Application` callback.
 
@@ -45,8 +61,10 @@ The source-level rules are stricter than declarations in `mix.exs`:
 - all MQTT modules remain pure: no process, transport/socket, or clock
   dependencies, and no references to storage, runtime, or the public
   composition application;
-- pure AMQP type and codec modules must not reference runtime, storage, TCP,
-  sockets, or transport libraries; and
+- all AMQP protocol modules, including endpoint/session transitions, remain
+  pure: no process, clock/timer, runtime, storage, socket, or transport
+  dependencies. Running owners interpret their explicit effects in the client
+  or broker runtime applications; and
 - the application graph must remain acyclic.
 
 Keep `mix graviton_mq.check_architecture` based on compiler xref manifests and
@@ -58,7 +76,9 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
   every signed and unsigned integer type, are distinct values. Compact wire
   constructors such as `smalluint` are encoder choices, not semantic value
   types.
-- The bounded performative codec supports Open, Begin, Detach, End, and Close.
+- The historical bounded performative codec supports Open, Begin, Detach, End,
+  and Close. G3–G5 extend it with Attach, Flow, Transfer, and Disposition;
+  preserve the foundation schemas and their historical acceptance.
   Decode their standard numeric and symbolic descriptors into dedicated
   immutable structs and encode the standard numeric descriptors. Detach, End, and Close
   carry an optional nested `GravitonMQ.AMQP10.Error`; Error is protocol data, not
@@ -90,7 +110,10 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
 - Boolean values decode from `0x41`, `0x42`, and `0x56` with payload `0` or `1`;
   reject other payload octets as malformed and encode canonically with `0x41`
   or `0x42`. Boolean joins the shared bounded subset recursively, including
-  Open/Begin properties and Error info. Arrays remain symbol-only.
+  Open/Begin properties and Error info. The historical symbol-only array
+  subset is extended in G5 to homogeneous scalar, compound and described
+  arrays, retaining exact element type and descriptor identity. Float/double
+  and decimal values retain their exact encoded bits; char is a Unicode scalar.
 - Keep frame and authoritative message content opaque. Frame decoding must not
   invoke performative or message decoding implicitly. Malformed, unsupported,
   limit-exceeded, invalid-value, and incomplete results remain explicit; do
@@ -132,22 +155,33 @@ parsed Elixir syntax. Do not replace source dependency analysis with grep.
   result into success.
 - The first delivery guarantee target is at-least-once. Do not claim
   exactly-once delivery.
-- Do not add fake broker functions that return `:ok`, empty success data, or
-  other values implying that an unimplemented operation works.
+- Do not add fake client or broker functions that return `:ok`, empty success
+  data, or other values implying that an unimplemented operation works.
 
 ## Lifecycle and naming
 
-- Standalone and embedded operation use `GravitonMQ.start_link/1` and
+- Broker standalone and embedded operation use `GravitonMQ.start_link/1` and
   `GravitonMQ.child_spec/1`. `GravitonMQ.Application` starts its default
   instance through the same API.
+- `GravitonMQ.MQTTClient` and the later `GravitonMQ.AMQP10Client` belong to
+  the independent client library. Running outgoing owners live under
+  `GravitonMQ.Client`; broker owners remain under `GravitonMQ.Runtime`.
+  Keep protocol namespaces pure. See ADR 0007 for the client ownership amendment.
 - Instance `:name` and `:runtime_supervisor_name` options are exact OTP names.
   Do not create atoms dynamically from external strings. Two registered
   instances need distinct names at both levels.
-- Supervisors remain empty below the public and runtime
-  supervision boundaries. Do not start a listener, queue, storage worker, or
-  effect executor merely to occupy a supervision-tree slot.
+- Historical M0 supervisors are empty. Introduce running children only with
+  functioning behavior and stage evidence; never add one merely to occupy a slot.
 
-## Current milestone exclusions
+## Active Goal and historical milestone exclusions
+
+The owner authorized G0–G7 on 2026-10-29 in `docs/ACTIVE_SCOPE.md`. Implement
+the four network roles under that scope and ADR 0007; update
+`docs/CAPABILITIES.md` with actual evidence. Historical exclusions below
+describe completed slices and do not prohibit authorized later stages.
+Preserve their acceptance records and all architecture/data invariants.
+Clustering/Raft, management UI, cross-protocol bridge, AMQP transactions,
+AMQP 0-9-1, and the deferred QUIC TODO remain outside the active Goal.
 
 The completed AMQP foundation supports only Open, Begin, Detach, End, and Close
 performative schemas, nested Error, and its bounded value subset. Preserve its
@@ -158,19 +192,23 @@ in `docs/superpowers/specs/2026-10-09-boolean-detach-codec-design.md`.
 The owner-approved MQTT M0 scope is recorded in
 `docs/superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md` and
 `docs/superpowers/plans/2026-10-26-mqtt-connect-connack-codec.md`. It adds only a
-sixth library application, a pure opaque packet envelope, MQTT 3.1.1/5.0
+sixth library application, a pure opaque packet envelope, MQTT 5.0 only
 CONNECT/CONNACK data and codecs, limits, architecture checks, and package/scope
 integration. Decode does not authenticate, register clients, create sessions,
 run timers, or invoke broker behavior. Keep credentials out of error details.
 
-Do not extend M0 to other MQTT packet schemas, publish/subscribe APIs, topic
-matching, session transitions, listeners, TCP/TLS/WebSocket, queues, concrete
+Do not extend M0 to other MQTT packet schemas, a network-client runtime/API,
+publish/subscribe APIs, topic matching, session transitions, listeners,
+TCP/TLS/WebSocket, queues, concrete
 storage, or runtime workers. Existing AMQP exclusions remain: other
 performative schemas, message sections, protocol/SASL negotiation,
 Connection/Session/Link behavior, scheduling, delivery, filesystem
 WAL/segments/fsync/recovery, Raft, clustering, management APIs/UI, or AMQP
 0-9-1. Do not add Phoenix, Ra, Khepri, Ranch, Bandit, or speculative runtime
-dependencies. Do not claim a working MQTT broker or full protocol compatibility.
+dependencies. Do not claim a working MQTT client, broker, or full protocol
+compatibility. Future client and broker stages require independent-peer
+interoperability evidence in both directions; self-to-self tests alone do
+not qualify either role.
 
 ## Required verification
 

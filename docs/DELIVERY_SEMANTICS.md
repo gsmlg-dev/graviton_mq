@@ -1,5 +1,11 @@
 # Delivery Semantics
 
+This document preserves the Milestone 0 design and its original qualification
+boundary. The [active scope](ACTIVE_SCOPE.md), [capability matrix](CAPABILITIES.md)
+and [ADR 0008](adr/0008-local-durability-profiles.md) describe the implemented
+memory/local-durable profiles. References below to future behavior or absent
+implementations apply to that historical milestone.
+
 ## Status and initial target
 
 Milestone 0 defines data structures, mappings, and future invariants; it

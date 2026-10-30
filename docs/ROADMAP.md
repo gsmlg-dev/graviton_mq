@@ -1,5 +1,44 @@
 # Roadmap
 
+## Active G0–G7 Goal — 2026-10-29
+
+The owner now authorizes four independently verifiable network roles:
+AMQP1 broker/client and MQTT5 broker/client. The
+[active scope](ACTIVE_SCOPE.md) defines the ordered stages and actual exits;
+the [capability matrix](CAPABILITIES.md) records their implementation and
+evidence. MQTT client is the first operational path, followed by memory MQTT
+broker; AMQP client/broker, full selected-profile semantics, real persistence,
+and CI/installation qualification follow. Memory-only operation is intermediate.
+
+G0/G1 and the bounded G2 memory broker exit now have recorded qualification:
+[G0/G1](qualification/2026-10-29-g0-g1.md) and
+[G2](qualification/2026-10-30-g2.md), including independent peers and clean
+archive consumers. The initial [G3 AMQP client exit](qualification/2026-10-30-g3-client.md)
+now has pure endpoints, native outgoing runtime, five Artemis tests and a
+client-only archive exchange. The bounded [G4 memory broker exit](qualification/2026-10-30-g4-broker.md)
+passed with the deterministic queue, memory runtime, independent Proton and
+rebuilt consumers. The bounded [G6 local durability exit](qualification/2026-10-30-g6-local-durability.md)
+passed 1,073 tests, all eight gates and all seven archives/three clean consumers.
+[G7 local evidence](qualification/2026-10-30-g7-local-qualification.md) includes
+pinned peer preparation, model/fuzz and sustained four-role traffic. G5 clause
+audits and their repairs now have final integrated evidence: 1,117 tests,
+all eight gates, seven archives and three clean installed consumers. G7's
+final-source 15-minute run passed 35,976 exact four-role round trips, final
+drain and cleanup. Local selected-profile G0–G7 exits are complete; hosted
+CI was NOT RUN at that local checkpoint. Excluded capabilities and execution
+limits remain explicit in the matrix; this is not universal protocol or
+production qualification.
+
+[ADR 0007](adr/0007-independent-network-client-application.md) introduces a
+separate client application with no broker dependencies. Preserve MQTT3.1.1
+CONNECT/CONNACK codec regressions; qualify any legacy runtime separately.
+Historical milestone exclusions and evidence below retain their original
+meaning and do not block these newly authorized stages. The original Goal
+implied no branch/worktree, commit, publication, release, or deployment.
+The owner's subsequent [release authorization](ACTIVE_SCOPE.md#release-authorization--2026-10-30)
+adds commit, push and `0.2.0` package/GitHub publication on the existing branch.
+See the [release notes](releases/0.2.0.md) for shipped profiles and evidence.
+
 The roadmap preserves the separation between AMQP 1.0 and MQTT protocol work,
 broker semantics, storage, and runtime processes. A milestone must not advertise
 capability until its tests exercise that capability.
@@ -95,36 +134,70 @@ This completed slice provides:
 
 The completed, owner-approved M0 slice adds a sixth library application
 depending only on core, with runtime composition and source-enforced protocol isolation. It
-provides the opaque common packet envelope, MQTT 3.1.1/5.0 CONNECT/CONNACK,
-version-specific validation, ordered MQTT 5 properties, configured limits,
+provides the opaque common packet envelope, MQTT 5.0 CONNECT/CONNACK,
+protocol-level validation, ordered MQTT 5 properties, configured limits,
 and explicit incomplete/malformed/unsupported/limit/invalid-value results.
 Package qualification includes six archives and separate standalone and
 host-supervised clean consumers. No runtime broker behavior is added.
+The historical MQTT5-only amendment rejected legacy codecs. The active Goal
+now preserves MQTT3.1.1 CONNECT/CONNACK regressions, without qualifying its runtime.
 
-Qualification on 2026-10-26 passed the complete root verification sequence:
+Initial M0 qualification on 2026-10-26, before the MQTT 5.0-only amendment,
+passed the complete root verification sequence:
 290 tests, zero failures (76 MQTT tests), warning-free compilation, architecture
 analysis across six applications, and no xref cycles. All six archives and
 both clean consumers passed; see the
 [M0 evidence](superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md#m0-implementation-qualification--2026-10-26).
 
-The [approved MQTT design](superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md)
-separates the later stages:
+The MQTT 5.0-only amendment then passed all eight checks with 294 tests,
+zero failures (80 MQTT), warning-free compilation, and no architecture or
+xref cycle violations. Six rebuilt archives and both clean consumers passed;
+an unpacked consumer explicitly rejected MQTT 3.1/3.1.1. See the
+[amendment evidence](superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md#mqtt-50-only-boundary-amendment--2026-10-26).
+
+The owner subsequently required our own MQTT 5.0 network client and broker.
+The [MQTT design](superpowers/specs/2026-10-26-mqtt-broker-embedding-design.md)
+retains a shared pure protocol layer and separates each role's state and
+runtime. Neither role may require the other to be started. M0 remains
+complete at its original codec/lifecycle boundary. The original design's
+decomposition below is mapped into active G1–G7; current completion follows
+the capability matrix rather than these historical future labels:
 
 | Stage | Future deliverable |
 | --- | --- |
-| M1 | Remaining packet schemas and their property/direction validation |
-| M2 | Pure topic/session/routing/retained/Will/expiry semantics and effects |
-| M3 | Embedded MQTT 5 broker, opt-in TCP/TLS, authentication, QoS 0/1, in-memory reconnects |
-| M4 | QoS 2 and operational MQTT 3.1.1 semantics |
-| M5 | Separately designed persistent state, recovery, and durability qualification |
+| M1 | Shared remaining packet schemas and their property/direction validation |
+| M2a | Pure client lifecycle, QoS 0/1 send/receive, subscriptions/grants, keep alive, session resumption, and reconnect effects |
+| M2b | Pure broker topic/session/routing/retained/Will/expiry semantics and effects |
+| M3a | Independent host-supervised network client, outgoing TCP/TLS, credentials, bounded API, QoS 0/1, and in-memory reconnects |
+| M3b | Embedded MQTT 5 broker, opt-in TCP/TLS, authentication, QoS 0/1, and in-memory reconnects |
+| M4 | MQTT 5.0 QoS 2 on both roles, including duplicate and reconnect qualification |
+| M5 | Separately designed broker persistence and client inflight persistence, recovery, and durability qualification |
+
+M3a follows M1/M2a and M3b follows M1/M2b; deliver the independent client
+before the embedded broker, each with a bounded reviewed plan. Qualify our
+client against an independent broker and independent clients against our
+broker, then exercise our client/broker together. Self-to-self exchanges
+alone can hide shared defects. Test peers are not production dependencies.
 
 These stages require independent acceptance evidence; codec tests do not
-establish network-client interoperability or a functioning broker. See
+establish a functioning network client, broker, or interoperability. See
 [MQTT scope](MQTT_SCOPE.md) for the exact M0 API and exclusions.
 
-## Later AMQP and shared broker milestones
+### Unscheduled MQTT QUIC TODO
 
-Later work should proceed in independently verifiable increments:
+- [ ] Reliable MQTT 5.0 transport over QUIC streams for the client and broker.
+- [ ] Realtime state over QUIC DATAGRAM after explicit peer negotiation,
+  using a separately versioned extension with no MQTT standard capability claim.
+
+Record only; implementation is deferred. See the
+[QUIC TODO boundary](MQTT_SCOPE.md#todo-quic-support-not-implemented).
+The existing milestone implementation and acceptance scopes remain unchanged.
+
+## Historical AMQP and shared broker sequence
+
+The sequence recorded below predates the active G0–G7 implementation. Retain
+it as design history; current behavior and evidence follow the active scope
+and capability matrix. The original planned increments were:
 
 1. Complete the remaining required AMQP performative and message-section codec
    surface in separately bounded slices. Flow is the recommended next schema,
@@ -146,6 +219,7 @@ Later work should proceed in independently verifiable increments:
    are stable.
 9. Add management capabilities outside the message hot path.
 
-TLS, WebSocket transport, clustering, Raft, other protocol extensions, and a
-management UI are intentionally deferred until their prerequisite semantics
-are demonstrated.
+At that baseline, TLS, WebSocket transport, clustering, Raft, other protocol
+extensions and management UI were deferred. The active Goal now implements
+TCP/TLS roles; WebSocket, clustering/Raft, bridges, transactions, management UI
+and QUIC retain their explicit current exclusions.
