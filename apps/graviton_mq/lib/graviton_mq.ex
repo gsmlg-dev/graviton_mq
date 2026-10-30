@@ -3,12 +3,14 @@ defmodule GravitonMQ do
   Public namespace for the embeddable GravitonMQ application.
 
   `start_link/1` and `child_spec/1` are the common standalone and embedded
-  lifecycle. Milestone 0 exposes no broker operations: there is no listener,
-  publish path, consumer path, queue, or persistence engine.
+  lifecycle. Explicit `:mqtt` and `:amqp10` configurations enable their
+  instance-local brokers. Memory is the default; local persistence is opt-in.
+  Without either protocol, the historical empty boundary is preserved.
+  Host topic operations are independent of the outgoing network client.
   """
 
   @doc """
-  Starts one empty GravitonMQ instance supervision tree.
+  Starts one GravitonMQ instance supervision tree.
 
   `:name` and `:runtime_supervisor_name` are exact OTP registration names
   supplied by the caller. They are never converted into atoms.
@@ -27,8 +29,29 @@ defmodule GravitonMQ do
 
     %{
       id: {__MODULE__, name},
-      start: {__MODULE__, :start_link, [options]},
+      start: {__MODULE__, :start_link, [fn -> options end]},
       type: :supervisor
     }
   end
+
+  @doc "Admits a host publication; completion identifies memory or synchronized local responsibility."
+  def publish(instance, topic, payload, options \\ []),
+    do: GravitonMQ.Runtime.MQTT.publish(instance, topic, payload, options)
+
+  @doc "Admits a monitored host subscription with explicit demand and acknowledgements."
+  def subscribe(instance, filter, options \\ []),
+    do: GravitonMQ.Runtime.MQTT.subscribe(instance, filter, options)
+
+  def request(instance, subscription, count),
+    do: GravitonMQ.Runtime.MQTT.request(instance, subscription, count)
+
+  def ack(instance, delivery), do: GravitonMQ.Runtime.MQTT.ack(instance, delivery)
+
+  def unsubscribe(instance, subscription),
+    do: GravitonMQ.Runtime.MQTT.unsubscribe(instance, subscription)
+
+  def status(instance), do: GravitonMQ.Runtime.MQTT.status(instance)
+
+  @doc "Returns the explicitly enabled AMQP broker's bounded status and responsibility profile."
+  def amqp10_status(instance), do: GravitonMQ.Runtime.AMQP10.status(instance)
 end

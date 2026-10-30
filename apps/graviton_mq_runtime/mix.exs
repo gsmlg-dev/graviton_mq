@@ -19,6 +19,8 @@ defmodule GravitonMQRuntime.MixProject do
     ]
   end
 
+  def application, do: [extra_applications: [:ssl]]
+
   defp deps do
     [
       {:graviton_mq_core, in_umbrella: true},

@@ -16,13 +16,24 @@ defmodule GravitonMQ.PublicModulesTest do
     end
   end
 
-  test "no unimplemented broker operations are exposed" do
-    for {function, arity} <- [publish: 3, subscribe: 3, consume: 3, declare_queue: 2, ack: 2] do
+  test "no unimplemented queue operations are exposed" do
+    for {function, arity} <- [consume: 3, declare_queue: 2] do
       refute function_exported?(GravitonMQ, function, arity)
     end
   end
 
-  test "the public surface exposes only the common instance lifecycle" do
+  test "an instance without MQTT configuration cannot claim to accept host operations" do
+    assert {:error, :mqtt_not_enabled} =
+             GravitonMQ.publish(GravitonMQ.Supervisor, "unconfigured/value", "payload")
+
+    assert {:error, :mqtt_not_enabled} =
+             GravitonMQ.subscribe(GravitonMQ.Supervisor, "unconfigured/#")
+
+    assert {:error, :mqtt_not_enabled} = GravitonMQ.status(GravitonMQ.Supervisor)
+    assert {:error, :mqtt_not_enabled} = GravitonMQ.ack(GravitonMQ.Supervisor, make_ref())
+  end
+
+  test "the common instance lifecycle remains available" do
     assert function_exported?(GravitonMQ, :start_link, 1)
     assert function_exported?(GravitonMQ, :child_spec, 1)
   end

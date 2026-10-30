@@ -8,6 +8,7 @@ defmodule GravitonMQ.ApplicationTest do
           :graviton_mq_core,
           :graviton_mq_amqp10,
           :graviton_mq_mqtt,
+          :graviton_mq_client,
           :graviton_mq_storage,
           :graviton_mq_runtime
         ] do
