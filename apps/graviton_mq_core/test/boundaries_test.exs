@@ -27,7 +27,9 @@ defmodule GravitonMQ.Core.BoundariesTest do
     end)
   end
 
-  test "the queue transition function is not implemented in Milestone 0" do
-    refute function_exported?(GravitonMQ.Queue.Machine, :apply, 2)
+  test "the active queue stage exports explicit construction and pure transitions" do
+    assert Code.ensure_loaded?(GravitonMQ.Queue.Machine)
+    assert function_exported?(GravitonMQ.Queue.Machine, :new, 2)
+    assert function_exported?(GravitonMQ.Queue.Machine, :apply, 2)
   end
 end
