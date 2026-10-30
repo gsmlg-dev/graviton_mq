@@ -6,3 +6,4 @@
 *.ez
 *.beam
 /.elixir_ls/
+__pycache__/

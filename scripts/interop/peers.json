@@ -1,0 +1,12 @@
+{
+  "mosquitto": {
+    "version": "2.1.2",
+    "url": "https://mosquitto.org/files/source/mosquitto-2.1.2.tar.gz",
+    "sha256": "fd905380691ac65ea5a93779e8214941829e3d6e038d5edff9eac5fd74cbed02"
+  },
+  "artemis": {
+    "version": "2.41.0",
+    "url": "https://archive.apache.org/dist/activemq/activemq-artemis/2.41.0/apache-artemis-2.41.0-bin.tar.gz",
+    "sha512": "f48fcf1a6530adbdedad5aa1e22cba22e90bc1ddbaf9f9a52879e32069a3251e4b9248d38d592c4df3c7350805379d9236835f505e55ed8fb30fc18574ab65e4"
+  }
+}

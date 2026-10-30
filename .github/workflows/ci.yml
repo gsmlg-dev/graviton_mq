@@ -42,8 +42,58 @@ jobs:
       - name: Compile without warnings
         run: mix compile --warnings-as-errors
 
+      - name: Unit and local runtime tests
+        run: mix test
+
       - name: Check architecture
         run: mix graviton_mq.check_architecture
 
       - name: Check source cycles
         run: mix xref graph --format cycles --fail-above 0
+
+  interoperability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ERL_FLAGS: "+S 4:4"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install independent peer build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libssl-dev libffi-dev libcjson-dev
+      - name: Prepare hash-pinned peers
+        run: python scripts/interop/prepare.py --directory "$RUNNER_TEMP/graviton-peers"
+      - name: Fetch dependencies and compile
+        run: |
+          mix deps.get
+          mix compile --warnings-as-errors
+      - name: Four network roles and crash recovery against independent peers
+        run: python scripts/interop/run.py --directory "$RUNNER_TEMP/graviton-peers" --logs "$RUNNER_TEMP/interop-tests" -- mix test
+      - name: Sustained four-role memory traffic and resource bounds
+        run: python scripts/interop/run.py --directory "$RUNNER_TEMP/graviton-peers" --logs "$RUNNER_TEMP/interop-soak" -- mix run --no-start scripts/interop/soak.exs --duration 300 --rate 10 --payload-bytes 2048 --logs "$RUNNER_TEMP/soak"
+      - name: Build seven archives and qualify three clean installed consumers
+        run: |
+          elixir scripts/stage_hex.exs "$RUNNER_TEMP/graviton-hex"
+          python scripts/interop/run.py --directory "$RUNNER_TEMP/graviton-peers" --logs "$RUNNER_TEMP/interop-packages" -- elixir scripts/build_hex.exs "$RUNNER_TEMP/graviton-hex"
+      - name: Save peer configuration and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: independent-peer-evidence
+          path: |
+            ${{ runner.temp }}/interop-tests
+            ${{ runner.temp }}/interop-packages
+            ${{ runner.temp }}/interop-soak
+            ${{ runner.temp }}/soak
