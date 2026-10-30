@@ -38,6 +38,7 @@ defmodule GravitonMQ.Architecture do
     graviton_mq_storage: [:graviton_mq_core],
     graviton_mq_amqp10: [:graviton_mq_core],
     graviton_mq_mqtt: [:graviton_mq_core],
+    graviton_mq_client: [:graviton_mq_core, :graviton_mq_amqp10, :graviton_mq_mqtt],
     graviton_mq_runtime: [
       :graviton_mq_core,
       :graviton_mq_storage,
@@ -85,7 +86,8 @@ defmodule GravitonMQ.Architecture do
     Registry
   ]
 
-  @mqtt_process_modules @process_modules ++ [:gen_server, :gen_statem, :supervisor, :proc_lib]
+  @protocol_apps [:graviton_mq_amqp10, :graviton_mq_mqtt]
+  @protocol_process_modules @process_modules ++ [:gen_server, :gen_statem, :supervisor, :proc_lib]
   @clock_modules [System, DateTime, NaiveDateTime, Time, Date, :calendar, :timer, :os]
 
   @type violation ::
@@ -115,14 +117,35 @@ defmodule GravitonMQ.Architecture do
     module_name = Atom.to_string(module)
 
     cond do
-      in_namespace?(module_name, "Elixir.GravitonMQ.Core") -> :graviton_mq_core
-      in_namespace?(module_name, "Elixir.GravitonMQ.Queue") -> :graviton_mq_core
-      in_namespace?(module_name, "Elixir.GravitonMQ.Storage") -> :graviton_mq_storage
-      in_namespace?(module_name, "Elixir.GravitonMQ.AMQP10") -> :graviton_mq_amqp10
-      in_namespace?(module_name, "Elixir.GravitonMQ.MQTT") -> :graviton_mq_mqtt
-      in_namespace?(module_name, "Elixir.GravitonMQ.Runtime") -> :graviton_mq_runtime
-      in_namespace?(module_name, "Elixir.GravitonMQ") -> :graviton_mq
-      true -> nil
+      in_namespace?(module_name, "Elixir.GravitonMQ.Core") ->
+        :graviton_mq_core
+
+      in_namespace?(module_name, "Elixir.GravitonMQ.Queue") ->
+        :graviton_mq_core
+
+      in_namespace?(module_name, "Elixir.GravitonMQ.Storage") ->
+        :graviton_mq_storage
+
+      in_namespace?(module_name, "Elixir.GravitonMQ.AMQP10") ->
+        :graviton_mq_amqp10
+
+      in_namespace?(module_name, "Elixir.GravitonMQ.MQTT") ->
+        :graviton_mq_mqtt
+
+      in_namespace?(module_name, "Elixir.GravitonMQ.Runtime") ->
+        :graviton_mq_runtime
+
+      in_namespace?(module_name, "Elixir.GravitonMQ.Client") ->
+        :graviton_mq_client
+
+      module_name in ["Elixir.GravitonMQ.MQTTClient", "Elixir.GravitonMQ.AMQP10Client"] ->
+        :graviton_mq_client
+
+      in_namespace?(module_name, "Elixir.GravitonMQ") ->
+        :graviton_mq
+
+      true ->
+        nil
     end
   end
 
@@ -138,12 +161,12 @@ defmodule GravitonMQ.Architecture do
   end
 
   def format_violation({:forbidden_process_dependency, reference}) do
-    "#{location(reference)}: pure #{protocol_name(reference)} codec source references process module " <>
+    "#{location(reference)}: pure #{protocol_name(reference)} source references process module " <>
       inspect(reference.target_module)
   end
 
   def format_violation({:forbidden_clock_dependency, reference}) do
-    "#{location(reference)}: pure MQTT source references clock module " <>
+    "#{location(reference)}: pure #{protocol_name(reference)} source references clock module " <>
       inspect(reference.target_module)
   end
 
@@ -171,7 +194,7 @@ defmodule GravitonMQ.Architecture do
   defp transport_violation(
          %Reference{source_app: source_app, target_module: target_module} = reference
        )
-       when source_app in [:graviton_mq_amqp10, :graviton_mq_mqtt] do
+       when source_app in @protocol_apps do
     if transport_module?(target_module) do
       [{:forbidden_transport_dependency, violation_details(reference)}]
     else
@@ -182,9 +205,10 @@ defmodule GravitonMQ.Architecture do
   defp transport_violation(_reference), do: []
 
   defp process_violation(
-         %Reference{source_app: :graviton_mq_mqtt, target_module: target_module} = reference
-       ) do
-    if target_module in @mqtt_process_modules do
+         %Reference{source_app: source_app, target_module: target_module} = reference
+       )
+       when source_app in @protocol_apps do
+    if target_module in @protocol_process_modules do
       [{:forbidden_process_dependency, violation_details(reference)}]
     else
       []
@@ -202,9 +226,9 @@ defmodule GravitonMQ.Architecture do
   end
 
   defp clock_violation(
-         %Reference{source_app: :graviton_mq_mqtt, target_module: target_module} = reference
+         %Reference{source_app: source_app, target_module: target_module} = reference
        )
-       when target_module in @clock_modules do
+       when source_app in @protocol_apps and target_module in @clock_modules do
     [{:forbidden_clock_dependency, violation_details(reference)}]
   end
 

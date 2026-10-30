@@ -8,6 +8,7 @@ defmodule GravitonMQ.ReleaseTest do
     graviton_mq_storage: [:graviton_mq_core],
     graviton_mq_amqp10: [:graviton_mq_core],
     graviton_mq_mqtt: [:graviton_mq_core],
+    graviton_mq_client: [:graviton_mq_core, :graviton_mq_amqp10, :graviton_mq_mqtt],
     graviton_mq_runtime: [
       :graviton_mq_core,
       :graviton_mq_storage,
@@ -55,7 +56,7 @@ defmodule GravitonMQ.ReleaseTest do
     assert status == 0, output
 
     assert File.read!(Path.join(staging, "packages.txt")) ==
-             "graviton_mq_core\ngraviton_mq_storage\ngraviton_mq_amqp10\ngraviton_mq_mqtt\ngraviton_mq_runtime\ngraviton_mq\n"
+             "graviton_mq_core\ngraviton_mq_storage\ngraviton_mq_amqp10\ngraviton_mq_mqtt\ngraviton_mq_client\ngraviton_mq_runtime\ngraviton_mq\n"
 
     for {app, dependencies} <- @dependencies do
       package = Path.join(staging, Atom.to_string(app))
@@ -78,8 +79,15 @@ defmodule GravitonMQ.ReleaseTest do
 
       application = literal_function(Path.join(package, "mix.exs"), :application)
 
-      assert application ==
-               if(app == :graviton_mq, do: [mod: {GravitonMQ.Application, []}], else: [])
+      expected_application =
+        case app do
+          :graviton_mq -> [mod: {GravitonMQ.Application, []}]
+          :graviton_mq_client -> [extra_applications: [:ssl]]
+          :graviton_mq_runtime -> [extra_applications: [:ssl]]
+          _ -> []
+        end
+
+      assert application == expected_application
     end
 
     File.write!(Path.join(staging, "preserve.txt"), "existing staging")
