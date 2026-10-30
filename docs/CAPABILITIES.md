@@ -5,6 +5,14 @@ Working-tree evidence, initiated 2026-10-29 and rechecked 2026-10-30. Review bas
 amendments were present. This matrix is updated with implementation evidence;
 authorization in [active scope](ACTIVE_SCOPE.md) is not a completion claim.
 
+Release update, 2026-10-30: **v0.2.0 is published** from
+`0b23da0fcbae9b91dacfdd2bd4384a4449a17694`. Hosted CI, all four independent
+network paths, recovery, sustained traffic and three public Hex consumers
+passed. Seven public package archives match the GitHub assets and all 145
+library files match the released source. See the
+[release qualification](qualification/2026-10-30-v0.2.0-release.md) and its
+[machine-readable record](qualification/2026-10-30-v0.2.0-release.json).
+
 PASS means the named check ran successfully. NOT RUN means evidence is still
 required. UNIMPLEMENTED and UNSUPPORTED describe distinct product boundaries.
 No published package, throughput, security certification, or disk durability
@@ -34,8 +42,11 @@ These results include the clause-audit repairs, metadata, QoS2 order/quota,
 exact AMQP message corpus and recovery cases. Final source-fixed sustained
 traffic passed **900,182 ms / 35,976 exact round trips**, final drain and
 complete cleanup. The local selected-profile G0–G7 exits are complete.
-Hosted CI is **NOT RUN**; all four external paths,
-recovery, soak and installed consumers are wired into the validated workflow.
+Hosted execution was NOT RUN at that local checkpoint. The subsequent
+[release CI](https://github.com/gsmlg-dev/graviton_mq/actions/runs/40995883322)
+passed all four external paths, recovery, a 300,073 ms / 11,996-round-trip
+soak, final drain/cleanup and installed consumers. Public Hex installation
+and publication checks also passed in the release qualification above.
 
 ## Foundation and active increments
 

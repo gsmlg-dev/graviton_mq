@@ -38,6 +38,10 @@ implied no branch/worktree, commit, publication, release, or deployment.
 The owner's subsequent [release authorization](ACTIVE_SCOPE.md#release-authorization--2026-10-30)
 adds commit, push and `0.2.0` package/GitHub publication on the existing branch.
 See the [release notes](releases/0.2.0.md) for shipped profiles and evidence.
+The [v0.2.0 release qualification](qualification/2026-10-30-v0.2.0-release.md)
+now records successful hosted CI, seven published Hex packages, matching
+GitHub assets and three public installed consumers. Historical local and
+milestone records below retain their original execution boundaries.
 
 The roadmap preserves the separation between AMQP 1.0 and MQTT protocol work,
 broker semantics, storage, and runtime processes. A milestone must not advertise

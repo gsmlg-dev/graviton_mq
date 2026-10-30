@@ -1,0 +1,325 @@
+{
+  "status": "PASS_SELECTED_RELEASE_PROFILE",
+  "version": "0.2.0",
+  "tag": "v0.2.0",
+  "release_commit": "0b23da0fcbae9b91dacfdd2bd4384a4449a17694",
+  "source_digest": "619b9643bf19196ed8c898dc7f674e76d29ef72856944d6b656f0eda471f687b",
+  "source_manifest_files": 320,
+  "toolchain": {
+    "elixir": "1.18.4",
+    "erlang_otp": "28.5.0.1"
+  },
+  "local_gates": {
+    "status": "PASS",
+    "commands": [
+      {
+        "command": "mix deps.get",
+        "exit_code": 0
+      },
+      {
+        "command": "mix format",
+        "exit_code": 0
+      },
+      {
+        "command": "mix format --check-formatted",
+        "exit_code": 0
+      },
+      {
+        "command": "mix compile --warnings-as-errors",
+        "exit_code": 0
+      },
+      {
+        "command": "mix test",
+        "exit_code": 0
+      },
+      {
+        "command": "mix graviton_mq.check_architecture",
+        "exit_code": 0
+      },
+      {
+        "command": "mix help xref",
+        "exit_code": 0
+      },
+      {
+        "command": "mix xref graph --format cycles --fail-above 0",
+        "exit_code": 0
+      }
+    ],
+    "tests": 1117,
+    "failures": 0,
+    "compile_warnings": 0,
+    "source_references": 6738,
+    "applications": 7,
+    "cycles": 0
+  },
+  "hosted": {
+    "ci": {
+      "status": "PASS",
+      "url": "https://github.com/gsmlg-dev/graviton_mq/actions/runs/40995883322"
+    },
+    "tests": {
+      "status": "PASS",
+      "url": "https://github.com/gsmlg-dev/graviton_mq/actions/runs/40995883405"
+    },
+    "release": {
+      "status": "PASS",
+      "url": "https://github.com/gsmlg-dev/graviton_mq/actions/runs/40995928652"
+    },
+    "soak": {
+      "cleanup": {
+        "broker_stopped": true,
+        "python_peers_stopped": true,
+        "workers_stopped": true
+      },
+      "duration_ms": 300073,
+      "final_broker": {
+        "amqp": {
+          "connections": 0,
+          "links": 0,
+          "operations": 0,
+          "queue": {
+            "bytes": 0,
+            "inflight": 0,
+            "messages": 0,
+            "ready": 0
+          }
+        },
+        "mqtt": {
+          "connections": 0,
+          "pending_deliveries": 0,
+          "prepared": 0,
+          "retained": 0,
+          "sessions": 0
+        }
+      },
+      "roles": {
+        "amqp_broker": {
+          "duration_ms": 300020,
+          "event": "done",
+          "iterations": 2998,
+          "maximum_latency_us": 83295,
+          "qos1": 0,
+          "qos2": 0,
+          "received_bytes": 6139904,
+          "resources": {
+            "cpu_seconds": 2.344166,
+            "fds": 5,
+            "rss_bytes": 30666752
+          },
+          "sent_bytes": 6139904,
+          "sha256": "feb0798241d5c90761ff00cfee7f8103e8baec661f0d5617055967feacb561be"
+        },
+        "amqp_client": {
+          "duration_ms": 300001,
+          "iterations": 3000,
+          "maximum_latency_us": 17167,
+          "qos1": 0,
+          "qos2": 0,
+          "received_bytes": 6144000,
+          "sent_bytes": 6144000,
+          "sha256": "c07fbf29b35aad150cf82aed4cc48dca9d1dbf3a275cff267e713d569236981d"
+        },
+        "mqtt_broker": {
+          "duration_ms": 300022,
+          "event": "done",
+          "iterations": 2998,
+          "maximum_latency_us": 42934,
+          "qos1": 1499,
+          "qos2": 1499,
+          "received_bytes": 6139904,
+          "resources": {
+            "cpu_seconds": 1.4625839999999999,
+            "fds": 7,
+            "rss_bytes": 27303936
+          },
+          "sent_bytes": 6139904,
+          "sha256": "feb0798241d5c90761ff00cfee7f8103e8baec661f0d5617055967feacb561be"
+        },
+        "mqtt_client": {
+          "duration_ms": 300001,
+          "iterations": 3000,
+          "maximum_latency_us": 53214,
+          "qos1": 1500,
+          "qos2": 1500,
+          "received_bytes": 6144000,
+          "sent_bytes": 6144000,
+          "sha256": "c07fbf29b35aad150cf82aed4cc48dca9d1dbf3a275cff267e713d569236981d"
+        }
+      },
+      "status": "PASS"
+    },
+    "peer_cleanup": [
+      {
+        "path": "interop-packages",
+        "status": "PASS",
+        "peers_stopped": true,
+        "instance_removed": true
+      },
+      {
+        "path": "interop-soak",
+        "status": "PASS",
+        "peers_stopped": true,
+        "instance_removed": true
+      },
+      {
+        "path": "interop-tests",
+        "status": "PASS",
+        "peers_stopped": true,
+        "instance_removed": true
+      }
+    ]
+  },
+  "independent_peers": {
+    "mosquitto": "2.1.2",
+    "paho": "2.1.0",
+    "artemis": "2.41.0",
+    "qpid_proton": "0.40.0"
+  },
+  "public_archives": {
+    "status": "PASS",
+    "version": "0.2.0",
+    "packages": [
+      {
+        "package": "graviton_mq_core",
+        "version": "0.2.0",
+        "sha256": "6a950b7ab99937c38afdd948f50544252a60c52979363f292fafb655ede4a0e8",
+        "library_files": 19,
+        "dependencies": [],
+        "hex_url": "https://hex.pm/packages/graviton_mq_core/0.2.0",
+        "github_asset_matches": true
+      },
+      {
+        "package": "graviton_mq_storage",
+        "version": "0.2.0",
+        "sha256": "9a8d43f62263e25308e2d221798a688e178db48af1a0f07303e4d90beeeba92c",
+        "library_files": 7,
+        "dependencies": [
+          "graviton_mq_core"
+        ],
+        "hex_url": "https://hex.pm/packages/graviton_mq_storage/0.2.0",
+        "github_asset_matches": true
+      },
+      {
+        "package": "graviton_mq_amqp10",
+        "version": "0.2.0",
+        "sha256": "58a1bef04bd5bb72de8df74c1c325f25db404f9ac7c9bbecc94734bc89e92c2d",
+        "library_files": 45,
+        "dependencies": [
+          "graviton_mq_core"
+        ],
+        "hex_url": "https://hex.pm/packages/graviton_mq_amqp10/0.2.0",
+        "github_asset_matches": true
+      },
+      {
+        "package": "graviton_mq_mqtt",
+        "version": "0.2.0",
+        "sha256": "b0af38bd0e3d2de7032351cc1f16508a13dcdb8969d68330f191671866fe2347",
+        "library_files": 30,
+        "dependencies": [
+          "graviton_mq_core"
+        ],
+        "hex_url": "https://hex.pm/packages/graviton_mq_mqtt/0.2.0",
+        "github_asset_matches": true
+      },
+      {
+        "package": "graviton_mq_client",
+        "version": "0.2.0",
+        "sha256": "60572798cf7b878f4e6e4e97210de073c454270575e0edbbd54e3488689748a3",
+        "library_files": 10,
+        "dependencies": [
+          "graviton_mq_core",
+          "graviton_mq_amqp10",
+          "graviton_mq_mqtt"
+        ],
+        "hex_url": "https://hex.pm/packages/graviton_mq_client/0.2.0",
+        "github_asset_matches": true
+      },
+      {
+        "package": "graviton_mq_runtime",
+        "version": "0.2.0",
+        "sha256": "b42a28822b1a99b77cb8e774af409682e05a1bdc2913162a985b0a9e429b5279",
+        "library_files": 27,
+        "dependencies": [
+          "graviton_mq_core",
+          "graviton_mq_storage",
+          "graviton_mq_amqp10",
+          "graviton_mq_mqtt"
+        ],
+        "hex_url": "https://hex.pm/packages/graviton_mq_runtime/0.2.0",
+        "github_asset_matches": true
+      },
+      {
+        "package": "graviton_mq",
+        "version": "0.2.0",
+        "sha256": "536c787d9319ab208506bede23d90f435e1e9c367e9d03b2a3935a89baad7502",
+        "library_files": 7,
+        "dependencies": [
+          "graviton_mq_runtime"
+        ],
+        "hex_url": "https://hex.pm/packages/graviton_mq/0.2.0",
+        "github_asset_matches": true
+      }
+    ],
+    "matched_library_files": 145,
+    "exact_internal_dependencies": true
+  },
+  "public_consumers": {
+    "status": "PASS",
+    "version": "0.2.0",
+    "consumers": [
+      {
+        "consumer": "consumer",
+        "status": "PASS",
+        "exact_hex_dependencies": [
+          "graviton_mq",
+          "graviton_mq_amqp10",
+          "graviton_mq_client",
+          "graviton_mq_core",
+          "graviton_mq_mqtt",
+          "graviton_mq_runtime",
+          "graviton_mq_storage"
+        ],
+        "path_dependencies": false
+      },
+      {
+        "consumer": "embedding-consumer",
+        "status": "PASS",
+        "exact_hex_dependencies": [
+          "graviton_mq",
+          "graviton_mq_amqp10",
+          "graviton_mq_core",
+          "graviton_mq_mqtt",
+          "graviton_mq_runtime",
+          "graviton_mq_storage"
+        ],
+        "path_dependencies": false
+      },
+      {
+        "consumer": "client-consumer",
+        "status": "PASS",
+        "exact_hex_dependencies": [
+          "graviton_mq_amqp10",
+          "graviton_mq_client",
+          "graviton_mq_core",
+          "graviton_mq_mqtt"
+        ],
+        "path_dependencies": false
+      }
+    ],
+    "fresh_hex_home": true,
+    "api_key_unset": true,
+    "four_external_network_roles": true,
+    "installed_persistence_recovery": true,
+    "peers_stopped": true,
+    "temporary_peer_instance_removed": true
+  },
+  "publication_recovery": {
+    "first_run": "https://github.com/gsmlg-dev/graviton_mq/actions/runs/40994823411",
+    "first_run_result": "core published; dependency fetch missing for next staged package",
+    "repair": "fetch staged dependencies; accept existing publications only on exact SHA-256 match",
+    "matching_archive_regression": "PASS",
+    "different_archive_refusal": "PASS",
+    "dependent_package_dry_run": "PASS"
+  },
+  "profile_limits": "https://github.com/gsmlg-dev/graviton_mq/releases/tag/v0.2.0"
+}

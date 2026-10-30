@@ -99,5 +99,13 @@ The [release notes](releases/0.2.0.md) describe the shipped profiles; the
 [GitHub release](https://github.com/gsmlg-dev/graviton_mq/releases/tag/v0.2.0)
 records hosted workflow and public package verification evidence after delivery.
 
+Publication completed on 2026-10-30: all seven `0.2.0` Hex packages and the
+annotated `v0.2.0` tag/GitHub release refer to code commit
+`0b23da0fcbae9b91dacfdd2bd4384a4449a17694`. Hosted CI and three fresh public
+Hex consumers passed all four network paths and installed recovery checks.
+The [release qualification](qualification/2026-10-30-v0.2.0-release.md)
+records exact workflow links, archive checksums and profile limits. This
+post-publication documentation update changes no shipped library source.
+
 Agent Note has no explicitly configured project label in this checkout. Do
 not guess a label or search all notes; that limitation does not block work.
