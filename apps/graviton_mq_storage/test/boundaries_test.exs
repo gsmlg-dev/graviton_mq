@@ -16,8 +16,14 @@ defmodule GravitonMQ.Storage.BoundariesTest do
     end)
   end
 
+  test "WAL implements the complete core storage behaviour" do
+    assert GravitonMQ.Core.Storage in (GravitonMQ.Storage.WAL.__info__(:attributes)
+                                       |> Keyword.get_values(:behaviour)
+                                       |> List.flatten())
+  end
+
   test "unimplemented storage boundaries do not claim the core storage behaviour" do
-    for module <- [GravitonMQ.Storage.Memory, GravitonMQ.Storage.WAL] do
+    for module <- [GravitonMQ.Storage.Memory] do
       behaviours =
         module.__info__(:attributes) |> Keyword.get_values(:behaviour) |> List.flatten()
 
