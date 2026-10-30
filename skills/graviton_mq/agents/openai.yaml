@@ -1,0 +1,3 @@
+interface:
+  display_name: "GravitonMQ"
+  short_description: "Integrate AMQP 1.0 and MQTT 5.0 services"
