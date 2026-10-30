@@ -3,7 +3,7 @@ defmodule GravitonMQ.MQTT.Codec.FrameTest do
 
   alias GravitonMQ.MQTT.Codec.Frame, as: Codec
 
-  @connect <<0x10, 0x0D, 0, 4, "MQTT", 4, 2, 0, 60, 0, 1, "c">>
+  @connect <<0x10, 0x0E, 0, 4, "MQTT", 5, 2, 0, 60, 0, 0, 1, "c">>
 
   test "decodes an opaque packet envelope and preserves the exact suffix" do
     <<_header, _length, body::binary>> = @connect
@@ -62,10 +62,13 @@ defmodule GravitonMQ.MQTT.Codec.FrameTest do
     end
   end
 
-  test "preserves legacy nonminimal length metadata and encodes canonically" do
-    assert {:ok, frame, <<>>} = Codec.decode(<<0xC0, 0x80, 0>>)
-    assert %{header_size: 3, body: <<>>} = frame
+  test "records canonical header size and rejects nonminimal Remaining Length" do
+    assert {:ok, frame, <<>>} = Codec.decode(<<0xC0, 0>>)
+    assert %{header_size: 2, body: <<>>} = frame
     assert {:ok, <<0xC0, 0>>} = Codec.encode(frame)
+
+    assert {:error, %{class: :malformed, reason: :nonminimal_variable_integer}} =
+             Codec.decode(<<0xC0, 0x80, 0>>)
   end
 
   test "opaque frames encode without packet schema interpretation" do

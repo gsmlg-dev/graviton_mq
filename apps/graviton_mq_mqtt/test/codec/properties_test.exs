@@ -140,11 +140,9 @@ defmodule GravitonMQ.MQTT.Codec.PropertiesTest do
              Packet.encode(value, limits)
   end
 
-  test "3.1.1 encoding rejects MQTT 5 properties and invalid semantic property data" do
-    assert {:ok, packet, <<>>} = Packet.decode(<<0x10, 13, 0, 4, "MQTT", 4, 2, 0, 60, 0, 1, "c">>)
-
-    assert {:error, %{class: :invalid_value, reason: :properties_not_supported}} =
-             Packet.encode(%{packet | properties: [receive_maximum: 1]})
+  test "MQTT 5 encoding rejects invalid semantic property data" do
+    assert {:ok, packet, <<>>} =
+             Packet.decode(<<0x10, 14, 0, 4, "MQTT", 5, 2, 0, 60, 0, 0, 1, "c">>)
 
     for properties <- [
           %{},

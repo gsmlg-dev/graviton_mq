@@ -2,8 +2,8 @@ defmodule GravitonMQ.MQTT.Packet.Connect do
   @moduledoc """
   Immutable CONNECT fields, without connection or authentication behavior.
 
-  `clean_start` holds the wire clean flag. For MQTT 3.1.1 it means Clean
-  Session; version-specific session lifetime rules are not implemented here.
+  `clean_start` holds MQTT 5.0 Clean Start or MQTT 3.1.1 Clean Session. Session lifetime rules
+  are not implemented here.
   Omitted optional fields are `nil`, distinct from a present empty binary.
   """
 

@@ -1,18 +1,20 @@
 defmodule GravitonMQ.MQTT.Codec.Packet do
   @moduledoc """
-  Bounded pure CONNECT/CONNACK schema codec for MQTT 3.1.1 and 5.0.
+  Bounded pure MQTT 5.0 packet codecs and historical 3.1.1 CONNECT/CONNACK codecs.
 
   CONNECT identifies its version on the wire. CONNACK requires an explicit
-  `:v3_1_1` or `:v5`; `:auto` never guesses a version from a CONNACK body.
-  Other well-framed packet types are unsupported by this slice. Protocol
+  `:v3_1_1` or `:v5`; `:auto` discovers CONNECT's protocol level and never
+  guesses a version from a CONNACK body. MQTT 3.1 is unsupported.
+  MQTT 5.0 adds PUBLISH, QoS 1/2 acknowledgements, subscriptions, ping and
+  DISCONNECT. Protocol
   context, authentication, session assignment, and payload policy are deferred.
   """
 
-  alias GravitonMQ.MQTT.Codec.{Connect, Connack, Error, Frame, Limits, Wire}
+  alias GravitonMQ.MQTT.Codec.{Connect, Connack, Error, Frame, Limits, Operational, Wire}
   alias GravitonMQ.MQTT.Packet.Connect, as: ConnectValue
   alias GravitonMQ.MQTT.Packet.Connack, as: ConnackValue
 
-  @type packet :: ConnectValue.t() | ConnackValue.t()
+  @type packet :: ConnectValue.t() | ConnackValue.t() | struct()
   @type version :: GravitonMQ.MQTT.version() | :auto
 
   @spec decode(binary(), version(), Limits.t()) ::
@@ -21,7 +23,7 @@ defmodule GravitonMQ.MQTT.Codec.Packet do
     result =
       with {:ok, limits} <- Limits.validate(limits, :packet_decode),
            :ok <- version_argument(version, :packet_decode, true),
-           {:ok, frame, rest} <- Frame.decode(bytes, limits),
+           {:ok, frame, rest} <- Frame.decode(bytes, limits, version == :v5),
            context = %{operation: :packet_decode, limits: limits},
            {:ok, packet} <- decode_body(frame, version, context),
            :ok <- canonical_header(frame, packet.version, context) do
@@ -37,8 +39,7 @@ defmodule GravitonMQ.MQTT.Codec.Packet do
   defp decode_body(%{type: 2, body: bytes}, version, context),
     do: Connack.decode(bytes, version, context)
 
-  defp decode_body(_frame, _version, context),
-    do: Wire.error(context, :unsupported, :unsupported_packet_type)
+  defp decode_body(frame, version, context), do: Operational.decode(frame, version, context)
 
   defp canonical_header(frame, :v5, context) do
     if frame.header_size == 1 + Wire.vbi_size(byte_size(frame.body)),
@@ -53,11 +54,11 @@ defmodule GravitonMQ.MQTT.Codec.Packet do
     result =
       with {:ok, limits} <- Limits.validate(limits, :packet_encode),
            context = %{operation: :packet_encode, limits: limits},
-           {:ok, type, body} <- encode_body(packet, context),
+           {:ok, type, flags, body} <- encode_body(packet, context),
            size = :erlang.iolist_size(body),
            :ok <- packet_size(size, context) do
         Frame.encode(
-          %GravitonMQ.MQTT.Frame{type: type, flags: 0, body: :erlang.iolist_to_binary(body)},
+          %GravitonMQ.MQTT.Frame{type: type, flags: flags, body: :erlang.iolist_to_binary(body)},
           limits
         )
       end
@@ -68,16 +69,20 @@ defmodule GravitonMQ.MQTT.Codec.Packet do
   defp encode_body(%ConnectValue{} = packet, context) do
     with :ok <- version_argument(packet.version, :packet_encode, false),
          {:ok, body} <- Connect.encode(packet, context),
-         do: {:ok, 1, body}
+         do: {:ok, 1, 0, body}
   end
 
   defp encode_body(%ConnackValue{} = packet, context) do
     with :ok <- version_argument(packet.version, :packet_encode, false),
          {:ok, body} <- Connack.encode(packet, context),
-         do: {:ok, 2, body}
+         do: {:ok, 2, 0, body}
   end
 
-  defp encode_body(_packet, context), do: Wire.error(context, :invalid_value, :invalid_packet)
+  defp encode_body(packet, context) do
+    if Operational.packet?(packet),
+      do: Operational.encode(packet, context),
+      else: Wire.error(context, :invalid_value, :invalid_packet)
+  end
 
   defp version_argument(version, _operation, _auto?) when version in [:v3_1_1, :v5], do: :ok
   defp version_argument(:auto, _operation, true), do: :ok

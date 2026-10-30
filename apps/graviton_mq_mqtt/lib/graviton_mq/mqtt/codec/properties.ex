@@ -1,9 +1,10 @@
 defmodule GravitonMQ.MQTT.Codec.Properties do
   @moduledoc """
-  Typed, ordered MQTT 5.0 properties for CONNECT, CONNACK, and Will.
+  Typed, ordered MQTT 5.0 packet properties.
 
-  Known names select their exact wire type. User Property pairs may repeat;
-  all other properties are singletons within their own property section.
+  Known names select their exact wire type and packet location. User Property
+  pairs may repeat; Subscription Identifiers may repeat only in PUBLISH.
+  Endpoint machines enforce direction and negotiated context.
   """
 
   alias GravitonMQ.MQTT.Codec.Wire
@@ -12,12 +13,13 @@ defmodule GravitonMQ.MQTT.Codec.Properties do
   @type t :: [{atom(), value()}]
 
   @definitions %{
-    0x01 => {:payload_format_indicator, :u8, [:will]},
-    0x02 => {:message_expiry_interval, :u32, [:will]},
-    0x03 => {:content_type, :utf8, [:will]},
-    0x08 => {:response_topic, :utf8, [:will]},
-    0x09 => {:correlation_data, :binary, [:will]},
-    0x11 => {:session_expiry_interval, :u32, [:connect, :connack]},
+    0x01 => {:payload_format_indicator, :u8, [:will, :publish]},
+    0x02 => {:message_expiry_interval, :u32, [:will, :publish]},
+    0x03 => {:content_type, :utf8, [:will, :publish]},
+    0x08 => {:response_topic, :utf8, [:will, :publish]},
+    0x09 => {:correlation_data, :binary, [:will, :publish]},
+    0x0B => {:subscription_identifier, :vbi, [:publish, :subscribe]},
+    0x11 => {:session_expiry_interval, :u32, [:connect, :connack, :disconnect]},
     0x12 => {:assigned_client_identifier, :utf8, [:connack]},
     0x13 => {:server_keep_alive, :u16, [:connack]},
     0x15 => {:authentication_method, :utf8, [:connect, :connack]},
@@ -26,13 +28,32 @@ defmodule GravitonMQ.MQTT.Codec.Properties do
     0x18 => {:will_delay_interval, :u32, [:will]},
     0x19 => {:request_response_information, :u8, [:connect]},
     0x1A => {:response_information, :utf8, [:connack]},
-    0x1C => {:server_reference, :utf8, [:connack]},
-    0x1F => {:reason_string, :utf8, [:connack]},
+    0x1C => {:server_reference, :utf8, [:connack, :disconnect]},
+    0x1F =>
+      {:reason_string, :utf8,
+       [:connack, :puback, :pubrec, :pubrel, :pubcomp, :suback, :unsuback, :disconnect]},
     0x21 => {:receive_maximum, :u16, [:connect, :connack]},
     0x22 => {:topic_alias_maximum, :u16, [:connect, :connack]},
+    0x23 => {:topic_alias, :u16, [:publish]},
     0x24 => {:maximum_qos, :u8, [:connack]},
     0x25 => {:retain_available, :u8, [:connack]},
-    0x26 => {:user_property, :utf8_pair, [:connect, :connack, :will]},
+    0x26 =>
+      {:user_property, :utf8_pair,
+       [
+         :connect,
+         :connack,
+         :will,
+         :publish,
+         :puback,
+         :pubrec,
+         :pubrel,
+         :pubcomp,
+         :subscribe,
+         :suback,
+         :unsubscribe,
+         :unsuback,
+         :disconnect
+       ]},
     0x27 => {:maximum_packet_size, :u32, [:connect, :connack]},
     0x28 => {:wildcard_subscription_available, :u8, [:connack]},
     0x29 => {:subscription_identifier_available, :u8, [:connack]},
@@ -111,6 +132,10 @@ defmodule GravitonMQ.MQTT.Codec.Properties do
     end
   end
 
+  defp decode_value(:vbi, bytes, context, _name) do
+    with {:ok, value, rest, _width} <- variable_integer(bytes, context), do: {:ok, value, rest}
+  end
+
   defp decode_value(:utf8_pair, bytes, context, name) do
     with {:ok, key, rest} <- Wire.decode(:utf8, bytes, context, name),
          {:ok, value, rest} <- Wire.decode(:utf8, rest, context, name) do
@@ -178,13 +203,21 @@ defmodule GravitonMQ.MQTT.Codec.Properties do
       scope not in scopes ->
         Wire.error(context, Wire.value_class(context), :property_not_allowed, %{property: name})
 
-      name != :user_property and MapSet.member?(seen, name) ->
+      name != :user_property and not (name == :subscription_identifier and scope == :publish) and
+          MapSet.member?(seen, name) ->
         Wire.error(context, Wire.value_class(context), :duplicate_property, %{property: name})
 
       true ->
         :ok
     end
   end
+
+  defp encode_value(:vbi, value, _context, _name)
+       when is_integer(value) and value in 1..268_435_455,
+       do: {:ok, Wire.encode_vbi(value)}
+
+  defp encode_value(:vbi, _value, context, name),
+    do: Wire.error(context, :invalid_value, :invalid_property_value, %{property: name})
 
   defp encode_value(:utf8_pair, {key, value}, context, name) do
     with {:ok, key} <- Wire.encode(:utf8, key, context, name),
@@ -200,11 +233,20 @@ defmodule GravitonMQ.MQTT.Codec.Properties do
   defp validate_value(name, value, context) do
     invalid? =
       cond do
-        name in @binary_flags -> value not in [0, 1]
-        name in [:receive_maximum, :maximum_packet_size] -> value == 0
-        name == :assigned_client_identifier -> value == <<>>
-        name == :response_topic -> not Wire.topic_name?(value)
-        true -> false
+        name in @binary_flags ->
+          value not in [0, 1]
+
+        name in [:receive_maximum, :maximum_packet_size, :topic_alias, :subscription_identifier] ->
+          value == 0
+
+        name == :assigned_client_identifier ->
+          value == <<>>
+
+        name == :response_topic ->
+          not Wire.topic_name?(value)
+
+        true ->
+          false
       end
 
     if invalid?,

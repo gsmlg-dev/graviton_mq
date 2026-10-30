@@ -3,8 +3,9 @@ defmodule GravitonMQ.MQTT.Codec.Frame do
   Incremental MQTT packet-envelope codec with opaque bodies.
 
   This module never invokes packet-schema decoding. Remaining Length is
-  limited to four bytes; canonical MQTT 5 lengths are checked by its packet
-  facade after the protocol version is known.
+  limited to four bytes. Decoding defaults to MQTT 5.0 minimum-length
+  encoding; the packet facade permits historical 3.1.1 lengths only after
+  checking the explicit protocol version.
   """
 
   import Bitwise
@@ -14,17 +15,19 @@ defmodule GravitonMQ.MQTT.Codec.Frame do
 
   @spec decode(binary(), Limits.t()) ::
           {:ok, Frame.t(), binary()} | {:more, pos_integer()} | {:error, Error.t()}
-  def decode(bytes, limits \\ Limits.default()) do
+  @spec decode(binary(), Limits.t(), boolean()) ::
+          {:ok, Frame.t(), binary()} | {:more, pos_integer()} | {:error, Error.t()}
+  def decode(bytes, limits \\ Limits.default(), canonical? \\ true) do
     with {:ok, limits} <- Limits.validate(limits, :frame_decode) do
-      decode_header(bytes, limits)
+      decode_header(bytes, limits, canonical?)
     end
   end
 
-  defp decode_header(<<>>, _limits), do: {:more, 1}
+  defp decode_header(<<>>, _limits, _canonical?), do: {:more, 1}
 
-  defp decode_header(<<type::4, flags::4, bytes::binary>>, limits) do
+  defp decode_header(<<type::4, flags::4, bytes::binary>>, limits, canonical?) do
     with :ok <- validate_header(type, flags, :frame_decode),
-         {:ok, size, data, width} <- variable_length(bytes) do
+         {:ok, size, data, width} <- variable_length(bytes, canonical?) do
       total_size = 1 + width + size
 
       cond do
@@ -42,11 +45,11 @@ defmodule GravitonMQ.MQTT.Codec.Frame do
     end
   end
 
-  defp decode_header(_bytes, _limits),
+  defp decode_header(_bytes, _limits, _canonical?),
     do: {:error, Error.new(:frame_decode, :invalid_value, :not_binary)}
 
-  defp variable_length(bytes) do
-    case Wire.decode_vbi(bytes, false) do
+  defp variable_length(bytes, canonical?) do
+    case Wire.decode_vbi(bytes, canonical?) do
       {:error, reason} -> {:error, Error.new(:frame_decode, :malformed, reason)}
       result -> result
     end

@@ -7,7 +7,7 @@ defmodule GravitonMQMQTT.MixProject do
     [
       app: :graviton_mq_mqtt,
       version: GravitonMQ.Build.version(),
-      description: "Bounded, pure MQTT 3.1.1 and 5.0 codecs for GravitonMQ",
+      description: "Bounded, pure MQTT 5.0 codecs for GravitonMQ",
       package: GravitonMQ.Build.package(),
       elixir: GravitonMQ.Build.elixir_requirement(),
       build_path: "../../_build",
