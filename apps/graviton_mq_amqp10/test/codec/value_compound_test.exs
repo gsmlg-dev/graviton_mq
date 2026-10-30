@@ -98,12 +98,23 @@ defmodule GravitonMQ.AMQP10.Codec.ValueCompoundTest do
     )
   end
 
-  test "rejects null and duplicate typed map keys while preserving typed-key order" do
+  test "accepts null keys and rejects duplicate typed map keys while preserving typed-key order" do
+    null_key_map = AMQPValue.map([{AMQPValue.null(), AMQPValue.uint(0)}])
+
+    for fixture <- [<<0xC1, 3, 2, 0x40, 0x43>>, <<0xD1, 6::32, 2::32, 0x40, 0x43>>] do
+      assert {:ok, ^null_key_map, <<0xAA>>} = Value.decode(fixture <> <<0xAA>>)
+
+      for size <- 0..(byte_size(fixture) - 1) do
+        assert {:more, needed} = Value.decode(binary_part(fixture, 0, size))
+        assert needed > 0
+      end
+    end
+
     assert_error(
-      Value.decode(<<0xC1, 3, 2, 0x40, 0x43>>),
+      Value.decode(<<0xC1, 5, 4, 0x40, 0x43, 0x40, 0x44>>),
       :value_decode,
       :malformed,
-      :null_map_key
+      :duplicate_map_key
     )
 
     assert_error(
@@ -124,8 +135,14 @@ defmodule GravitonMQ.AMQP10.Codec.ValueCompoundTest do
   end
 
   test "preserves unsupported nested wire constructors" do
-    assert_error(Value.decode(<<0xC0, 3, 1, 0x50, 1>>), :value_decode, :unsupported, :format_code)
-    assert_error(Value.decode(<<0x50, 1>>), :value_decode, :unsupported, :format_code)
+    assert_error(
+      Value.decode(<<0xC0, 6, 1, 0xFF, 0::32>>),
+      :value_decode,
+      :unsupported,
+      :format_code
+    )
+
+    assert_error(Value.decode(<<0xFF, 0::32>>), :value_decode, :unsupported, :format_code)
   end
 
   test "canonically encodes independent list and map fixtures" do
@@ -252,12 +269,20 @@ defmodule GravitonMQ.AMQP10.Codec.ValueCompoundTest do
     end
   end
 
-  test "rejects null and duplicate map keys while keeping string and symbol keys distinct" do
+  test "encodes null keys and rejects duplicate map keys while keeping typed keys distinct" do
+    assert {:ok, <<0xC1, 3, 2, 0x40, 0x43>>} =
+             Value.encode(AMQPValue.map([{AMQPValue.null(), AMQPValue.uint(0)}]))
+
     assert_error(
-      Value.encode(AMQPValue.map([{AMQPValue.null(), AMQPValue.uint(0)}])),
+      Value.encode(
+        AMQPValue.map([
+          {AMQPValue.null(), AMQPValue.uint(0)},
+          {AMQPValue.null(), AMQPValue.ulong(0)}
+        ])
+      ),
       :value_encode,
       :invalid_value,
-      :null_map_key
+      :duplicate_map_key
     )
 
     duplicate_key = AMQPValue.string("k")
@@ -285,10 +310,10 @@ defmodule GravitonMQ.AMQP10.Codec.ValueCompoundTest do
   end
 
   test "preserves unsupported nested semantic types" do
-    nested_ubyte = AMQPValue.ubyte(1)
+    nested_extension = %AMQPValue{type: :extension, value: nil}
 
     assert_error(
-      Value.encode(AMQPValue.list([nested_ubyte])),
+      Value.encode(AMQPValue.list([nested_extension])),
       :value_encode,
       :unsupported,
       :semantic_type

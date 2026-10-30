@@ -121,7 +121,8 @@ defmodule GravitonMQ.AMQP10.Codec.PerformativeContractTest do
 
     open = %Open{
       container_id: AMQPValue.string("c"),
-      properties: AMQPValue.map([{AMQPValue.symbol("flag"), AMQPValue.ubyte(1)}])
+      properties:
+        AMQPValue.map([{AMQPValue.symbol("flag"), %AMQPValue{type: :extension, value: nil}}])
     }
 
     assert {:error,
@@ -129,7 +130,7 @@ defmodule GravitonMQ.AMQP10.Codec.PerformativeContractTest do
               operation: :value_encode,
               class: :unsupported,
               reason: :semantic_type,
-              details: %{type: :ubyte}
+              details: %{type: :extension}
             }} = Performative.encode(open)
   end
 

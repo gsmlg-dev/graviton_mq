@@ -65,16 +65,12 @@ defmodule GravitonMQ.AMQP10.Codec.OpenBeginValueTest do
     assert_error(
       Value.decode(<<0xE0, 2, 0, 0x40>>),
       :value_decode,
-      :unsupported,
-      :array_element_type
+      :malformed,
+      :null_array_element_type
     )
 
-    assert_error(
-      Value.encode(AMQPValue.array(:uint, [AMQPValue.uint(1)])),
-      :value_encode,
-      :unsupported,
-      :array_element_type
-    )
+    assert {:ok, <<0xE0, 6, 1, 0x70, 1::32>>} =
+             Value.encode(AMQPValue.array(:uint, [AMQPValue.uint(1)]))
 
     malformed = %AMQPValue{
       type: :array,

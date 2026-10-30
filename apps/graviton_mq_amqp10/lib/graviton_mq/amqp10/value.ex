@@ -4,10 +4,11 @@ defmodule GravitonMQ.AMQP10.Value do
 
   Semantic types are retained explicitly so equal Elixir payloads do not make
   AMQP `binary`, `string`, and `symbol` values interchangeable. Compact wire
-  constructors such as `uint0` and `smalluint` are deliberately absent; a
-  future encoder will choose those representations for a semantic `uint`.
+  constructors such as `uint0` and `smalluint` are deliberately absent; an
+  encoder chooses those representations for a semantic `uint`.
   Float and double payloads retain their exact IEEE-754 bits so special values
   and signed zero are representable without relying on BEAM float semantics.
+  Decimal payloads likewise retain their exact IEEE-754 BID wire bits.
   """
 
   defmodule Array do

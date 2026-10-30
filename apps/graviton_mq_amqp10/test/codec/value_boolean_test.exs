@@ -214,21 +214,17 @@ defmodule GravitonMQ.AMQP10.Codec.ValueBooleanTest do
     end
   end
 
-  test "Boolean arrays and descriptors remain unsupported" do
+  test "Boolean arrays use shared constructors and Boolean descriptors remain unsupported" do
     for constructor <- [0x41, 0x42, 0x56] do
       payload = if constructor == 0x56, do: <<1>>, else: <<>>
       fixture = <<0xE0, 2 + byte_size(payload), 1, constructor, payload::binary>>
 
-      assert {:error,
-              %Error{
-                operation: :value_decode,
-                class: :unsupported,
-                reason: :array_element_type,
-                details: %{format_code: ^constructor}
-              }} = Value.decode(fixture)
+      value = AMQPValue.boolean(constructor != 0x42)
+      expected = AMQPValue.array(:boolean, [value])
+      assert {:ok, ^expected, <<>>} = Value.decode(fixture)
     end
 
-    assert {:error, %Error{reason: :array_element_type, details: %{element_type: :boolean}}} =
+    assert {:ok, <<0xE0, 3, 1, 0x56, 1>>} =
              Value.encode(AMQPValue.array(:boolean, [AMQPValue.boolean(true)]))
 
     assert {:error, %Error{reason: :descriptor_type, details: %{type: :boolean}}} =

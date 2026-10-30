@@ -1,6 +1,6 @@
 defmodule GravitonMQ.AMQP10.SessionState do
   @moduledoc """
-  Data owned by one future AMQP 1.0 session process.
+  Pure data for one AMQP 1.0 session endpoint.
 
   Links remain data owned by the Session. The canonical map uses
   `{link_name, local_role}` identities, while separate handle indexes reflect
@@ -12,6 +12,37 @@ defmodule GravitonMQ.AMQP10.SessionState do
     :id,
     :local_channel,
     :remote_channel,
+    :begin_operation,
+    :last_now_ms,
+    :last_remote_delivery_id,
+    incarnation: 0,
+    phase: :idle,
+    options: %{},
+    remote_handle_max: 4_294_967_295,
+    next_outgoing_id: 0,
+    next_incoming_id: nil,
+    remote_next_incoming_id: nil,
+    remote_incoming_window: 0,
+    remote_outgoing_window: 0,
+    outgoing_window: 0,
+    incoming_window: 0,
+    next_delivery_id: 0,
+    next_token: 0,
+    next_receipt: 0,
+    operations: %{},
+    deadlines: %{},
+    timer_effects: [],
+    writes: %{},
+    control_queue: {[], []},
+    pending_flows: %{},
+    outgoing_by_id: %{},
+    incoming_by_id: %{},
+    incoming_token_to_id: %{},
+    send_queue: {[], []},
+    outgoing_bytes: 0,
+    incoming_bytes: 0,
+    incoming_reserved_bytes: 0,
+    incoming_reserved_slots: 0,
     links_by_identity: %{},
     local_handle_to_link: %{},
     remote_handle_to_link: %{}
@@ -66,6 +97,35 @@ defmodule GravitonMQ.AMQP10.SessionState do
           {:ok, GravitonMQ.AMQP10.Link.t()} | :error
   def fetch_incoming_link(%__MODULE__{} = state, remote_handle) do
     fetch_indexed_link(state, state.remote_handle_to_link, remote_handle)
+  end
+
+  @doc "Adds or replaces canonical Link data and atomically updates its two handle indexes."
+  @spec put_link(t(), GravitonMQ.AMQP10.Link.t()) :: {:ok, t()} | {:error, build_error()}
+  def put_link(%__MODULE__{} = state, %GravitonMQ.AMQP10.Link{} = link) do
+    identity = GravitonMQ.AMQP10.Link.identity(link)
+    without = remove_link(state, identity)
+
+    case index_link(link, {:ok, without}) do
+      {:cont, {:ok, updated}} -> {:ok, updated}
+      {:halt, {:error, reason}} -> {:error, reason}
+    end
+  end
+
+  @doc "Removes one Link and its handle indexes; other Link data is unchanged."
+  @spec remove_link(t(), GravitonMQ.AMQP10.Link.identity()) :: t()
+  def remove_link(%__MODULE__{} = state, identity) do
+    case Map.pop(state.links_by_identity, identity) do
+      {nil, _} ->
+        state
+
+      {link, links} ->
+        %{
+          state
+          | links_by_identity: links,
+            local_handle_to_link: Map.delete(state.local_handle_to_link, link.local_handle),
+            remote_handle_to_link: Map.delete(state.remote_handle_to_link, link.remote_handle)
+        }
+    end
   end
 
   defp index_link(link, {:ok, state}) do

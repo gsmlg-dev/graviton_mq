@@ -202,7 +202,8 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
     value = %End{
       error: %ProtocolError{
         condition: AMQPValue.symbol("x"),
-        info: AMQPValue.map([{AMQPValue.symbol("flag"), AMQPValue.ubyte(1)}])
+        info:
+          AMQPValue.map([{AMQPValue.symbol("flag"), %AMQPValue{type: :extension, value: nil}}])
       }
     }
 
@@ -211,7 +212,7 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
               operation: :value_encode,
               class: :unsupported,
               reason: :semantic_type,
-              details: %{type: :ubyte}
+              details: %{type: :extension}
             }} = Performative.encode(value)
   end
 
@@ -447,8 +448,8 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
       |> numeric_error(2)
       |> end_with_error()
 
-    unsupported_ubyte =
-      <<0xA3, 1, "x", 0x40, 0xC1, 6, 2, 0xA3, 1, "k", 0x50, 1>>
+    unsupported_extension =
+      <<0xA3, 1, "x", 0x40, 0xC1, 9, 2, 0xA3, 1, "k", 0xFF, 0::32>>
       |> numeric_error(3)
       |> end_with_error()
 
@@ -467,8 +468,8 @@ defmodule GravitonMQ.AMQP10.Codec.EndCloseErrorTest do
               class: :unsupported,
               reason: :format_code,
               offset: 0,
-              details: %{format_code: 0x50}
-            }} = Performative.decode(unsupported_ubyte)
+              details: %{format_code: 0xFF}
+            }} = Performative.decode(unsupported_extension)
   end
 
   test "propagates duplicate ordered-map keys from the value decoder" do

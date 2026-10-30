@@ -358,7 +358,7 @@ defmodule GravitonMQ.AMQP10.Codec.DetachPerformativeTest do
   end
 
   test "malformed Boolean and unsupported primitive errors propagate unchanged" do
-    for fields <- [<<0x43, 0x56, 2>>, <<0x50, 1>>] do
+    for fields <- [<<0x43, 0x56, 2>>, <<0xFF, 0::32>>] do
       fixture = wrap(fields, if(byte_size(fields) == 3, do: 2, else: 1))
       assert {:error, %Error{operation: :value_decode}} = expected = Value.decode(fixture)
       assert Performative.decode(fixture) == expected
@@ -395,7 +395,7 @@ defmodule GravitonMQ.AMQP10.Codec.DetachPerformativeTest do
 
   test "unsupported and malformed Error info values retain value layer errors" do
     for {wire, value} <- [
-          {<<0x50, 1>>, AMQPValue.ubyte(1)},
+          {<<0xFF, 0::32>>, %AMQPValue{type: :extension, value: nil}},
           {<<0x56, 2>>, %AMQPValue{type: :boolean, value: 2}}
         ] do
       fields = <<0xA3, 1, "x", 0x40, 0xC1, 4 + byte_size(wire), 2, 0xA3, 1, "k", wire::binary>>

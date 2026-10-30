@@ -258,7 +258,7 @@ defmodule GravitonMQ.AMQP10.Codec.OpenPerformativeTest do
 
   test "reports a well-formed unknown performative descriptor as unsupported" do
     assert_schema_error(
-      Performative.decode(<<0x00, 0x53, 0x12, 0x45>>),
+      Performative.decode(<<0x00, 0x53, 0x7F, 0x45>>),
       :performative_decode,
       :unsupported,
       :unknown_descriptor

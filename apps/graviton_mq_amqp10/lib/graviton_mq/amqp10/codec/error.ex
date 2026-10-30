@@ -12,6 +12,7 @@ defmodule GravitonMQ.AMQP10.Codec.Error do
   @operations [
     :protocol_header,
     :frame_decode,
+    :frame_encode,
     :value_decode,
     :value_encode,
     :performative_decode,
@@ -22,6 +23,7 @@ defmodule GravitonMQ.AMQP10.Codec.Error do
   @type operation ::
           :protocol_header
           | :frame_decode
+          | :frame_encode
           | :value_decode
           | :value_encode
           | :performative_decode

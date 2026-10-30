@@ -19,6 +19,23 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
     0x44,
     0x53,
     0x80,
+    0x50,
+    0x51,
+    0x61,
+    0x54,
+    0x71,
+    0x55,
+    0x81,
+    0x72,
+    0x82,
+    0x74,
+    0x84,
+    0x94,
+    0x73,
+    0x83,
+    0x98,
+    0xA0,
+    0xB0,
     0xA1,
     0xB1,
     0xA3,
@@ -193,7 +210,7 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
   test "rejects unsupported wire format codes with numeric code details" do
     unsupported_codes = Enum.to_list(0..255) -- @supported_format_codes
 
-    assert length(unsupported_codes) == 233
+    assert length(unsupported_codes) == 216
 
     for format_code <- unsupported_codes do
       assert {:error,
@@ -208,21 +225,7 @@ defmodule GravitonMQ.AMQP10.Codec.ValuePrimitiveTest do
   end
 
   test "rejects unsupported semantic types with type details" do
-    unsupported_types =
-      AMQPValue.semantic_types() --
-        [
-          :null,
-          :boolean,
-          :ushort,
-          :uint,
-          :ulong,
-          :string,
-          :symbol,
-          :list,
-          :map,
-          :array,
-          :described
-        ]
+    unsupported_types = [:unknown_extension, :smalluint, :vbin8]
 
     for type <- unsupported_types do
       value = %AMQPValue{type: type, value: nil}

@@ -55,6 +55,32 @@ defmodule GravitonMQ.AMQP10.ConnectionState do
     fetch_indexed_session(state, state.remote_channel_to_session, remote_channel)
   end
 
+  @doc "Inserts or replaces a Session and atomically updates its independent channel indexes."
+  @spec put_session(t(), GravitonMQ.AMQP10.SessionState.t()) ::
+          {:ok, t()} | {:error, build_error()}
+  def put_session(%__MODULE__{} = state, %GravitonMQ.AMQP10.SessionState{} = session) do
+    {:ok, without_previous} = remove_session(state, session.id)
+
+    case index_session(session, {:ok, without_previous}) do
+      {:cont, result} -> result
+      {:halt, result} -> result
+    end
+  end
+
+  @doc "Removes a Session and only the channel indexes owned by its stable identity."
+  @spec remove_session(t(), GravitonMQ.AMQP10.SessionState.id()) :: {:ok, t()}
+  def remove_session(%__MODULE__{} = state, id) do
+    {:ok,
+     %__MODULE__{
+       state
+       | sessions_by_identity: Map.delete(state.sessions_by_identity, id),
+         local_channel_to_session:
+           Map.reject(state.local_channel_to_session, fn {_, owner} -> owner == id end),
+         remote_channel_to_session:
+           Map.reject(state.remote_channel_to_session, fn {_, owner} -> owner == id end)
+     }}
+  end
+
   defp index_session(session, {:ok, state}) do
     with :ok <- available_identity(state.sessions_by_identity, session.id),
          {:ok, local_index} <-

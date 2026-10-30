@@ -82,7 +82,7 @@ defmodule GravitonMQ.AMQP10.Codec.ContractsTest do
 
   test "error construction rejects unsupported operations" do
     assert_raise ArgumentError,
-                 "expected :operation to be one of [:protocol_header, :frame_decode, :value_decode, :value_encode, :performative_decode, :performative_encode], got: :transfer_decode",
+                 "expected :operation to be one of [:protocol_header, :frame_decode, :frame_encode, :value_decode, :value_encode, :performative_decode, :performative_encode], got: :transfer_decode",
                  fn ->
                    Error.new(:transfer_decode, :invalid_value, :invalid_operation)
                  end

@@ -3,20 +3,27 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   Pure schema codec for the bounded AMQP 1.0 performative surface.
 
   Binary constructor work is delegated to `GravitonMQ.AMQP10.Codec.Value`.
-  Open, Begin, Detach, End, and Close are encoded and decoded as immutable protocol
+  The nine transport performatives are encoded and decoded as immutable protocol
   data with validated ordered fields, without performing protocol transitions.
   """
 
   alias GravitonMQ.AMQP10.Codec
+  alias GravitonMQ.AMQP10.Codec.Attach, as: AttachCodec
+  alias GravitonMQ.AMQP10.Codec.DeliveryPerformative
   alias GravitonMQ.AMQP10.Codec.Error
   alias GravitonMQ.AMQP10.Codec.Limits
+  alias GravitonMQ.AMQP10.Codec.RawField
   alias GravitonMQ.AMQP10.Codec.Value
   alias GravitonMQ.AMQP10.Error, as: ProtocolError
   alias GravitonMQ.AMQP10.Performative.Begin
+  alias GravitonMQ.AMQP10.Performative.Attach
   alias GravitonMQ.AMQP10.Performative.Close
   alias GravitonMQ.AMQP10.Performative.Detach
+  alias GravitonMQ.AMQP10.Performative.Disposition
   alias GravitonMQ.AMQP10.Performative.End
+  alias GravitonMQ.AMQP10.Performative.Flow
   alias GravitonMQ.AMQP10.Performative.Open
+  alias GravitonMQ.AMQP10.Performative.Transfer
   alias GravitonMQ.AMQP10.Value, as: AMQPValue
   alias GravitonMQ.AMQP10.Value.Array
   alias GravitonMQ.AMQP10.Value.Described
@@ -28,6 +35,10 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   @begin_descriptor 0x11
   @begin_symbol "amqp:begin:list"
   @begin_field_count 8
+
+  @flow_descriptor 0x13
+  @flow_symbol "amqp:flow:list"
+  @flow_field_count 11
 
   @detach_descriptor 0x16
   @detach_symbol "amqp:detach:list"
@@ -53,15 +64,15 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
                    (is_struct(value, AMQPValue) and value.type == :null and is_nil(value.value))
 
   @spec decode(binary()) ::
-          Codec.decode_result(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t())
+          Codec.decode_result(GravitonMQ.AMQP10.Performative.t())
   @spec decode(binary(), Limits.t()) ::
-          Codec.decode_result(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t())
+          Codec.decode_result(GravitonMQ.AMQP10.Performative.t())
   def decode(input, limits \\ Limits.default())
 
   def decode(input, limits) when is_binary(input) do
     case Value.decode(input, limits) do
       {:ok, value, rest} ->
-        case decode_value(value) do
+        case decode_value(value, input, limits) do
           {:ok, performative} -> {:ok, performative, rest}
           {:error, %Error{}} = error -> error
         end
@@ -77,8 +88,9 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   def decode(_input, _limits),
     do: schema_error(:performative_decode, :invalid_value, :invalid_performative)
 
-  @spec encode(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t()) :: Codec.encode_result()
-  @spec encode(Open.t() | Begin.t() | Detach.t() | End.t() | Close.t(), Limits.t()) ::
+  @spec encode(GravitonMQ.AMQP10.Performative.t()) ::
+          Codec.encode_result()
+  @spec encode(GravitonMQ.AMQP10.Performative.t(), Limits.t()) ::
           Codec.encode_result()
   def encode(performative, limits \\ Limits.default())
 
@@ -101,6 +113,24 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
       normalized
       |> canonical_begin_fields()
       |> encode_fields(@begin_descriptor, limits)
+    end
+  end
+
+  def encode(%Flow{} = flow, limits) do
+    with {:ok, normalized} <-
+           validate_flow(flow_fields(flow), :performative_encode, :invalid_value) do
+      normalized
+      |> canonical_flow_fields()
+      |> encode_fields(@flow_descriptor, limits)
+    end
+  end
+
+  def encode(%Transfer{} = transfer, limits), do: encode_delivery(transfer, limits)
+  def encode(%Disposition{} = disposition, limits), do: encode_delivery(disposition, limits)
+
+  def encode(%Attach{} = attach, limits) do
+    with {:ok, value} <- AttachCodec.encode_value(attach, :performative_encode, :invalid_value) do
+      Value.encode(value, limits)
     end
   end
 
@@ -150,28 +180,83 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   def encode(_performative, _limits),
     do: schema_error(:performative_encode, :invalid_value, :invalid_performative)
 
-  defp decode_value(%AMQPValue{
-         type: :described,
-         value: %Described{descriptor: descriptor, value: body}
-       }) do
+  defp decode_value(
+         %AMQPValue{
+           type: :described,
+           value: %Described{descriptor: descriptor, value: body}
+         },
+         input,
+         limits
+       ) do
     case descriptor_name(descriptor) do
       :open -> decode_body(:open, body)
       :begin -> decode_body(:begin, body)
+      :flow -> decode_body(:flow, body)
       :detach -> decode_body(:detach, body)
       :end -> decode_body(:end, body)
       :close -> decode_body(:close, body)
-      :unknown -> unknown_descriptor(descriptor)
+      :unknown -> decode_delivery_value(descriptor, body, input, limits)
     end
   end
 
-  defp decode_value(_value),
+  defp decode_value(_value, _input, _limits),
     do: schema_error(:performative_decode, :malformed, :invalid_performative)
+
+  defp encode_delivery(performative, limits) do
+    with {:ok, value} <-
+           DeliveryPerformative.encode_value(performative, :performative_encode, :invalid_value) do
+      Value.encode(value, limits)
+    end
+  end
+
+  defp decode_delivery_value(
+         %AMQPValue{type: type, value: descriptor} = tagged,
+         body,
+         input,
+         limits
+       )
+       when (type == :ulong and descriptor in [0x14, 0x15]) or
+              (type == :symbol and descriptor in ["amqp:transfer:list", "amqp:disposition:list"]) do
+    value = AMQPValue.described(tagged, body)
+    index = if descriptor in [0x14, "amqp:transfer:list"], do: 7, else: 4
+
+    if match?(%AMQPValue{type: :list}, body) do
+      with {:ok, raw_state} <- RawField.composite_field(input, index, limits) do
+        DeliveryPerformative.decode_value(
+          value,
+          :performative_decode,
+          :malformed,
+          raw_state,
+          limits
+        )
+      end
+    else
+      DeliveryPerformative.decode_value(value, :performative_decode, :malformed)
+    end
+  end
+
+  defp decode_delivery_value(
+         %AMQPValue{type: type, value: descriptor} = tagged,
+         body,
+         _input,
+         _limits
+       )
+       when (type == :ulong and descriptor == 0x12) or
+              (type == :symbol and descriptor == "amqp:attach:list") do
+    AttachCodec.decode_value(AMQPValue.described(tagged, body), :performative_decode, :malformed)
+  end
+
+  defp decode_delivery_value(descriptor, _body, _input, _limits),
+    do: unknown_descriptor(descriptor)
 
   defp decode_body(:open, %AMQPValue{type: :list, value: fields}) when is_list(fields),
     do: validate_open(fields, :performative_decode, :malformed)
 
   defp decode_body(:begin, %AMQPValue{type: :list, value: fields}) when is_list(fields),
     do: validate_begin(fields, :performative_decode, :malformed)
+
+  defp decode_body(:flow, %AMQPValue{type: :list, value: fields}) when is_list(fields),
+    do: validate_flow(fields, :performative_decode, :malformed)
 
   defp decode_body(:detach, %AMQPValue{type: :list, value: fields}) when is_list(fields) do
     with {:ok, detach} <- validate_detach_fields(fields, :performative_decode, :malformed),
@@ -200,6 +285,8 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
   defp descriptor_name(%AMQPValue{type: :symbol, value: @open_symbol}), do: :open
   defp descriptor_name(%AMQPValue{type: :ulong, value: @begin_descriptor}), do: :begin
   defp descriptor_name(%AMQPValue{type: :symbol, value: @begin_symbol}), do: :begin
+  defp descriptor_name(%AMQPValue{type: :ulong, value: @flow_descriptor}), do: :flow
+  defp descriptor_name(%AMQPValue{type: :symbol, value: @flow_symbol}), do: :flow
   defp descriptor_name(%AMQPValue{type: :ulong, value: @detach_descriptor}), do: :detach
   defp descriptor_name(%AMQPValue{type: :symbol, value: @detach_symbol}), do: :detach
   defp descriptor_name(%AMQPValue{type: :ulong, value: @end_descriptor}), do: :end
@@ -295,6 +382,43 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
          handle_max: handle_max,
          offered_capabilities: offered_capabilities,
          desired_capabilities: desired_capabilities,
+         properties: properties
+       }}
+    end
+  end
+
+  defp validate_flow(fields, operation, class) do
+    with :ok <- validate_field_count(fields, @flow_field_count, operation, class),
+         {:ok, next_incoming_id} <-
+           optional_field(fields, 0, :next_incoming_id, :uint, operation, class),
+         {:ok, incoming_window} <-
+           required_field(fields, 1, :incoming_window, :uint, operation, class),
+         {:ok, next_outgoing_id} <-
+           required_field(fields, 2, :next_outgoing_id, :uint, operation, class),
+         {:ok, outgoing_window} <-
+           required_field(fields, 3, :outgoing_window, :uint, operation, class),
+         {:ok, handle} <- optional_field(fields, 4, :handle, :uint, operation, class),
+         {:ok, delivery_count} <-
+           optional_field(fields, 5, :delivery_count, :uint, operation, class),
+         {:ok, link_credit} <- optional_field(fields, 6, :link_credit, :uint, operation, class),
+         {:ok, available} <- optional_field(fields, 7, :available, :uint, operation, class),
+         {:ok, drain} <-
+           default_field(fields, 8, :drain, :boolean, AMQPValue.boolean(false), operation, class),
+         {:ok, echo} <-
+           default_field(fields, 9, :echo, :boolean, AMQPValue.boolean(false), operation, class),
+         {:ok, properties} <- properties_field(fields, 10, operation, class) do
+      {:ok,
+       %Flow{
+         next_incoming_id: next_incoming_id,
+         incoming_window: incoming_window,
+         next_outgoing_id: next_outgoing_id,
+         outgoing_window: outgoing_window,
+         handle: handle,
+         delivery_count: delivery_count,
+         link_credit: link_credit,
+         available: available,
+         drain: drain,
+         echo: echo,
          properties: properties
        }}
     end
@@ -752,6 +876,30 @@ defmodule GravitonMQ.AMQP10.Codec.Performative do
       begin_performative.desired_capabilities,
       begin_performative.properties
     ]
+  end
+
+  defp flow_fields(%Flow{} = flow) do
+    [
+      flow.next_incoming_id,
+      flow.incoming_window,
+      flow.next_outgoing_id,
+      flow.outgoing_window,
+      flow.handle,
+      flow.delivery_count,
+      flow.link_credit,
+      flow.available,
+      flow.drain,
+      flow.echo,
+      flow.properties
+    ]
+  end
+
+  defp canonical_flow_fields(%Flow{} = flow) do
+    flow_fields(%{
+      flow
+      | drain: omit_default(flow.drain, :boolean, false),
+        echo: omit_default(flow.echo, :boolean, false)
+    })
   end
 
   defp canonical_open_fields(%Open{} = open) do
