@@ -84,7 +84,27 @@ jobs:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
         run: |
           while IFS= read -r package; do
-            (cd "$RUNNER_TEMP/graviton_mq_hex/$package" && mix hex.publish package --yes)
+            metadata="$RUNNER_TEMP/graviton_mq_hex/$package-release.json"
+            status=$(curl --silent --show-error --location --output "$metadata" --write-out '%{http_code}' \
+              "https://hex.pm/api/packages/$package/releases/$RELEASE_VERSION")
+            case "$status" in
+              200)
+                expected=$(sha256sum "$RUNNER_TEMP/graviton_mq_hex/artifacts/$package.tar" | cut -d ' ' -f1)
+                actual=$(jq -er '.checksum' "$metadata")
+                test "$actual" = "$expected" || {
+                  echo "Published archive differs: $package $RELEASE_VERSION" >&2
+                  exit 1
+                }
+                echo "Verified existing publication: $package $RELEASE_VERSION ($actual)"
+                ;;
+              404)
+                (cd "$RUNNER_TEMP/graviton_mq_hex/$package" && mix deps.get && mix hex.publish package --yes)
+                ;;
+              *)
+                echo "Cannot verify Hex publication state: $package (HTTP $status)" >&2
+                exit 1
+                ;;
+            esac
           done < "$RUNNER_TEMP/graviton_mq_hex/packages.txt"
 
       - name: Commit and push synchronized version and tag
