@@ -39,6 +39,10 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
   ]
   @uint_max 0xFFFF_FFFF
   @half 0x8000_0000
+  # Local Detach issued (or queued) while the peer's Detach is outstanding. The
+  # remote handle stays mapped, and in-flight peer frames are expected. Links
+  # detached with an error are instead guarded as errant-link (AMQP 1.0 2.6.5).
+  @awaiting_peer_detach [:detach_pending, :detach_sent, :refusing, :refused]
   @outcomes [
     "amqp:accepted:list",
     "amqp:rejected:list",
@@ -960,8 +964,12 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
              tagged_uint?(pdu.next_outgoing_id) and tagged_uint?(pdu.incoming_window) and
              tagged_uint?(pdu.outgoing_window),
          ack = number(pdu.next_incoming_id, state.options.initial_outgoing_id),
-         true <- Serial.compare(state.remote_next_incoming_id, ack) in [:eq, :lt],
-         true <- Serial.compare(ack, state.next_outgoing_id) in [:eq, :lt] do
+         # Session windows are plain uints (AMQP 1.0 2.5.6, 2.7.2), so up to
+         # 2^32 - 1 transfers may be unacknowledged. Check that the ack lies
+         # within the in-flight range by offset, not by half-range comparison.
+         true <-
+           Serial.distance(state.remote_next_incoming_id, ack) <=
+             Serial.distance(state.remote_next_incoming_id, state.next_outgoing_id) do
       state = %{
         state
         | remote_next_incoming_id: ack,
@@ -996,6 +1004,11 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
               )
 
             {state, effects}
+
+          # AMQP 1.0 2.6.2/2.7.7: a handle remains in use until the peer's
+          # Detach arrives; its in-flight link state carries no meaning now.
+          {:ok, %Link{phase: phase}} when phase in @awaiting_peer_detach ->
+            {state, []}
 
           _ ->
             close(state, :unattached_handle, true)
@@ -1209,19 +1222,50 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
       true ->
         case SessionState.fetch_incoming_link(state, number(pdu.handle)) do
           {:ok, %Link{role: :receiver, phase: :attached} = link} ->
-            state = %{
-              state
-              | incoming_window: state.incoming_window - 1,
-                remote_outgoing_window: state.remote_outgoing_window - 1,
-                next_incoming_id: Serial.add(state.next_incoming_id, 1)
-            }
-
+            state = count_incoming_transfer(state)
             {state, effects} = receive_fragment(state, link, pdu, payload, ctx)
             {if(state.phase == :closed, do: state, else: queue_flow(state, :session)), effects}
+
+          # In-flight Transfers for a Link we are detaching still consume the
+          # Session window and delivery-id sequence (AMQP 1.0 2.5.6, 2.7.5),
+          # but their content is discarded with the Link.
+          {:ok, %Link{role: :receiver, phase: phase}} when phase in @awaiting_peer_detach ->
+            discard_transfer(count_incoming_transfer(state), pdu)
 
           _ ->
             close(state, :unattached_handle, true)
         end
+    end
+  end
+
+  defp count_incoming_transfer(state),
+    do: %{
+      state
+      | incoming_window: state.incoming_window - 1,
+        remote_outgoing_window: state.remote_outgoing_window - 1,
+        next_incoming_id: Serial.add(state.next_incoming_id, 1)
+    }
+
+  defp discard_transfer(state, pdu) do
+    id = number(pdu.delivery_id)
+    last = state.last_remote_delivery_id
+
+    cond do
+      is_nil(pdu.delivery_id) ->
+        {queue_flow(state, :session), []}
+
+      not uint?(id) ->
+        close(state, :invalid_transfer, true)
+
+      is_nil(last) or id == Serial.add(last, 1) ->
+        {queue_flow(%{state | last_remote_delivery_id: id}, :session), []}
+
+      # A continuation may repeat its own earlier delivery-id.
+      Serial.compare(id, last) in [:lt, :eq] ->
+        {queue_flow(state, :session), []}
+
+      true ->
+        close(state, :invalid_delivery_sequence, true)
     end
   end
 

@@ -112,6 +112,9 @@ Transport loss can trigger the configured finite retry/backoff policy; the
 default has zero retries. Connection generations fence stale socket/timer
 events. Protocol/authentication failures and intentional `disconnect/1` stop
 automatic retry. The stopped owner remains inspectable through `status/1`.
+Transport loss closes the dead socket and cancels its keep-alive tick and
+handshake timer before the retry decision, so a loss with no retry left holds
+no socket or timer while `status/1` keeps working (`mqtt_client_test.exs`).
 
 Only a live local session plus a successful CONNACK Session Present permits
 inflight QoS1/2 PUBLISH retransmission, with the original Packet ID and DUP.
@@ -158,7 +161,11 @@ schemas before recovery. Startup also rejects a different Client ID.
 File synchronization, atomic replacement and directory synchronization precede
 wire and host effects. Every validated reopen re-establishes that boundary
 before exposing recovered ownership or terminal success. Partial/unpublished
-temporary files are not recovery checkpoints. Failed/uncertain publication
+temporary files are not recovery checkpoints. A checkpoint is rewritten only
+when its retained content changes; keep-alive and timer steps that leave it
+unchanged do not rewrite it (`mqtt_checkpoint_test.exs`; the Linux-only
+`mqtt_persistence_fault_test.exs` cases remain UNVERIFIED on Linux until CI
+runs). Failed/uncertain publication
 poisons the owner, closes its connection and emits `{:storage_error, reason}`;
 it cannot send ordinary success. A possible operation remains unknown.
 

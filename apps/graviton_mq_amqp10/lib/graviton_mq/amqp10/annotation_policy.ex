@@ -28,7 +28,7 @@ defmodule GravitonMQ.AMQP10.AnnotationPolicy do
   def check(raw, %Limits{} = limits) when is_binary(raw) do
     with {:ok, limits} <- Limits.validate(limits, :value_decode),
          true <- byte_size(raw) <= limits.max_value_bytes do
-      sections(raw, limits, 0)
+      sections(raw, limits, 0, limits.max_zero_width_elements)
     else
       _ -> {:error, :annotation_limit}
     end
@@ -36,66 +36,71 @@ defmodule GravitonMQ.AMQP10.AnnotationPolicy do
 
   def check(_, _), do: {:error, :malformed_annotations}
 
-  defp sections(<<>>, _limits, _count), do: :ok
+  defp sections(<<>>, _limits, _count, _budget), do: :ok
 
-  defp sections(_raw, %{max_compound_items: maximum}, count) when count >= maximum,
+  defp sections(_raw, %{max_compound_items: maximum}, count, _budget) when count >= maximum,
     do: {:error, :annotation_limit}
 
-  defp sections(<<0, raw::binary>>, limits, count) do
-    case WireValue.decode(raw, limits) do
-      {:ok, %Value{type: type, value: descriptor}, body} when type in [:ulong, :symbol] ->
+  # One zero-width element budget covers every value decoded from `raw`.
+  defp sections(<<0, raw::binary>>, limits, count, budget) do
+    case WireValue.decode_bounded(raw, limits, budget) do
+      {:ok, %Value{type: type, value: descriptor}, body, budget} when type in [:ulong, :symbol] ->
         result =
           if descriptor in @annotation_sections,
-            do: annotations(body, descriptor, limits),
-            else: skip(body, limits, 0)
+            do: annotations(body, descriptor, limits, budget),
+            else: with({:ok, rest} <- skip(body, limits, 0), do: {:ok, rest, budget})
 
-        with {:ok, rest} <- result, do: sections(rest, limits, count + 1)
+        with {:ok, rest, budget} <- result, do: sections(rest, limits, count + 1, budget)
 
       _ ->
         :ok
     end
   end
 
-  defp sections(_opaque, _limits, _count), do: :ok
+  defp sections(_opaque, _limits, _count, _budget), do: :ok
 
-  defp annotations(<<0xC1, size, count, raw::binary>>, section, limits) when size >= 1,
-    do: annotation_map(raw, size - 1, count, section, limits)
+  defp annotations(<<0xC1, size, count, raw::binary>>, section, limits, budget) when size >= 1,
+    do: annotation_map(raw, size - 1, count, section, limits, budget)
 
-  defp annotations(<<0xD1, size::32, count::32, raw::binary>>, section, limits) when size >= 4,
-    do: annotation_map(raw, size - 4, count, section, limits)
+  defp annotations(<<0xD1, size::32, count::32, raw::binary>>, section, limits, budget)
+       when size >= 4,
+       do: annotation_map(raw, size - 4, count, section, limits, budget)
 
-  defp annotations(_raw, _section, _limits), do: {:error, :malformed_annotations}
+  defp annotations(_raw, _section, _limits, _budget), do: {:error, :malformed_annotations}
 
-  defp annotation_map(_raw, _size, count, _section, limits)
+  defp annotation_map(_raw, _size, count, _section, limits, _budget)
        when count > limits.max_compound_items,
        do: {:error, :annotation_limit}
 
-  defp annotation_map(raw, size, count, section, limits)
+  defp annotation_map(raw, size, count, section, limits, budget)
        when rem(count, 2) == 0 and byte_size(raw) >= size do
     <<entries::binary-size(size), rest::binary>> = raw
-    with :ok <- entries(entries, count, section, limits), do: {:ok, rest}
+
+    with {:ok, budget} <- entries(entries, count, section, limits, budget),
+         do: {:ok, rest, budget}
   end
 
-  defp annotation_map(_raw, _size, _count, _section, _limits),
+  defp annotation_map(_raw, _size, _count, _section, _limits, _budget),
     do: {:error, :malformed_annotations}
 
-  defp entries(<<>>, 0, _section, _limits), do: :ok
-  defp entries(_raw, 0, _section, _limits), do: {:error, :malformed_annotations}
+  defp entries(<<>>, 0, _section, _limits, budget), do: {:ok, budget}
+  defp entries(_raw, 0, _section, _limits, _budget), do: {:error, :malformed_annotations}
 
-  defp entries(raw, count, section, limits) do
-    case WireValue.decode(raw, limits) do
-      {:ok, %Value{type: :symbol, value: key}, value} ->
+  defp entries(raw, count, section, limits, budget) do
+    case WireValue.decode_bounded(raw, limits, budget) do
+      {:ok, %Value{type: :symbol, value: key}, value, budget} ->
         cond do
           String.starts_with?(key, "x-opt") ->
             with {:ok, rest} <- skip(value, limits, 0),
-                 do: entries(rest, count - 2, section, limits)
+                 do: entries(rest, count - 2, section, limits, budget)
 
           key == "rejected" and section in @delivery_annotations ->
-            with {:ok, decoded, rest} <- WireValue.decode(value, limits),
+            with {:ok, decoded, rest, budget} <- WireValue.decode_bounded(value, limits, budget),
                  {:ok, %GravitonMQ.AMQP10.Error{}} <-
                    DeliveryState.decode_error_value(decoded, :value_decode, :malformed) do
-              entries(rest, count - 2, section, limits)
+              entries(rest, count - 2, section, limits, budget)
             else
+              {:error, %{reason: :zero_width_element_limit}} -> {:error, :annotation_limit}
               _ -> {:error, :malformed_annotations}
             end
 
@@ -103,8 +108,11 @@ defmodule GravitonMQ.AMQP10.AnnotationPolicy do
             {:error, :not_implemented}
         end
 
-      {:ok, %Value{type: :ulong}, _value} ->
+      {:ok, %Value{type: :ulong}, _value, _budget} ->
         {:error, :not_implemented}
+
+      {:error, %{reason: :zero_width_element_limit}} ->
+        {:error, :annotation_limit}
 
       _ ->
         {:error, :malformed_annotations}

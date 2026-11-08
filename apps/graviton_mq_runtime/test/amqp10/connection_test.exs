@@ -522,6 +522,9 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
           shell
         end)
 
+        # Input is event driven; a local close reaches the broken socket.
+        Connection.close(connection, :test_finished)
+
         assert_receive {:DOWN, ^monitor, :process, ^connection, reason}
         refute inspect(reason) =~ private
       end)

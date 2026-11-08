@@ -354,7 +354,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Queue do
     true = result != nil
     events = for {:event, %Event{} = event} <- effects, do: event
 
-    case Persistence.commit(state.persistence, events) do
+    # state.machine is the durable state preceding these events; persistence
+    # may compact the log to it before appending.
+    case Persistence.commit(state.persistence, events, state.machine) do
       {:ok, persistence} ->
         state = %{state | machine: machine, persistence: persistence}
         state = if changed?, do: notify(state), else: state

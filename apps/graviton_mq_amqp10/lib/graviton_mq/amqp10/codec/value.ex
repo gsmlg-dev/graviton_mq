@@ -85,8 +85,30 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
   @spec decode(binary()) :: Codec.decode_result(AMQPValue.t())
   @spec decode(binary(), Limits.t()) :: Codec.decode_result(AMQPValue.t())
   def decode(input, limits \\ Limits.default()) when is_binary(input) do
+    with {:ok, limits} <- Limits.validate(limits, :value_decode),
+         {:ok, value, rest, _budget} <-
+           decode_value(input, limits, 0, limits.max_zero_width_elements) do
+      {:ok, value, rest}
+    end
+  end
+
+  @doc """
+  Decodes one value against a caller-owned zero-width element budget.
+
+  Array elements whose constructor carries no element bytes (`0x41`-`0x45`,
+  possibly described) are the only values decoded without consuming input.
+  Callers that decode several values from one bounded input thread the
+  returned remaining budget into the next call, so the total implicit work of
+  that input stays within `Limits.max_zero_width_elements`.
+  """
+  @spec decode_bounded(binary(), Limits.t(), non_neg_integer()) ::
+          {:ok, AMQPValue.t(), binary(), non_neg_integer()}
+          | {:more, pos_integer()}
+          | {:error, Error.t()}
+  def decode_bounded(input, limits, budget)
+      when is_binary(input) and is_integer(budget) and budget >= 0 do
     with {:ok, limits} <- Limits.validate(limits, :value_decode) do
-      decode_value(input, limits, 0)
+      decode_value(input, limits, 0, budget)
     end
   end
 
@@ -108,23 +130,54 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
     end
   end
 
-  defp decode_value(<<>>, _limits, _depth), do: {:more, 1}
+  defp decode_value(<<0x00, rest::binary>>, limits, depth, budget),
+    do: decode_described(rest, limits, depth, budget)
 
-  defp decode_value(<<0x40, rest::binary>>, _limits, _depth),
+  defp decode_value(<<0x45, rest::binary>>, limits, depth, budget) do
+    with :ok <- validate_nesting_depth(:value_decode, limits, depth) do
+      {:ok, AMQPValue.list([]), rest, budget}
+    end
+  end
+
+  defp decode_value(<<0xC0, rest::binary>>, limits, depth, budget),
+    do: decode_compound(rest, 1, :list, limits, depth, budget)
+
+  defp decode_value(<<0xD0, rest::binary>>, limits, depth, budget),
+    do: decode_compound(rest, 4, :list, limits, depth, budget)
+
+  defp decode_value(<<0xC1, rest::binary>>, limits, depth, budget),
+    do: decode_compound(rest, 1, :map, limits, depth, budget)
+
+  defp decode_value(<<0xD1, rest::binary>>, limits, depth, budget),
+    do: decode_compound(rest, 4, :map, limits, depth, budget)
+
+  defp decode_value(<<0xE0, rest::binary>>, limits, depth, budget),
+    do: decode_array(rest, 1, limits, depth, budget)
+
+  defp decode_value(<<0xF0, rest::binary>>, limits, depth, budget),
+    do: decode_array(rest, 4, limits, depth, budget)
+
+  defp decode_value(input, limits, _depth, budget) do
+    with {:ok, value, rest} <- decode_scalar(input, limits), do: {:ok, value, rest, budget}
+  end
+
+  defp decode_scalar(<<>>, _limits), do: {:more, 1}
+
+  defp decode_scalar(<<0x40, rest::binary>>, _limits),
     do: {:ok, AMQPValue.null(), rest}
 
-  defp decode_value(<<0x41, rest::binary>>, _limits, _depth),
+  defp decode_scalar(<<0x41, rest::binary>>, _limits),
     do: {:ok, AMQPValue.boolean(true), rest}
 
-  defp decode_value(<<0x42, rest::binary>>, _limits, _depth),
+  defp decode_scalar(<<0x42, rest::binary>>, _limits),
     do: {:ok, AMQPValue.boolean(false), rest}
 
-  defp decode_value(<<0x56>>, _limits, _depth), do: {:more, 1}
+  defp decode_scalar(<<0x56>>, _limits), do: {:more, 1}
 
-  defp decode_value(<<0x56, value, rest::binary>>, _limits, _depth) when value in [0, 1],
+  defp decode_scalar(<<0x56, value, rest::binary>>, _limits) when value in [0, 1],
     do: {:ok, AMQPValue.boolean(value == 1), rest}
 
-  defp decode_value(<<0x56, value, _rest::binary>>, _limits, _depth) do
+  defp decode_scalar(<<0x56, value, _rest::binary>>, _limits) do
     {:error,
      Error.new(:value_decode, :malformed, :invalid_boolean,
        offset: 1,
@@ -132,117 +185,90 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
      )}
   end
 
-  defp decode_value(<<0x43, rest::binary>>, _limits, _depth),
+  defp decode_scalar(<<0x43, rest::binary>>, _limits),
     do: {:ok, AMQPValue.uint(0), rest}
 
-  defp decode_value(<<0x44, rest::binary>>, _limits, _depth),
+  defp decode_scalar(<<0x44, rest::binary>>, _limits),
     do: {:ok, AMQPValue.ulong(0), rest}
 
-  defp decode_value(<<0x50, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x50, rest::binary>>, limits),
     do: decode_fixed(rest, 1, &AMQPValue.ubyte/1, limits)
 
-  defp decode_value(<<0x60, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x60, rest::binary>>, limits),
     do: decode_fixed(rest, 2, &AMQPValue.ushort/1, limits)
 
-  defp decode_value(<<0x52, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x52, rest::binary>>, limits),
     do: decode_fixed(rest, 1, &AMQPValue.uint/1, limits)
 
-  defp decode_value(<<0x70, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x70, rest::binary>>, limits),
     do: decode_fixed(rest, 4, &AMQPValue.uint/1, limits)
 
-  defp decode_value(<<0x53, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x53, rest::binary>>, limits),
     do: decode_fixed(rest, 1, &AMQPValue.ulong/1, limits)
 
-  defp decode_value(<<0x80, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x80, rest::binary>>, limits),
     do: decode_fixed(rest, 8, &AMQPValue.ulong/1, limits)
 
-  defp decode_value(<<0x51, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x51, rest::binary>>, limits),
     do: decode_signed(rest, 1, &AMQPValue.byte/1, limits)
 
-  defp decode_value(<<0x61, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x61, rest::binary>>, limits),
     do: decode_signed(rest, 2, &AMQPValue.short/1, limits)
 
-  defp decode_value(<<0x54, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x54, rest::binary>>, limits),
     do: decode_signed(rest, 1, &AMQPValue.int/1, limits)
 
-  defp decode_value(<<0x71, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x71, rest::binary>>, limits),
     do: decode_signed(rest, 4, &AMQPValue.int/1, limits)
 
-  defp decode_value(<<0x55, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x55, rest::binary>>, limits),
     do: decode_signed(rest, 1, &AMQPValue.long/1, limits)
 
-  defp decode_value(<<0x81, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x81, rest::binary>>, limits),
     do: decode_signed(rest, 8, &AMQPValue.long/1, limits)
 
-  defp decode_value(<<0x72, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x72, rest::binary>>, limits),
     do: decode_bits(rest, 4, :float, limits)
 
-  defp decode_value(<<0x82, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x82, rest::binary>>, limits),
     do: decode_bits(rest, 8, :double, limits)
 
-  defp decode_value(<<0x74, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x74, rest::binary>>, limits),
     do: decode_bits(rest, 4, :decimal32, limits)
 
-  defp decode_value(<<0x84, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x84, rest::binary>>, limits),
     do: decode_bits(rest, 8, :decimal64, limits)
 
-  defp decode_value(<<0x94, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x94, rest::binary>>, limits),
     do: decode_bits(rest, 16, :decimal128, limits)
 
-  defp decode_value(<<0x73, rest::binary>>, limits, _depth), do: decode_char(rest, limits)
+  defp decode_scalar(<<0x73, rest::binary>>, limits), do: decode_char(rest, limits)
 
-  defp decode_value(<<0x83, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x83, rest::binary>>, limits),
     do: decode_signed(rest, 8, &AMQPValue.timestamp/1, limits)
 
-  defp decode_value(<<0x98, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0x98, rest::binary>>, limits),
     do: decode_uuid(rest, limits)
 
-  defp decode_value(<<0xA0, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0xA0, rest::binary>>, limits),
     do: decode_variable(rest, 1, :binary, limits)
 
-  defp decode_value(<<0xB0, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0xB0, rest::binary>>, limits),
     do: decode_variable(rest, 4, :binary, limits)
 
-  defp decode_value(<<0xA1, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0xA1, rest::binary>>, limits),
     do: decode_variable(rest, 1, :string, limits)
 
-  defp decode_value(<<0xB1, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0xB1, rest::binary>>, limits),
     do: decode_variable(rest, 4, :string, limits)
 
-  defp decode_value(<<0xA3, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0xA3, rest::binary>>, limits),
     do: decode_variable(rest, 1, :symbol, limits)
 
-  defp decode_value(<<0xB3, rest::binary>>, limits, _depth),
+  defp decode_scalar(<<0xB3, rest::binary>>, limits),
     do: decode_variable(rest, 4, :symbol, limits)
 
-  defp decode_value(<<0x00, rest::binary>>, limits, depth),
-    do: decode_described(rest, limits, depth)
-
-  defp decode_value(<<0x45, rest::binary>>, limits, depth) do
-    with :ok <- validate_nesting_depth(:value_decode, limits, depth) do
-      {:ok, AMQPValue.list([]), rest}
-    end
-  end
-
-  defp decode_value(<<0xC0, rest::binary>>, limits, depth),
-    do: decode_compound(rest, 1, :list, limits, depth)
-
-  defp decode_value(<<0xD0, rest::binary>>, limits, depth),
-    do: decode_compound(rest, 4, :list, limits, depth)
-
-  defp decode_value(<<0xC1, rest::binary>>, limits, depth),
-    do: decode_compound(rest, 1, :map, limits, depth)
-
-  defp decode_value(<<0xD1, rest::binary>>, limits, depth),
-    do: decode_compound(rest, 4, :map, limits, depth)
-
-  defp decode_value(<<0xE0, rest::binary>>, limits, depth),
-    do: decode_array(rest, 1, limits, depth)
-
-  defp decode_value(<<0xF0, rest::binary>>, limits, depth),
-    do: decode_array(rest, 4, limits, depth)
-
-  defp decode_value(<<format_code, _rest::binary>>, _limits, _depth) do
+  defp decode_scalar(<<format_code, _rest::binary>>, _limits) do
     {:error,
      Error.new(:value_decode, :unsupported, :format_code,
        offset: 0,
@@ -250,10 +276,11 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
      )}
   end
 
-  defp decode_compound(input, width, _type, _limits, _depth) when byte_size(input) < width,
-    do: {:more, width - byte_size(input)}
+  defp decode_compound(input, width, _type, _limits, _depth, _budget)
+       when byte_size(input) < width,
+       do: {:more, width - byte_size(input)}
 
-  defp decode_compound(input, width, type, limits, depth) do
+  defp decode_compound(input, width, type, limits, depth, budget) do
     <<size::unsigned-big-integer-size(width)-unit(8), payload_and_rest::binary>> = input
 
     with :ok <- validate_nesting_depth(:value_decode, limits, depth),
@@ -263,32 +290,33 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
         {:more, size - byte_size(payload_and_rest)}
       else
         <<payload::binary-size(size), rest::binary>> = payload_and_rest
-        decode_compound_payload(payload, width, type, limits, depth, rest)
+        decode_compound_payload(payload, width, type, limits, depth, rest, budget)
       end
     end
   end
 
-  defp decode_compound_payload(payload, width, type, limits, depth, rest) do
+  defp decode_compound_payload(payload, width, type, limits, depth, rest, budget) do
     <<count::unsigned-big-integer-size(width)-unit(8), items::binary>> = payload
 
     with :ok <- validate_compound_count(count, type, limits, :value_decode),
-         {:ok, values, <<>>} <- decode_compound_items(items, count, limits, depth + 1, []),
+         {:ok, values, <<>>, budget} <-
+           decode_compound_items(items, count, limits, depth + 1, [], budget),
          :ok <- validate_decoded_map_values(type, values) do
-      {:ok, compound_value(type, values), rest}
+      {:ok, compound_value(type, values), rest, budget}
     else
-      {:ok, _values, _leftover} -> compound_error(:compound_size_mismatch)
+      {:ok, _values, _leftover, _budget} -> compound_error(:compound_size_mismatch)
       {:more, _needed} -> compound_error(:compound_item_truncated)
       {:error, _error} = error -> error
     end
   end
 
-  defp decode_compound_items(input, 0, _limits, _depth, values),
-    do: {:ok, Enum.reverse(values), input}
+  defp decode_compound_items(input, 0, _limits, _depth, values, budget),
+    do: {:ok, Enum.reverse(values), input, budget}
 
-  defp decode_compound_items(input, count, limits, depth, values) do
-    case decode_value(input, limits, depth) do
-      {:ok, value, rest} ->
-        decode_compound_items(rest, count - 1, limits, depth, [value | values])
+  defp decode_compound_items(input, count, limits, depth, values, budget) do
+    case decode_value(input, limits, depth, budget) do
+      {:ok, value, rest, budget} ->
+        decode_compound_items(rest, count - 1, limits, depth, [value | values], budget)
 
       {:more, needed} ->
         {:more, needed}
@@ -298,10 +326,10 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
     end
   end
 
-  defp decode_array(input, width, _limits, _depth) when byte_size(input) < width,
+  defp decode_array(input, width, _limits, _depth, _budget) when byte_size(input) < width,
     do: {:more, width - byte_size(input)}
 
-  defp decode_array(input, width, limits, depth) do
+  defp decode_array(input, width, limits, depth, budget) do
     <<size::unsigned-big-integer-size(width)-unit(8), payload_and_rest::binary>> = input
 
     with :ok <- validate_nesting_depth(:value_decode, limits, depth),
@@ -311,44 +339,59 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
         {:more, size - byte_size(payload_and_rest)}
       else
         <<payload::binary-size(size), rest::binary>> = payload_and_rest
-        decode_array_payload(payload, width, limits, depth, rest)
+        decode_array_payload(payload, width, limits, depth, rest, budget)
       end
     end
   end
 
-  defp decode_array_payload(payload, width, limits, depth, rest) do
+  defp decode_array_payload(payload, width, limits, depth, rest, budget) do
     <<count::unsigned-big-integer-size(width)-unit(8), constructor_and_elements::binary>> =
       payload
 
     with :ok <- validate_compound_count(count, :array, limits, :value_decode),
-         {:ok, constructor, elements} <-
-           decode_array_constructor(constructor_and_elements, limits, depth + 1),
-         {:ok, values, <<>>} <-
-           decode_array_elements(elements, count, constructor, limits, depth + 1, []) do
-      {:ok, AMQPValue.array(array_element_type(constructor), values), rest}
+         {:ok, constructor, elements, budget} <-
+           decode_array_constructor(constructor_and_elements, limits, depth + 1, budget),
+         {:ok, budget} <- charge_zero_width(constructor, count, budget),
+         {:ok, values, <<>>, budget} <-
+           decode_array_elements(elements, count, constructor, limits, depth + 1, [], budget) do
+      {:ok, AMQPValue.array(array_element_type(constructor), values), rest, budget}
     else
-      {:ok, _values, _leftover} -> array_error(:array_size_mismatch)
+      {:ok, _values, _leftover, _budget} -> array_error(:array_size_mismatch)
       {:more, _needed} -> array_error(:array_element_truncated)
       {:error, _} = error -> error
     end
   end
 
-  defp decode_array_constructor(<<0, rest::binary>>, limits, depth) do
-    with :ok <- validate_nesting_depth(:value_decode, limits, depth),
-         {:ok, descriptor, rest} <- decode_value(rest, limits, depth + 1),
-         :ok <- validate_descriptor(descriptor, :value_decode),
-         {:ok, inner, rest} <- decode_array_constructor(rest, limits, depth + 1) do
-      {:ok, {:described, descriptor, inner}, rest}
+  # Constant element constructors consume no element bytes, so the array
+  # size field cannot bound their count. Charge the whole array before
+  # allocating any element against the shared per-decode budget.
+  defp charge_zero_width(constructor, count, budget) do
+    cond do
+      not zero_width?(constructor) -> {:ok, budget}
+      count <= budget -> {:ok, budget - count}
+      true -> {:error, Error.new(:value_decode, :limit_exceeded, :zero_width_element_limit)}
     end
   end
 
-  defp decode_array_constructor(<<0x40, _::binary>>, _limits, _depth),
+  defp zero_width?({:described, _descriptor, inner}), do: zero_width?(inner)
+  defp zero_width?({_type, kind, _width}), do: kind == :constant
+
+  defp decode_array_constructor(<<0, rest::binary>>, limits, depth, budget) do
+    with :ok <- validate_nesting_depth(:value_decode, limits, depth),
+         {:ok, descriptor, rest, budget} <- decode_value(rest, limits, depth + 1, budget),
+         :ok <- validate_descriptor(descriptor, :value_decode),
+         {:ok, inner, rest, budget} <- decode_array_constructor(rest, limits, depth + 1, budget) do
+      {:ok, {:described, descriptor, inner}, rest, budget}
+    end
+  end
+
+  defp decode_array_constructor(<<0x40, _::binary>>, _limits, _depth, _budget),
     do: array_error(:null_array_element_type)
 
-  defp decode_array_constructor(<<code, rest::binary>>, _limits, _depth) do
+  defp decode_array_constructor(<<code, rest::binary>>, _limits, _depth, budget) do
     case Map.fetch(@array_constructors, code) do
       {:ok, {type, kind, width}} ->
-        {:ok, {type, kind, width}, rest}
+        {:ok, {type, kind, width}, rest, budget}
 
       :error ->
         {:error,
@@ -358,41 +401,54 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
     end
   end
 
-  defp decode_array_constructor(<<>>, _limits, _depth), do: {:more, 1}
+  defp decode_array_constructor(<<>>, _limits, _depth, _budget), do: {:more, 1}
 
   defp array_element_type({:described, descriptor, inner}),
     do: {:described, descriptor, array_element_type(inner)}
 
   defp array_element_type({type, _kind, _width}), do: type
 
-  defp decode_array_elements(input, 0, _constructor, _limits, _depth, values),
-    do: {:ok, Enum.reverse(values), input}
+  defp decode_array_elements(input, 0, _constructor, _limits, _depth, values, budget),
+    do: {:ok, Enum.reverse(values), input, budget}
 
-  defp decode_array_elements(input, count, constructor, limits, depth, values) do
-    with {:ok, value, rest} <- decode_array_element(input, constructor, limits, depth) do
-      decode_array_elements(rest, count - 1, constructor, limits, depth, [value | values])
+  defp decode_array_elements(input, count, constructor, limits, depth, values, budget) do
+    with {:ok, value, rest, budget} <-
+           decode_array_element(input, constructor, limits, depth, budget) do
+      decode_array_elements(rest, count - 1, constructor, limits, depth, [value | values], budget)
     end
   end
 
-  defp decode_array_element(input, {:described, descriptor, inner}, limits, depth) do
+  defp decode_array_element(input, {:described, descriptor, inner}, limits, depth, budget) do
     with :ok <- validate_nesting_depth(:value_decode, limits, depth),
-         {:ok, value, rest} <- decode_array_element(input, inner, limits, depth + 1) do
-      {:ok, AMQPValue.described(descriptor, value), rest}
+         {:ok, value, rest, budget} <-
+           decode_array_element(input, inner, limits, depth + 1, budget) do
+      {:ok, AMQPValue.described(descriptor, value), rest, budget}
     end
   end
 
-  defp decode_array_element(input, {:list, :constant, 0}, limits, depth) do
+  defp decode_array_element(input, {type, :compound, width}, limits, depth, budget),
+    do: decode_compound(input, width, type, limits, depth, budget)
+
+  defp decode_array_element(input, {:array, :array, width}, limits, depth, budget),
+    do: decode_array(input, width, limits, depth, budget)
+
+  defp decode_array_element(input, constructor, limits, depth, budget) do
+    with {:ok, value, rest} <- decode_array_scalar(input, constructor, limits, depth),
+         do: {:ok, value, rest, budget}
+  end
+
+  defp decode_array_scalar(input, {:list, :constant, 0}, limits, depth) do
     with :ok <- validate_nesting_depth(:value_decode, limits, depth),
          do: {:ok, AMQPValue.list([]), input}
   end
 
-  defp decode_array_element(input, {:boolean, :constant, value}, _limits, _depth),
+  defp decode_array_scalar(input, {:boolean, :constant, value}, _limits, _depth),
     do: {:ok, AMQPValue.boolean(value == 1), input}
 
-  defp decode_array_element(input, {type, :constant, 0}, _limits, _depth),
+  defp decode_array_scalar(input, {type, :constant, 0}, _limits, _depth),
     do: {:ok, %AMQPValue{type: type, value: 0}, input}
 
-  defp decode_array_element(input, {:boolean, :boolean, 1}, _limits, _depth) do
+  defp decode_array_scalar(input, {:boolean, :boolean, 1}, _limits, _depth) do
     case input do
       <<value, rest::binary>> when value in [0, 1] -> {:ok, AMQPValue.boolean(value == 1), rest}
       <<_value, _::binary>> -> array_error(:invalid_boolean)
@@ -400,26 +456,20 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
     end
   end
 
-  defp decode_array_element(input, {type, :unsigned, width}, limits, _depth),
+  defp decode_array_scalar(input, {type, :unsigned, width}, limits, _depth),
     do: decode_fixed(input, width, &%AMQPValue{type: type, value: &1}, limits)
 
-  defp decode_array_element(input, {type, :signed, width}, limits, _depth),
+  defp decode_array_scalar(input, {type, :signed, width}, limits, _depth),
     do: decode_signed(input, width, &%AMQPValue{type: type, value: &1}, limits)
 
-  defp decode_array_element(input, {type, :bits, width}, limits, _depth),
+  defp decode_array_scalar(input, {type, :bits, width}, limits, _depth),
     do: decode_bits(input, width, type, limits)
 
-  defp decode_array_element(input, {:char, :char, 4}, limits, _depth),
+  defp decode_array_scalar(input, {:char, :char, 4}, limits, _depth),
     do: decode_char(input, limits)
 
-  defp decode_array_element(input, {type, :variable, width}, limits, _depth),
+  defp decode_array_scalar(input, {type, :variable, width}, limits, _depth),
     do: decode_variable(input, width, type, limits)
-
-  defp decode_array_element(input, {type, :compound, width}, limits, depth),
-    do: decode_compound(input, width, type, limits, depth)
-
-  defp decode_array_element(input, {:array, :array, width}, limits, depth),
-    do: decode_array(input, width, limits, depth)
 
   defp decode_bits(_input, width, _type, limits) when width > limits.max_value_bytes,
     do: value_size_limit(:value_decode, 1)
@@ -444,18 +494,19 @@ defmodule GravitonMQ.AMQP10.Codec.Value do
       else: {:error, Error.new(:value_decode, :malformed, :invalid_char, offset: 1)}
   end
 
-  defp decode_described(input, limits, depth) do
+  defp decode_described(input, limits, depth, budget) do
     with :ok <- validate_nesting_depth(:value_decode, limits, depth),
-         {:ok, descriptor, after_descriptor} <- decode_value(input, limits, depth + 1),
+         {:ok, descriptor, after_descriptor, budget} <-
+           decode_value(input, limits, depth + 1, budget),
          :ok <- validate_descriptor(descriptor, :value_decode),
-         {:ok, value, rest} <- decode_value(after_descriptor, limits, depth + 1),
+         {:ok, value, rest, budget} <- decode_value(after_descriptor, limits, depth + 1, budget),
          :ok <-
            validate_total_value_size(
              1 + byte_size(input) - byte_size(rest),
              limits,
              :value_decode
            ) do
-      {:ok, AMQPValue.described(descriptor, value), rest}
+      {:ok, AMQPValue.described(descriptor, value), rest, budget}
     end
   end
 

@@ -65,3 +65,48 @@ Record/log limits and streaming early halt bound memory and disk admission.
 G6 exits require actual crash/restart, partial-write and failed/uncertain-sync
 evidence, including independent MQTT peers and AMQP queue recovery. G7 adds
 CI, model/fuzz/soak/resources and clean installed-consumer qualification.
+
+## Amendment — 2026-11-08: WAL compaction and recovery repair
+
+Status: uncommitted maintenance change on `main`; Linux and CI verification
+pending. The original decisions above are unchanged except where stated.
+
+`WAL.compact/2` (event streams) and `WAL.compact_records/2` (opaque streams)
+replace the whole durable log with caller-supplied base items; `WAL.usage/1`
+reports log, base and limit bytes. Compaction requires every appended record to
+be durable and is serialized with append/sync. The complete base is measured
+before any file is created and must fit `max_log_bytes`. It is written to a new
+generation file `events.<n>.wal` whose version 2 header names the generation,
+base position and base end offset; the file and its directory are synchronized.
+The single commit point is the atomic rename of a version 2 checkpoint naming
+that generation. A crash before the rename recovers the old generation, after
+it the new one. Base items take fresh positions after the current position, so
+positions and durable-through references never go backwards. Success is
+reported only after the checkpoint directory sync; removing the old generation
+afterwards is garbage collection, repeated on every successful open, and its
+failure does not fail the compaction. A failed compaction before the commit
+poisons the owner. A never-compacted log keeps `events.wal` and the version 1
+header/checkpoint byte-for-byte; both versions remain readable.
+
+Owners compact when the log is at least half of `max_log_bytes` and at least
+twice its base size, on open, and once (then retry) after an append rejected
+by the log limit, which writes nothing. `max_log_bytes` is thus no longer a
+lifetime cap, but the compacted live state must still fit. MQTT compacts to its
+latest committed snapshot. An AMQP queue compacts its durable machine state to
+the identity event followed by `queue_snapshot/v1` chunk events (deterministic
+ETF, decoded with `:safe`, compressed ETF refused), which replay verifies
+exactly.
+
+Recovery is amended: an invalid tail, not only an incomplete one, at or beyond
+the durable checkpoint is truncated, because it was never acknowledged; read
+I/O errors are never treated as a tail. A log without a checkpoint that holds
+at most a (partial) header of this stream is reinitialized. Any other log
+without a checkpoint, or generation files without a checkpoint, remain an
+error, as does a checkpoint naming a missing generation.
+
+Evidence: `wal_codec_test.exs` and `queue_compaction_test.exs` ran on macOS.
+`wal_compaction_test.exs`, the compaction crash matrix in `wal_crash_test.exs`,
+the `wal_fault_test.exs` additions, `durable_queue_test.exs` and
+`mqtt/persistence_test.exs` require Linux; they were exercised only through a
+non-repository scratch harness with the platform check stubbed, and remain
+UNVERIFIED on Linux until CI runs.

@@ -66,14 +66,24 @@ On write/sync failure the instance closes network connections, cancels auth
 work and stops admitting operations. Status remains available with
 `storage: :failed`. A possible write reports `:unknown_outcome`; a pre-append
 admission failure reports `:persistence_failed`. Neither produces a successful
-ACK. Reopening validates the durable prefix, repairs only an incomplete tail
-beyond it, and resynchronizes possible completed unacknowledged records; those
-records may survive without proving a previous successful result.
+ACK. Reopening validates the durable prefix, truncates only an incomplete or
+invalid tail beyond it, and resynchronizes possible completed unacknowledged
+records; those records may survive without proving a previous successful result.
+A log with no checkpoint that holds at most a (partial) header is reinitialized;
+any other log without a checkpoint is an error.
 
 Status reports `profile: :local_durable`, `storage` and `durable_through`.
 Snapshot bytes, 500,000 terms, depth 64 and the total log size bound admission.
-The first WAL is one bounded append-only file with no rotation/compaction;
-exhaustion fails closed and requires operator action. The bounded
+Since 2026-11-08 the WAL is compacted to the latest committed snapshot after a
+commit or on open when the log is at least half of `max_log_bytes` and at least
+twice its compacted base, and once (then retried) when an append is rejected by
+the log limit. `max_log_bytes` is therefore no longer a lifetime cap, but one
+compacted snapshot plus the next one must still fit; otherwise the commit fails
+explicitly. A failed or uncertain compaction poisons storage like any other
+write failure. See [ADR 0008](adr/0008-local-durability-profiles.md) for the
+commit design. Evidence: `apps/graviton_mq_runtime/test/mqtt/persistence_test.exs`
+and the storage WAL compaction/crash/fault tests, which are Linux-only and
+remain UNVERIFIED on Linux until CI runs. The bounded
 [G6 local durability exit](qualification/2026-10-30-g6-local-durability.md)
 passed its integrated gates and installed recovery consumers. Subsequent
 selected-profile G5/G7 acceptance is recorded in the matrix and G7 record.
@@ -207,6 +217,15 @@ subscriptions and unsupported property use follow explicit rejection paths.
 Subscriptions receive the supported grant. MQTT3.1.1 remains CONNECT/CONNACK codec-only;
 this runtime requires MQTT5.
 
+Packets a client pipelines after CONNECT are held unprocessed while CONNECT
+authentication or Will authorization is outstanding. They are replayed in
+arrival order after the successful CONNACK and discarded with the connection
+if CONNECT is rejected (MQTT-3.1.4-6); a held second CONNECT is still a protocol
+error on replay. The hold is bounded per connection by Receive Maximum packets
+and Maximum Packet Size total bytes, and across connections by
+`max_incoming_bytes`. Overflow refuses CONNECT with 0x97 (Quota exceeded),
+never a DISCONNECT before a successful CONNACK.
+
 Sessions support Clean Start, Session Present and expiry, offline QoS1/2,
 reconnection responsibility, delayed Will cancellation/publication, retained
 handling and message expiry. Live routing preserves No Local and Retain As
@@ -220,6 +239,16 @@ Receive Maximum remains occupied until PUBCOMP; connection quotas reset when
 the transport changes. Oversized outbound application messages are discarded
 as completed, as required by MQTT-3.1.2-25, without disconnecting the recipient.
 A due Will remains owned under route pressure.
+
+Takeover by the same principal closes the old Network Connection first (0x8E).
+Behaviour change on 2026-11-08: when the taken-over session has Session Expiry
+0, that loss ends it; the old Will becomes due under the ordinary
+min(Will Delay, Session Expiry) rule, and the new connection receives
+Session Present 0 with a fresh session. Previously that session was resumed.
+With a nonzero expiry, the post-disconnect session state is resumed. A refused
+CONNECT (principal mismatch or session limit) leaves the current owner
+undisturbed. Evidence: `broker_connect_hold_test.exs` and `broker_test.exs`;
+independent-peer requalification is pending.
 
 Count/byte limits independently bound connections, sessions, subscriptions,
 retained data, Wills, prepared operations, incoming/pending/offline deliveries,

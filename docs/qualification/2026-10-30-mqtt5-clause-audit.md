@@ -266,6 +266,32 @@ recorded exit0, stopped peers and removed the temporary instance in
 combined root gates; the earlier1,097-test checkpoint does not qualify later
 source changes.
 
+## Maintenance amendment — 2026-11-08
+
+The ledger rows above were not re-run. Uncommitted post-0.2.1 review fixes
+change behaviour cited in two clause groups:
+
+- §3.1.4 CONNECT ordering: packets pipelined after CONNECT are held
+  unprocessed while authentication or Will authorization is outstanding,
+  replayed in order after the successful CONNACK and discarded if CONNECT is
+  rejected (MQTT-3.1.4-6). The hold is bounded by Receive Maximum packets and
+  Maximum Packet Size bytes per connection and by `max_incoming_bytes` overall;
+  overflow refuses CONNECT with 0x97. Behaviour change: an expiry0 session
+  taken over by the same principal now ends with the old connection (its Will
+  becomes due under min(delay, expiry)), and the new connection receives
+  Session Present0 with a fresh session; previously the session was resumed.
+  Expiry>0 takeover resumes the post-disconnect state. Evidence:
+  `M/test/broker_connect_hold_test.exs` and the updated `M/test/broker_test.exs`.
+- §§3.1.2.11.2, 4.1–4.2 durability: the earlier "no compaction" limit no longer
+  applies. The broker WAL is compacted to its latest committed snapshot (see
+  the [ADR 0008 amendment](../adr/0008-local-durability-profiles.md)); the
+  client checkpoint is rewritten only when retained content changes. Evidence:
+  `B/test/mqtt/persistence_test.exs` and storage WAL tests (Linux-only), and
+  `C/test/mqtt_checkpoint_test.exs` / `mqtt_persistence_fault_test.exs`.
+
+Only macOS runs were made. Linux-only persistence tests, hosted CI and
+independent-peer requalification of these rows are pending.
+
 ## Evidence boundaries and remaining qualification
 
 The linked [G0/G1](2026-10-29-g0-g1.md), [G2](2026-10-30-g2.md),

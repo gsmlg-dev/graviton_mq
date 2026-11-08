@@ -1935,7 +1935,7 @@
       "role": "client+broker",
       "evidence": "G",
       "status": "SCOPED UNIT/PEER EVIDENCE",
-      "note": "Unknown ordinary handle ends Session unattached-handle; A05 marks known errored handles as errant-link.",
+      "note": "Unknown ordinary handle ends Session unattached-handle; A05 marks known errored handles as errant-link. 2026-11-08 note: after a clean local Detach the handle stays in use until the peer's Detach, so in-flight Flow/Transfer for it is tolerated (Transfer still counts against the Session window and delivery-id sequence) instead of ending the Session unattached-handle; error Detach still yields errant-link (§2.6.5, A05 unchanged). Covered by `A/session_engine_test.exs` (in-flight Flow and Transfer after a local Detach; internally refused Link continuation). Independent-peer requalification pending.",
       "url": "https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-transport-v1.0-os.html#type-flow"
     },
     {

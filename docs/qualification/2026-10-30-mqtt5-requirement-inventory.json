@@ -206,7 +206,7 @@
       ],
       "BSESSION": [
         "apps/graviton_mq_mqtt/test/broker_test.exs",
-        "persistent offline QoS1 resume; expired session discarded on CONNECT; expiry0 active takeover"
+        "persistent offline QoS1 resume; expired session discarded on CONNECT; expiry0 active takeover. 2026-11-08 note: behaviour changed — an expiry0 session taken over now ends (old Will due under min(delay,expiry)) and the new connection gets Session Present0 with a fresh session; previously it was resumed. Expiry>0 takeover resumes the post-disconnect state. Now covered by broker_connect_hold_test.exs session-takeover tests and the updated broker_test.exs expiry0 test; independent-peer requalification pending."
       ],
       "BASSIGNED": [
         "apps/graviton_mq_mqtt/test/broker_test.exs",
@@ -214,7 +214,7 @@
       ],
       "BTAKEOVER": [
         "apps/graviton_mq_mqtt/test/broker_test.exs",
-        "takeover cannot change principal and old auth results are fenced; active expiry0 takeover"
+        "takeover cannot change principal and old auth results are fenced; active expiry0 takeover. 2026-11-08 note: behaviour changed — an expiry0 session taken over now ends (old Will due under min(delay,expiry)) and the new connection gets Session Present0 with a fresh session; previously it was resumed. Expiry>0 takeover resumes the post-disconnect state. Now covered by broker_connect_hold_test.exs session-takeover tests and the updated broker_test.exs expiry0 test; independent-peer requalification pending."
       ],
       "BWILL": [
         "apps/graviton_mq_mqtt/test/broker_test.exs",
@@ -1710,7 +1710,8 @@
       "independent": [],
       "recovery": [],
       "observation": "Authenticated same-principal takeover disconnects the former connection; mismatched principal cannot take it over.",
-      "uncovered": ""
+      "uncovered": "",
+      "amendment_2026_11_08": "2026-11-08 note: a refused takeover (principal mismatch, session limit) leaves the current owner connected; see BTAKEOVER for the expiry0 behaviour change. Covered by broker_connect_hold_test.exs; independent-peer requalification pending."
     },
     {
       "id": "MQTT-3.1.4-4",
@@ -1775,7 +1776,8 @@
       ],
       "recovery": [],
       "observation": "Rejected CONNECT removes/closes connection; subsequent old input cannot be admitted.",
-      "uncovered": ""
+      "uncovered": "",
+      "amendment_2026_11_08": "2026-11-08 note: packets pipelined after CONNECT are now held unprocessed during authentication/Will authorization, replayed in order after CONNACK0 and discarded when CONNECT is rejected; held count/bytes are bounded and overflow refuses CONNECT with 0x97. Covered by apps/graviton_mq_mqtt/test/broker_connect_hold_test.exs; independent-peer requalification pending."
     },
     {
       "id": "MQTT-3.2.0-1",
@@ -1884,7 +1886,8 @@
         "BR"
       ],
       "observation": "Session Present is exactly existing unexpired state AND not Clean Start.",
-      "uncovered": ""
+      "uncovered": "",
+      "amendment_2026_11_08": "2026-11-08 note: after an expiry0 takeover the ended session is absent, so Session Present is 0 (previously 1). Covered by broker_connect_hold_test.exs and broker_test.exs; independent-peer requalification pending."
     },
     {
       "id": "MQTT-3.2.2-4",
@@ -7791,6 +7794,25 @@
         "g7-will-pfi-peer-green.log"
       ],
       "integration": "Final combined gates pending parent qualification."
+    }
+  ],
+  "amendments": [
+    {
+      "date": "2026-11-08",
+      "status": "UNCOMMITTED_NOT_REQUALIFIED",
+      "summary": "Post-0.2.1 review fixes: expiry0 takeover ends the old session (Session Present 0, fresh session; previously resumed); packets pipelined after CONNECT are held during authentication, replayed after CONNACK or discarded on rejection; local durable logs are compacted. This ledger was not re-run.",
+      "affected": [
+        "BSESSION",
+        "BTAKEOVER",
+        "MQTT-3.1.4-3",
+        "MQTT-3.1.4-6",
+        "MQTT-3.2.2-3"
+      ],
+      "evidence": [
+        "apps/graviton_mq_mqtt/test/broker_connect_hold_test.exs",
+        "apps/graviton_mq_mqtt/test/broker_test.exs"
+      ],
+      "pending": "Only macOS runs; Linux-only persistence tests, hosted CI and independent-peer requalification pending."
     }
   ]
 }

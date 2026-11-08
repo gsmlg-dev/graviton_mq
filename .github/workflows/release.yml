@@ -16,9 +16,11 @@ on:
 permissions:
   contents: write
 
+# Never cancel a run that may be publishing. Runs for the same version queue;
+# runs for different versions are fenced by the atomic push before publishing.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ inputs.version }}
+  cancel-in-progress: false
 
 env:
   MIX_ENV: prod
@@ -50,11 +52,30 @@ jobs:
           git check-ref-format "refs/heads/$RELEASE_REF"
           remote_sha=$(git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_REF" | cut -f1)
           test "$remote_sha" = "$(git rev-parse HEAD)" || { echo "git_ref must name the checked-out branch" >&2; exit 1; }
-          elixir scripts/set_version.exs "$RELEASE_VERSION"
-          if git show-ref --verify --quiet "refs/tags/v$RELEASE_VERSION"; then
-            echo "Release tag already exists: v$RELEASE_VERSION" >&2
-            exit 1
-          fi
+          tag="v$RELEASE_VERSION"
+          tag_status=0
+          git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null || tag_status=$?
+          case "$tag_status" in
+            0)
+              # The tag is pushed before publishing, so an existing tag means an
+              # earlier run stopped during publication. Resume from that commit.
+              git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+              tag_sha=$(git rev-parse "$tag^{commit}")
+              git merge-base --is-ancestor "$tag_sha" HEAD || { echo "Release tag $tag is not on $RELEASE_REF" >&2; exit 1; }
+              git checkout --detach "$tag_sha"
+              test "$(cat VERSION)" = "$RELEASE_VERSION" || { echo "Release tag $tag does not carry VERSION $RELEASE_VERSION" >&2; exit 1; }
+              echo "Resuming publication of existing tag $tag ($tag_sha)"
+              echo "RELEASE_RESUME=true" >> "$GITHUB_ENV"
+              ;;
+            2)
+              elixir scripts/set_version.exs "$RELEASE_VERSION"
+              echo "RELEASE_RESUME=false" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Cannot determine whether release tag $tag exists" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Cache dependencies and build
         uses: actions/cache@v6
@@ -78,6 +99,20 @@ jobs:
 
       - name: Build and verify every archive before publishing
         run: elixir scripts/build_hex.exs "$RUNNER_TEMP/graviton_mq_hex"
+
+      # Push before publishing: a rejected push leaves nothing on Hex, and a
+      # failed publication is completed by re-running, which resumes from the tag.
+      - name: Commit and push synchronized version and tag
+        if: env.RELEASE_RESUME != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- VERSION
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v$RELEASE_VERSION"
+          fi
+          git tag -a "v$RELEASE_VERSION" -m "Release v$RELEASE_VERSION"
+          git push --atomic origin "HEAD:refs/heads/$RELEASE_REF" "refs/tags/v$RELEASE_VERSION"
 
       - name: Publish all packages to Hex in dependency order
         env:
@@ -107,21 +142,14 @@ jobs:
             esac
           done < "$RUNNER_TEMP/graviton_mq_hex/packages.txt"
 
-      - name: Commit and push synchronized version and tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- VERSION
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(release): v$RELEASE_VERSION"
-          fi
-          git tag -a "v$RELEASE_VERSION" -m "Release v$RELEASE_VERSION"
-          git push --atomic origin "HEAD:refs/heads/$RELEASE_REF" "refs/tags/v$RELEASE_VERSION"
-
       - name: Create GitHub Release with Hex archives
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "v$RELEASE_VERSION" > /dev/null 2>&1; then
+            gh release upload "v$RELEASE_VERSION" --clobber "$RUNNER_TEMP/graviton_mq_hex/artifacts/"*.tar
+            exit 0
+          fi
           release_options=()
           if [[ "$RELEASE_VERSION" == *-* ]]; then
             release_options+=(--prerelease)

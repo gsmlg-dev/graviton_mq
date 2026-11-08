@@ -30,6 +30,7 @@ defmodule GravitonMQ.Client.MQTT do
       observer_monitor: Process.monitor(config.observer),
       operations: %{},
       store: nil,
+      saved: nil,
       next_operation: 1,
       results: %{},
       poisoned: nil,
@@ -393,11 +394,16 @@ defmodule GravitonMQ.Client.MQTT do
       end)
 
     meta = %{next_operation: state.next_operation, deadlines: deadlines, results: results}
+    content = Checkpoint.content(state.machine, meta)
 
-    with {:ok, snapshot} <- Checkpoint.capture(state.machine, meta, now(), wall_now()),
+    # Keep-alive and timer steps leave retained content unchanged; the last
+    # commit already made exactly this content durable.
+    with false <- content == state.saved,
+         {:ok, snapshot} <- Checkpoint.capture(state.machine, meta, now(), wall_now()),
          {:ok, store} <- Store.commit(state.store, snapshot) do
-      %{state | store: store, results: results}
+      %{state | store: store, results: results, saved: content}
     else
+      true -> %{state | results: results}
       {:error, reason, store} -> poison(%{state | store: store}, reason)
       {:error, reason} -> poison(state, {:failed, reason})
     end
@@ -437,9 +443,10 @@ defmodule GravitonMQ.Client.MQTT do
         state = %{state | socket: socket, buffer: <<>>}
         state = step(state, {:transport_up, generation, now()})
 
+        state = if state.socket, do: arm_socket(state), else: state
+
         if state.socket do
           state
-          |> arm_socket()
           |> schedule(:handshake, state.config.handshake_timeout, generation)
           |> schedule_tick()
         else
@@ -543,8 +550,17 @@ defmodule GravitonMQ.Client.MQTT do
     end
   end
 
-  defp lost(state, reason),
-    do: step(state, {:transport_down, state.machine.generation, reason, now()})
+  # Release the dead transport first, so a reconnect scheduled by the step
+  # keeps its retry timer; the machine emits no close effect for this loss.
+  defp lost(state, reason) do
+    generation = state.machine.generation
+    Transport.close(state.config.transport, state.socket)
+
+    %{state | socket: nil, buffer: <<>>}
+    |> cancel(:tick)
+    |> cancel(:handshake)
+    |> step({:transport_down, generation, reason, now()})
+  end
 
   defp connect(config), do: Transport.connect(config)
 

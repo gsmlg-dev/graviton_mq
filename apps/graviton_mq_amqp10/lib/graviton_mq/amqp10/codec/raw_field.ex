@@ -12,9 +12,10 @@ defmodule GravitonMQ.AMQP10.Codec.RawField do
           {:ok, binary() | nil} | {:error, Error.t()}
   def composite_field(<<0, rest::binary>>, index, limits)
       when is_integer(index) and index >= 0 do
-    with {:ok, _descriptor, list} <- Value.decode(rest, limits),
+    with {:ok, _descriptor, list, budget} <-
+           Value.decode_bounded(rest, limits, limits.max_zero_width_elements),
          {:ok, count, fields} <- list_body(list),
-         {:ok, field} <- find_field(fields, count, index, limits) do
+         {:ok, field} <- find_field(fields, count, index, limits, budget) do
       {:ok, field}
     else
       {:error, %Error{}} = error -> error
@@ -42,19 +43,25 @@ defmodule GravitonMQ.AMQP10.Codec.RawField do
 
   defp list_body(_wire), do: invalid_composite()
 
-  defp find_field(_fields, count, index, _limits) when index >= count, do: {:ok, nil}
+  # Every walked field shares the descriptor's zero-width element budget.
+  defp find_field(_fields, count, index, _limits, _budget) when index >= count, do: {:ok, nil}
 
-  defp find_field(fields, _count, 0, limits) do
-    case Value.decode(fields, limits) do
-      {:ok, _value, rest} -> {:ok, binary_part(fields, 0, byte_size(fields) - byte_size(rest))}
-      {:error, %Error{}} = error -> error
-      _ -> invalid_composite()
+  defp find_field(fields, _count, 0, limits, budget) do
+    case Value.decode_bounded(fields, limits, budget) do
+      {:ok, _value, rest, _budget} ->
+        {:ok, binary_part(fields, 0, byte_size(fields) - byte_size(rest))}
+
+      {:error, %Error{}} = error ->
+        error
+
+      _ ->
+        invalid_composite()
     end
   end
 
-  defp find_field(fields, count, index, limits) do
-    case Value.decode(fields, limits) do
-      {:ok, _value, rest} -> find_field(rest, count - 1, index - 1, limits)
+  defp find_field(fields, count, index, limits, budget) do
+    case Value.decode_bounded(fields, limits, budget) do
+      {:ok, _value, rest, budget} -> find_field(rest, count - 1, index - 1, limits, budget)
       {:error, %Error{}} = error -> error
       _ -> invalid_composite()
     end

@@ -40,6 +40,11 @@ defmodule GravitonMQ.Client.MQTT.Checkpoint do
     end
   end
 
+  # The retained content a capture would make durable, without its capture
+  # timestamps. Equal content needs no new commit: restore rebases deadlines
+  # through any consistent (mono, wall) pair, including an older one.
+  def content(%Machine{} = machine, meta), do: %{machine: Map.take(machine, @fields), meta: meta}
+
   def restore(snapshot, %Machine{} = fresh, mono, wall) do
     with :ok <- validate(snapshot, fresh),
          true <- wall >= snapshot.wall do

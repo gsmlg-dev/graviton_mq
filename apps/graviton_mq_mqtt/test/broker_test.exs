@@ -889,7 +889,7 @@ defmodule GravitonMQ.MQTT.BrokerTest do
     assert state.operations == %{}
   end
 
-  test "active session takeover with expiry zero safely resumes the existing subscriptions" do
+  test "active session takeover with expiry zero ends the old session and starts a fresh one" do
     {state, _} = attach(new(), :original)
     {state, _} = subscribe(state, :original, [{"a", 1}])
     {state, _} = Broker.transition(state, {:connection_open, :replacement, 2, 1})
@@ -897,8 +897,13 @@ defmodule GravitonMQ.MQTT.BrokerTest do
     {state, effects} = Broker.transition(state, {:packet, :replacement, 2, connect, <<16>>, 1})
     {state, effects} = allowed(state, effects, 1)
     assert state.sessions["original"].connection == {:replacement, 2}
-    assert Map.has_key?(state.sessions["original"].subscriptions, "a")
+    assert state.sessions["original"].subscriptions == %{}
     assert Enum.any?(effects, &match?({:close, :original, _, :session_taken_over}, &1))
+
+    assert Enum.any?(
+             effects,
+             &match?({:send, :replacement, 2, _, %Connack{session_present: false}}, &1)
+           )
   end
 
   test "expired retained replay does not consume capacity while subscription authorization waits" do

@@ -503,10 +503,6 @@ defmodule GravitonMQ.AMQP10.Endpoint do
       Map.has_key?(state.connection.remote_channel_to_session, channel) ->
         connection_error(state, :duplicate_remote_channel)
 
-      scalar(pdu.incoming_window, 0) >= 0x8000_0000 or
-          scalar(pdu.outgoing_window, 0) >= 0x8000_0000 ->
-        connection_error(state, :ambiguous_session_window)
-
       pdu.remote_channel != nil ->
         bind_begin(state, channel, pdu)
 

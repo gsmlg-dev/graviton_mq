@@ -82,8 +82,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
           max_bytes: config.max_input_bytes + endpoint.options.max_write_bytes
         },
         event_overflow: false,
-        read_timer: nil,
-        read_token: nil,
+        read_armed: false,
         close_writes: MapSet.new(),
         close_requested: false,
         close_timer: nil,
@@ -135,20 +134,25 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
     end
   end
 
-  defp info({:read, generation, token}, %{read_token: token} = state)
-       when not is_nil(token) do
-    if generation == state.endpoint.generation do
-      state = %{state | read_timer: nil, read_token: nil}
+  # Input is delivered with `active: :once`; a socket is re-armed only when
+  # resume_input/1 finds the bounded input fully drained. Messages from a
+  # replaced or closed socket are ignored.
+  defp info({kind, socket, bytes}, %{socket: socket} = state)
+       when kind in [:tcp, :ssl] and not is_nil(socket),
+       do: received(%{state | read_armed: false}, bytes)
 
-      case recv(state.transport, state.socket) do
-        {:ok, bytes} -> received(state, bytes)
-        {:error, :timeout} -> continue(schedule_read(state, 5))
-        {:error, reason} -> continue(step(state, {:transport_down, transport_reason(reason)}))
-      end
-    else
-      {:noreply, state}
-    end
-  end
+  defp info({kind, socket}, %{socket: socket} = state)
+       when kind in [:tcp_closed, :ssl_closed] and not is_nil(socket),
+       do: continue(step(%{state | read_armed: false}, {:transport_down, :closed}))
+
+  defp info({kind, socket, reason}, %{socket: socket} = state)
+       when kind in [:tcp_error, :ssl_error] and not is_nil(socket),
+       do:
+         continue(step(%{state | read_armed: false}, {:transport_down, transport_reason(reason)}))
+
+  defp info({kind, socket}, %{socket: socket} = state)
+       when kind in [:tcp_passive, :ssl_passive] and not is_nil(socket),
+       do: continue(resume_input(%{state | read_armed: false}))
 
   defp info({:accepted, socket}, %{socket: nil, writer: nil} = state) do
     Process.cancel_timer(state.accept_timer)
@@ -446,22 +450,20 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
 
   defp setopts(:tcp, socket, options), do: :inet.setopts(socket, options)
   defp setopts(:tls, socket, options), do: :ssl.setopts(socket, options)
-  defp recv(:tcp, socket), do: :gen_tcp.recv(socket, 0, 0)
-  defp recv(:tls, socket), do: :ssl.recv(socket, 0, 0)
-  defp arm_socket(state), do: schedule_read(state, 0)
-  defp schedule_read(%{socket: nil} = state, _delay), do: state
-  defp schedule_read(%{read_timer: timer} = state, _delay) when not is_nil(timer), do: state
+  defp arm_socket(%{socket: nil} = state), do: state
+  defp arm_socket(%{read_armed: true} = state), do: state
 
-  defp schedule_read(state, delay) do
-    token = make_ref()
-    timer = Process.send_after(self(), {:read, state.endpoint.generation, token}, delay)
-    %{state | read_timer: timer, read_token: token}
+  defp arm_socket(state) do
+    case setopts(state.transport, state.socket, active: :once) do
+      :ok -> %{state | read_armed: true}
+      # A closed or failed socket is reported once as transport loss.
+      {:error, reason} -> step(state, {:transport_down, transport_reason(reason)})
+    end
   end
 
   defp close_socket(state) do
-    if state.read_timer, do: Process.cancel_timer(state.read_timer)
     if state.close_timer, do: Process.cancel_timer(state.close_timer)
-    state = %{state | read_timer: nil, read_token: nil, close_timer: nil, close_token: nil}
+    state = %{state | read_armed: false, close_timer: nil, close_token: nil}
 
     if state.socket do
       case state.transport do

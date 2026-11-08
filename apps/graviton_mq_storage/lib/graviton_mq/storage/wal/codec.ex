@@ -9,30 +9,60 @@ defmodule GravitonMQ.Storage.WAL.Codec do
   @event_type "queue-event/v1"
   @max_identity 1024
 
+  # Version 1 is the original single-file layout (generation 0, positions from
+  # one). Version 2 names a compacted generation whose base items start after
+  # `base_position` and end at byte `base_end`. Both remain readable.
   def header(stream, mode) do
     body = <<"GMWL", 1, mode_id(mode), byte_size(stream)::16, stream::binary>>
     <<body::binary, :erlang.crc32(body)::32>>
   end
 
+  def header(stream, mode, generation, base_position, base_end) do
+    body =
+      <<"GMWL", 2, mode_id(mode), byte_size(stream)::16, stream::binary, generation::64,
+        base_position::64, base_end::64>>
+
+    <<body::binary, :erlang.crc32(body)::32>>
+  end
+
+  def compacted_header_size(stream), do: 36 + byte_size(stream)
+
   def header_size(<<"GMWL", 1, mode, size::16>>) when mode in [0, 1] and size in 1..1024,
     do: {:ok, 12 + size}
+
+  def header_size(<<"GMWL", 2, mode, size::16>>) when mode in [0, 1] and size in 1..1024,
+    do: {:ok, 36 + size}
 
   def header_size(_), do: {:error, :wal_header}
 
   def decode_header(bytes, stream, mode) do
     with {:ok, body} <- checksum(bytes),
-         <<"GMWL", 1, actual_mode, size::16, actual::binary-size(size)>> <- body do
+         {:ok, actual_mode, actual, info} <- header_body(body) do
       cond do
         actual != stream -> {:error, :stream_id}
         actual_mode != mode_id(mode) -> {:error, :stream_mode}
-        true -> :ok
+        true -> {:ok, Map.put(info, :header_size, byte_size(bytes))}
       end
     else
       _ -> {:error, :wal_header}
     end
   end
 
-  def checkpoint(stream, mode, position, offset) do
+  defp header_body(<<"GMWL", 1, mode, size::16, stream::binary-size(size)>>),
+    do: {:ok, mode, stream, %{generation: 0, base_position: 0, base_end: 12 + size}}
+
+  defp header_body(
+         <<"GMWL", 2, mode, size::16, stream::binary-size(size), generation::64, base::64,
+           base_end::64>>
+       )
+       when generation > 0 and base_end >= 36 + size,
+       do: {:ok, mode, stream, %{generation: generation, base_position: base, base_end: base_end}}
+
+  defp header_body(_), do: {:error, :wal_header}
+
+  # Generation 0 keeps writing the original version 1 checkpoint so a log that
+  # has never been compacted stays byte-compatible with earlier releases.
+  def checkpoint(stream, mode, 0, position, offset) do
     body =
       <<"GMCP", 1, mode_id(mode), byte_size(stream)::16, stream::binary, position::64,
         offset::64>>
@@ -40,16 +70,46 @@ defmodule GravitonMQ.Storage.WAL.Codec do
     <<body::binary, :erlang.crc32(body)::32>>
   end
 
-  def decode_checkpoint(bytes, stream, mode) do
+  def checkpoint(stream, mode, generation, position, offset) do
+    body =
+      <<"GMCP", 2, mode_id(mode), byte_size(stream)::16, stream::binary, generation::64,
+        position::64, offset::64>>
+
+    <<body::binary, :erlang.crc32(body)::32>>
+  end
+
+  def checkpoint_generation(bytes) do
     with {:ok, body} <- checksum(bytes),
-         <<"GMCP", 1, actual_mode, size::16, actual::binary-size(size), pos::64, offset::64>> <-
-           body,
-         true <- actual == stream and actual_mode == mode_id(mode) do
-      {:ok, pos, offset}
+         {:ok, _mode, _stream, generation, _pos, _offset} <- checkpoint_body(body) do
+      {:ok, generation}
     else
       _ -> {:error, :checkpoint_corrupt}
     end
   end
+
+  def decode_checkpoint(bytes, stream, mode) do
+    with {:ok, body} <- checksum(bytes),
+         {:ok, actual_mode, actual, generation, pos, offset} <- checkpoint_body(body),
+         true <- actual == stream and actual_mode == mode_id(mode) do
+      {:ok, generation, pos, offset}
+    else
+      _ -> {:error, :checkpoint_corrupt}
+    end
+  end
+
+  defp checkpoint_body(
+         <<"GMCP", 1, mode, size::16, stream::binary-size(size), pos::64, offset::64>>
+       ),
+       do: {:ok, mode, stream, 0, pos, offset}
+
+  defp checkpoint_body(
+         <<"GMCP", 2, mode, size::16, stream::binary-size(size), generation::64, pos::64,
+           offset::64>>
+       )
+       when generation > 0,
+       do: {:ok, mode, stream, generation, pos, offset}
+
+  defp checkpoint_body(_), do: {:error, :checkpoint_corrupt}
 
   # First measure the entire logical value. Encoding does not begin until the
   # exact finite byte/depth budget succeeds; binaries are never copied to size them.

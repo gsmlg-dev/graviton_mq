@@ -113,6 +113,71 @@ defmodule GravitonMQ.Storage.WALCrashTest do
     assert :ok = WAL.close(recovered)
   end
 
+  # The fault callback runs before each stage's I/O, so the VM dies with every
+  # earlier step complete and this one not started. Only the checkpoint rename
+  # commits: dying before it recovers the old log, after it the new one.
+  for {stage, outcome} <- [
+        compact_write: :old,
+        compact_sync: :old,
+        compact_directory_sync: :old,
+        wal_sync: :old,
+        checkpoint_write: :old,
+        checkpoint_sync: :old,
+        checkpoint_rename: :old,
+        directory_sync: :new,
+        compact_remove: :new
+      ] do
+    test "a VM killed during compaction at #{stage} recovers exactly the #{outcome} log", %{
+      path: path
+    } do
+      {output, status} =
+        beam("""
+        fault = fn stage, _ ->
+          if stage == #{inspect(unquote(stage))} and :persistent_term.get(:armed, false) do
+            IO.puts("KILLING")
+            System.cmd("kill", ["-KILL", System.pid()])
+            Process.sleep(:infinity)
+          end
+          :ok
+        end
+        {:ok, wal} = GravitonMQ.Storage.WAL.start_link(path: #{inspect(path)}, stream_id: "crash", mode: :opaque, fault_injector: fault)
+        {:ok, ref} = GravitonMQ.Storage.WAL.append_records(wal, [{"snapshot/v1", "old-1"}, {"snapshot/v1", "old-2"}])
+        {:ok, ^ref} = GravitonMQ.Storage.WAL.sync(wal, ref)
+        :persistent_term.put(:armed, true)
+        result = GravitonMQ.Storage.WAL.compact_records(wal, [{"snapshot/v1", "new"}])
+        IO.inspect(result, label: "UNEXPECTED")
+        :erlang.halt(2)
+        """)
+
+      assert status == 137, output
+      assert output =~ "KILLING"
+      assert {:ok, recovered} = open(path)
+
+      {position, records} =
+        case unquote(outcome) do
+          :old -> {2, ["old-1", "old-2"]}
+          :new -> {3, ["new"]}
+        end
+
+      assert {:ok, %CommitRef{position: ^position}} = WAL.durable_through(recovered)
+
+      assert {:ok, ^records} =
+               WAL.fold_records(recovered, :origin, [], fn _, _, bytes, acc ->
+                 {:cont, acc ++ [bytes]}
+               end)
+
+      expected_file = if unquote(outcome) == :old, do: "events.wal", else: "events.1.wal"
+
+      assert path |> File.ls!() |> Enum.filter(&String.starts_with?(&1, "events")) == [
+               expected_file
+             ]
+
+      assert {:ok, next} = WAL.append_records(recovered, [{"snapshot/v1", "after"}])
+      assert {:ok, ^next} = WAL.sync(recovered, next)
+      assert :ok = WAL.close(recovered)
+    end
+  end
+
   defp open(path) do
     result = WAL.start_link(path: path, stream_id: "crash", mode: :opaque)
 

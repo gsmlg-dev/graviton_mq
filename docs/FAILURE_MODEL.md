@@ -14,6 +14,23 @@ listener, connection, session, queue, storage, or effect-executor processes.
 The descriptions below are design constraints for later milestones, not claims
 of implemented recovery behavior.
 
+## Implemented amendments — 2026-11-08
+
+These uncommitted maintenance changes refine the running fault domains:
+
+- AMQP broker: an unanswered queue call or uncertain lease command fences only
+  that queue. Its lease anchor is killed so its claims return, its Links are
+  detached, new attaches are refused, and it is probed and restored when it
+  answers; the Manager and other queues keep running. A real queue crash still
+  restarts later owners. See [AMQP10_BROKER.md](AMQP10_BROKER.md).
+- A busy AMQP Connection that misses a capacity query is retried, not closed.
+- WAL: compaction commits at a single checkpoint rename; an invalid or
+  incomplete tail beyond the durable checkpoint is truncated, and a
+  header-only log without a checkpoint is reinitialized. See the
+  [ADR 0008 amendment](adr/0008-local-durability-profiles.md).
+
+Linux-only WAL evidence and independent-peer requalification are pending CI.
+
 ## Ownership and isolation
 
 Explicit ownership determines which process may mutate operational state:

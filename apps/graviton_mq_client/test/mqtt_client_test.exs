@@ -323,4 +323,83 @@ defmodule GravitonMQ.MQTTClientTest do
     assert [{_, :undefined, _, _}] = Supervisor.which_children(host)
     assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
   end
+
+  describe "transport loss" do
+    for {label, close} <- [closed: :close, reset: :shutdown] do
+      @close close
+      test "without retry releases the socket and stops ticking (#{label})" do
+        {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+        on_exit(fn -> :gen_tcp.close(listener) end)
+        {:ok, port} = :inet.port(listener)
+
+        client =
+          start_supervised!(
+            {MQTTClient,
+             client_id: "lost-#{@close}",
+             host: "127.0.0.1",
+             port: port,
+             observer: self(),
+             tick_interval: 10,
+             reconnect: [max_attempts: 0]}
+          )
+
+        socket = online!(listener, client)
+        close_peer(socket, @close)
+        assert_receive {:graviton_mq, ^client, {:disconnected, _}}, 1_000
+        state = :sys.get_state(client)
+        assert %{socket: nil, buffer: <<>>, tick: nil, handshake: nil, retry: nil} = state
+        assert MQTTClient.status(client).phase == :stopped
+        Process.sleep(50)
+        assert %{tick: nil, socket: nil} = :sys.get_state(client)
+        assert {:error, :not_connected} = MQTTClient.publish(client, "a", "b", qos: 1)
+      end
+    end
+
+    test "with retry stays idle while offline and still reconnects" do
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+      on_exit(fn -> :gen_tcp.close(listener) end)
+      {:ok, port} = :inet.port(listener)
+
+      client =
+        start_supervised!(
+          {MQTTClient,
+           client_id: "lost-retry",
+           host: "127.0.0.1",
+           port: port,
+           observer: self(),
+           tick_interval: 10,
+           reconnect: [max_attempts: 1, delay: 200, max_delay: 200]}
+        )
+
+      socket = online!(listener, client)
+      :ok = :gen_tcp.close(socket)
+      assert_receive {:graviton_mq, ^client, {:disconnected, :closed}}, 1_000
+      state = :sys.get_state(client)
+      assert %{socket: nil, buffer: <<>>, tick: nil, handshake: nil, retry: {_, _}} = state
+      assert MQTTClient.status(client).phase == :offline
+
+      second = online!(listener, client)
+      on_exit(fn -> :gen_tcp.close(second) end)
+      assert %{socket: socket, tick: {_, _}} = :sys.get_state(client)
+      refute is_nil(socket)
+      assert MQTTClient.status(client).phase == :connected
+    end
+  end
+
+  defp online!(listener, client) do
+    {:ok, socket} = :gen_tcp.accept(listener, 2_000)
+    {:ok, <<0x10, _::binary>>} = :gen_tcp.recv(socket, 0, 1_000)
+    :ok = :gen_tcp.send(socket, <<0x20, 3, 0, 0, 0>>)
+    assert_receive {:graviton_mq, ^client, {:connected, _}}, 1_000
+    socket
+  end
+
+  # An abortive close (RST) surfaces as {:tcp_error, _, :econnreset} on most
+  # platforms and as :tcp_closed on others; both are transport loss.
+  defp close_peer(socket, :close), do: :gen_tcp.close(socket)
+
+  defp close_peer(socket, :shutdown) do
+    :ok = :inet.setopts(socket, linger: {true, 0})
+    :gen_tcp.close(socket)
+  end
 end

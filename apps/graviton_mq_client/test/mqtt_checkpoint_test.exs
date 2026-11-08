@@ -221,4 +221,44 @@ defmodule GravitonMQ.MQTTClient.CheckpointTest do
 
     assert {:error, :wall_clock_regressed} = Checkpoint.restore(snapshot, fresh, -100, 500)
   end
+
+  test "durable content ignores keep-alive bookkeeping but tracks retained state" do
+    connect = %Connect{
+      version: :v5,
+      clean_start: true,
+      client_id: "idle",
+      keep_alive: 1,
+      properties: [session_expiry_interval: 60]
+    }
+
+    {:ok, machine} = Machine.new(connect)
+    {machine, _} = Machine.transition(machine, :start)
+    {machine, _} = Machine.transition(machine, {:transport_up, 1, 0})
+
+    {machine, _} =
+      Machine.transition(
+        machine,
+        {:packet, 1,
+         %GravitonMQ.MQTT.Packet.Connack{version: :v5, session_present: false, reason_code: 0}, 1}
+      )
+
+    meta = %{next_operation: 1, deadlines: %{}, results: %{}}
+    saved = Checkpoint.content(machine, meta)
+
+    {idle, []} = Machine.transition(machine, {:tick, 1, 500})
+    assert Checkpoint.content(idle, meta) == saved
+
+    {pinged, [{:send, _, :ping}]} = Machine.transition(idle, {:tick, 1, 1_001})
+    {pinged, _} = Machine.transition(pinged, {:sent, 1, :ping, :ok, 1_001})
+    assert pinged.ping_at != machine.ping_at
+    assert Checkpoint.content(pinged, meta) == saved
+
+    {stale, []} = Machine.transition(pinged, {:tick, 0, 1_002})
+    assert Checkpoint.content(stale, meta) == saved
+
+    refute Checkpoint.content(pinged, %{meta | next_operation: 2}) == saved
+
+    {offline, _} = Machine.transition(pinged, {:transport_down, 1, :closed, 1_003})
+    refute Checkpoint.content(offline, meta) == saved
+  end
 end

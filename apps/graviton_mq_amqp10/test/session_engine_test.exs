@@ -1,6 +1,16 @@
 defmodule GravitonMQ.AMQP10.SessionEngineTest do
   use ExUnit.Case, async: true
-  alias GravitonMQ.AMQP10.{SessionEngine, SessionState, Link, Outcome, Value, DeliveryState}
+
+  alias GravitonMQ.AMQP10.{
+    SessionEngine,
+    SessionState,
+    Link,
+    Outcome,
+    Value,
+    DeliveryState,
+    Serial
+  }
+
   alias GravitonMQ.AMQP10.Codec.Performative
   alias GravitonMQ.AMQP10.Performative.{Begin, Attach, Flow, Transfer, Disposition, Detach}
   alias GravitonMQ.AMQP10.Terminus.{Source, Target}
@@ -513,6 +523,41 @@ defmodule GravitonMQ.AMQP10.SessionEngineTest do
       SessionEngine.step(
         state,
         {:peer, %{flow | next_incoming_id: Value.uint(0x8000_0000)}, <<>>},
+        ctx()
+      )
+
+    assert {:session_error, :invalid_flow} in effects
+  end
+
+  test "Flow acknowledgements stay valid beyond half the serial range with full uint windows" do
+    {state, _id} = attached(:sender)
+
+    # Model a peer that advertised a 0xFFFFFFFF incoming window and has not yet
+    # acknowledged more than 2^31 transfers.
+    state = %{
+      state
+      | remote_next_incoming_id: 0,
+        next_outgoing_id: 0x8000_0010,
+        remote_incoming_window: 0xFFFF_FFFF
+    }
+
+    flow = %{
+      peer_flow(9, 1, 0xFFFF_FFFF)
+      | next_incoming_id: Value.uint(0x8000_0000),
+        outgoing_window: Value.uint(0xFFFF_FFFF)
+    }
+
+    {state, effects} = SessionEngine.step(state, {:peer, flow, <<>>}, ctx())
+    refute {:session_error, :invalid_flow} in effects
+    assert state.phase == :active
+    assert state.remote_next_incoming_id == 0x8000_0000
+    assert state.remote_incoming_window == 0xFFFF_FFFF
+
+    # An acknowledgement beyond next-outgoing-id remains invalid.
+    {_closed, effects} =
+      SessionEngine.step(
+        state,
+        {:peer, %{flow | next_incoming_id: Value.uint(0x8000_0011)}, <<>>},
         ctx()
       )
 
@@ -1423,6 +1468,106 @@ defmodule GravitonMQ.AMQP10.SessionEngineTest do
       assert state.phase == :active
       assert [{_, %Attach{}, <<>>}] = emits(effects)
     end
+  end
+
+  test "in-flight Flow and Transfer after a local Detach keep the Session and its accounting" do
+    {state, identity} = attached(:receiver)
+    {state, 100} = live_delivery(state, identity, :receiver)
+
+    {state, effects} =
+      SessionEngine.step(state, {:command, :clean_detach, {:detach, identity}}, ctx())
+
+    assert [{_, %Detach{}, <<>>}] = emits(effects)
+
+    for state <- [state, acknowledge_all(state, effects)] do
+      assert state.links_by_identity[identity].phase in [:detach_pending, :detach_sent]
+      {state, effects} = SessionEngine.step(state, {:peer, peer_flow(9, 5, 100), <<>>}, ctx())
+      assert state.phase == :active
+      refute Enum.any?(effects, &match?({:session_error, _}, &1))
+      next_incoming_id = state.next_incoming_id
+
+      state =
+        Enum.reduce(
+          [
+            {transfer(9, 101, "first", true), "a"},
+            {%Transfer{handle: Value.uint(9), more: Value.boolean(true)}, "b"},
+            {%{transfer(9, 101, "first", false) | delivery_tag: nil}, "c"}
+          ],
+          state,
+          fn {pdu, payload}, state ->
+            {state, effects} = SessionEngine.step(state, {:peer, pdu, payload}, ctx())
+            assert state.phase == :active
+            refute Enum.any?(effects, &match?({:session_error, _}, &1))
+            assert deliveries(effects) == []
+            state
+          end
+        )
+
+      assert state.next_incoming_id == Serial.add(next_incoming_id, 3)
+      assert state.last_remote_delivery_id == 101
+      refute Map.has_key?(state.incoming_by_id, 101)
+
+      # A skipped delivery-id is still a Session-level sequence violation.
+      {closed, effects} =
+        SessionEngine.step(state, {:peer, transfer(9, 103, "gap", false), "x"}, ctx())
+
+      assert closed.phase == :closed
+      assert {:session_error, :invalid_delivery_sequence} in effects
+
+      {state, effects} =
+        SessionEngine.step(
+          state,
+          {:peer, %Detach{handle: Value.uint(9), closed: Value.boolean(true)}, <<>>},
+          ctx()
+        )
+
+      assert {:link_event, {:detached, identity, :link_detached}} in effects
+      refute Map.has_key?(state.links_by_identity, identity)
+    end
+  end
+
+  test "an internally refused Link treats the peer's in-flight continuation as errant" do
+    # AMQP 1.0 2.6.5: once detached with an error, any input other than Detach
+    # for that endpoint terminates the Session with errant-link.
+    {state, identity} = attached(:receiver, max_message_bytes: 4)
+
+    {state, _} =
+      SessionEngine.step(state, {:command, :demand, {:demand, identity, 1, 4}}, ctx())
+
+    {state, _} = SessionEngine.step(state, {:peer, transfer(9, 100, "big", true), "abc"}, ctx())
+
+    {state, effects} =
+      SessionEngine.step(
+        state,
+        {:peer, %Transfer{handle: Value.uint(9), more: Value.boolean(true)}, "de"},
+        ctx()
+      )
+
+    assert {:link_event, {:refused, identity, :message_size_exceeded}} in effects
+    assert Enum.any?(emits(effects), &match?({_, %Detach{error: %{}}, <<>>}, &1))
+    assert state.links_by_identity[identity].error_detach?
+    assert state.incoming_by_id == %{}
+
+    {closed, effects} =
+      SessionEngine.step(
+        state,
+        {:peer, %Transfer{handle: Value.uint(9), delivery_id: Value.uint(100)}, "f"},
+        ctx()
+      )
+
+    assert closed.phase == :closed
+    assert {:session_error, :errant_link} in effects
+
+    {state, effects} =
+      SessionEngine.step(
+        state,
+        {:peer, %Detach{handle: Value.uint(9), closed: Value.boolean(true)}, <<>>},
+        ctx()
+      )
+
+    assert state.phase == :active
+    assert {:link_event, {:detached, identity, :link_detached}} in effects
+    assert state.links_by_identity == %{}
   end
 
   test "clean Detach leaves late role-correct Disposition outside the errant-Link guard" do

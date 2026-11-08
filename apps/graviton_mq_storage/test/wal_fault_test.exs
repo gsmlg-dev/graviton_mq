@@ -150,9 +150,10 @@ defmodule GravitonMQ.Storage.WALFaultTest do
     assert File.read!(filename) == truncated
   end
 
-  test "complete payload corruption is rejected, including unsynchronized records", %{path: path} do
+  test "complete payload corruption of a durable record is rejected", %{path: path} do
     assert {:ok, wal} = open(path)
-    assert {:ok, _} = WAL.append_records(wal, [{"snapshot/v1", "unconfirmed"}])
+    assert {:ok, ref} = WAL.append_records(wal, [{"snapshot/v1", "confirmed"}])
+    assert {:ok, ^ref} = WAL.sync(wal, ref)
     assert :ok = WAL.close(wal)
     filename = Path.join(path, "events.wal")
     bytes = File.read!(filename)
@@ -164,9 +165,54 @@ defmodule GravitonMQ.Storage.WALFaultTest do
     assert File.read!(filename) == corrupt
   end
 
+  for {name, corrupt_at} <- [
+        {"payload checksum", :last},
+        {"record magic", :magic},
+        {"record header checksum", :length}
+      ] do
+    test "an invalid #{name} beyond the durable boundary is truncated", %{path: path} do
+      assert {:ok, wal} = open(path)
+      assert {:ok, ref} = WAL.append_records(wal, [{"snapshot/v1", "confirmed"}])
+      assert {:ok, ^ref} = WAL.sync(wal, ref)
+      filename = Path.join(path, "events.wal")
+      durable_size = File.stat!(filename).size
+
+      assert {:ok, %CommitRef{position: 3}} =
+               WAL.append_records(wal, [{"snapshot/v1", "unconfirmed"}, {"snapshot/v1", "tail"}])
+
+      assert :ok = WAL.close(wal)
+      bytes = File.read!(filename)
+
+      offset =
+        case unquote(corrupt_at) do
+          :last -> byte_size(bytes) - 1
+          :magic -> durable_size
+          :length -> durable_size + 4
+        end
+
+      <<head::binary-size(offset), octet, tail::binary>> = bytes
+      File.write!(filename, <<head::binary, Bitwise.bxor(octet, 1), tail::binary>>)
+      assert {:ok, recovered} = open(path)
+      expected = if unquote(corrupt_at) == :last, do: 2, else: 1
+      assert {:ok, %CommitRef{position: ^expected}} = WAL.durable_through(recovered)
+
+      expected_records =
+        if unquote(corrupt_at) == :last,
+          do: ["confirmed", "unconfirmed"],
+          else: ["confirmed"]
+
+      assert {:ok, ^expected_records} = records(recovered)
+      assert :ok = WAL.close(recovered)
+      assert {:ok, recovered} = open(path)
+      assert {:ok, ^expected_records} = records(recovered)
+      assert :ok = WAL.close(recovered)
+    end
+  end
+
   test "header length corruption cannot masquerade as an incomplete tail", %{path: path} do
     assert {:ok, wal} = open(path)
-    assert {:ok, _} = WAL.append_records(wal, [{"snapshot/v1", "unconfirmed"}])
+    assert {:ok, ref} = WAL.append_records(wal, [{"snapshot/v1", "confirmed"}])
+    assert {:ok, ^ref} = WAL.sync(wal, ref)
     assert :ok = WAL.close(wal)
     filename = Path.join(path, "events.wal")
     bytes = File.read!(filename)
@@ -177,6 +223,67 @@ defmodule GravitonMQ.Storage.WALFaultTest do
     File.write!(filename, corrupt)
     assert {:error, :record_header_checksum} = open(path)
     assert File.read!(filename) == corrupt
+  end
+
+  for {stage, injected} <- [
+        {:header_write, {:partial, 5}},
+        {:header_write, {:error, :injected_eio}},
+        {:wal_sync, {:error, :injected_eio}},
+        {:checkpoint_write, {:error, :injected_eio}},
+        {:checkpoint_rename, {:error, :injected_eio}}
+      ] do
+    test "an initialization interrupted at #{stage} #{inspect(injected)} before any checkpoint is reinitialized",
+         %{
+           path: path,
+           table: table,
+           fault: fault
+         } do
+      :ets.insert(table, {unquote(stage), unquote(Macro.escape(injected))})
+      assert {:error, _} = open(path, fault_injector: fault)
+      refute File.exists?(Path.join(path, "durable.checkpoint"))
+      assert {:ok, wal} = open(path)
+      assert {:ok, :none} = WAL.durable_through(wal)
+      assert {:ok, ref} = WAL.append_records(wal, [{"snapshot/v1", "first"}])
+      assert {:ok, ^ref} = WAL.sync(wal, ref)
+      assert :ok = WAL.close(wal)
+      assert {:ok, wal} = open(path)
+      assert {:ok, ["first"]} = records(wal)
+      assert :ok = WAL.close(wal)
+    end
+  end
+
+  test "a missing checkpoint with only a header prefix of this stream is reinitialized", %{
+    path: path
+  } do
+    header = <<"GMWL", 1, 1, byte_size("opaque/test")::16, "opaque/test">>
+    header = <<header::binary, :erlang.crc32(header)::32>>
+
+    for size <- [1, 7, 8, byte_size(header) - 1, byte_size(header)] do
+      File.rm_rf!(path)
+      File.mkdir_p!(path)
+      File.write!(Path.join(path, "events.wal"), binary_part(header, 0, size))
+      assert {:ok, wal} = open(path)
+      assert {:ok, :none} = WAL.durable_through(wal)
+      assert File.read!(Path.join(path, "events.wal")) == header
+      assert :ok = WAL.close(wal)
+    end
+  end
+
+  test "a missing checkpoint never discards data beyond a header", %{path: path} do
+    assert {:ok, wal} = open(path)
+    assert {:ok, ref} = WAL.append_records(wal, [{"snapshot/v1", "confirmed"}])
+    assert {:ok, ^ref} = WAL.sync(wal, ref)
+    assert :ok = WAL.close(wal)
+    File.rm!(Path.join(path, "durable.checkpoint"))
+    filename = Path.join(path, "events.wal")
+    bytes = File.read!(filename)
+    assert {:error, :checkpoint_corrupt} = open(path)
+    assert File.read!(filename) == bytes
+
+    # A foreign header prefix is not provably ours and is not reinitialized.
+    File.write!(filename, "GMWXGMWX")
+    assert {:error, :wal_header} = open(path)
+    assert File.read!(filename) == "GMWXGMWX"
   end
 
   test "checkpoint corruption is explicit", %{path: path} do

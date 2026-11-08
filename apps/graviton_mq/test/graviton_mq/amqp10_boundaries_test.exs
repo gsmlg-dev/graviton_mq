@@ -95,7 +95,7 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
     end)
   end
 
-  test "uncertain detach cleanup fails the Manager and leaves no orphan consumer or claim" do
+  test "uncertain detach cleanup fences only its queue and leaves no orphan consumer or claim" do
     instance = broker!()
     {queue, manager} = owners(instance)
     sender = client!(instance)
@@ -118,27 +118,32 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
     :ok = :sys.suspend(queue)
 
     try do
-      capture_log(fn ->
-        {:ok, _reference} = Client.detach(receiver, 0, receive_link)
-        assert_receive {:DOWN, ^monitor, :process, ^manager, reason}, 6_000
-        refute reason == :normal
+      # The unanswered disconnect fences this queue; it no longer fails the Manager.
+      {:ok, _reference} = Client.detach(receiver, 0, receive_link)
+
+      assert_receive {:graviton_mq, ^receiver, {:session, 0, {:detached, ^receive_link, _}}},
+                     6_000
+
+      eventually!(fn ->
+        match?({:ok, %{queues: %{"orders" => :unavailable}}}, GravitonMQ.amqp10_status(instance))
       end)
     after
       resume(queue)
     end
 
+    refute_received {:DOWN, ^monitor, :process, ^manager, _}
+
     eventually!(fn -> match?(%{ready: 1, inflight: 0, consumers: 0}, Queue.status(queue)) end)
 
-    eventually!(fn ->
-      case GravitonMQ.amqp10_status(instance) do
-        {:ok, _} -> true
-        _ -> false
-      end
-    end)
+    # The fenced queue is restored by its probe after it answers again.
+    eventually!(
+      fn ->
+        match?({:ok, %{queues: %{"orders" => %{ready: 1}}}}, GravitonMQ.amqp10_status(instance))
+      end,
+      5_000
+    )
 
-    {surviving_queue, replacement_manager} = owners(instance)
-    assert surviving_queue == queue
-    assert replacement_manager != manager
+    assert owners(instance) == {queue, manager}
     recovered = client!(instance)
     recovered_link = attach!(recovered, "replacement-consumer", :receiver)
 

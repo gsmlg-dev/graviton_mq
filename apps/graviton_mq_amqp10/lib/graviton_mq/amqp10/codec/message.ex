@@ -59,7 +59,8 @@ defmodule GravitonMQ.AMQP10.Codec.Message do
   def decode(input, limits) when is_binary(input) do
     with {:ok, limits} <- Limits.validate(limits, :value_decode),
          :ok <- total_bytes(byte_size(input), limits, :value_decode),
-         {:ok, sections} <- read_sections(input, limits, nil, 0, []),
+         {:ok, sections} <-
+           read_sections(input, limits, nil, 0, [], limits.max_zero_width_elements),
          :ok <- validate_content_encoding(sections, :value_decode, :malformed) do
       {:ok, %Message{message_format: Value.uint(0), encoded_content: input, sections: sections},
        <<>>}
@@ -102,8 +103,9 @@ defmodule GravitonMQ.AMQP10.Codec.Message do
   def decode_section(input, limits \\ Limits.default())
 
   def decode_section(input, limits) when is_binary(input) do
-    with {:ok, value, rest} <- WireValue.decode(input, limits),
-         {:ok, section} <- section_from_value(value, :value_decode, :malformed) do
+    with {:ok, limits} <- Limits.validate(limits, :value_decode),
+         {:ok, section, rest, _budget} <-
+           decode_section_bounded(input, limits, limits.max_zero_width_elements) do
       {:ok, section, rest}
     end
   end
@@ -165,13 +167,23 @@ defmodule GravitonMQ.AMQP10.Codec.Message do
     end
   end
 
-  defp read_sections(<<>>, _limits, _previous, _count, acc), do: {:ok, Enum.reverse(acc)}
+  defp read_sections(<<>>, _limits, _previous, _count, acc, _budget),
+    do: {:ok, Enum.reverse(acc)}
 
-  defp read_sections(input, limits, previous, count, acc) do
+  # All sections of one message share a single zero-width element budget.
+  defp read_sections(input, limits, previous, count, acc, budget) do
     with :ok <- section_count(count + 1, limits, :value_decode),
-         {:ok, {name, _body} = section, rest} <- decode_section(input, limits),
+         {:ok, {name, _body} = section, rest, budget} <-
+           decode_section_bounded(input, limits, budget),
          {:ok, next} <- order(name, previous, :value_decode, :malformed) do
-      read_sections(rest, limits, next, count + 1, [section | acc])
+      read_sections(rest, limits, next, count + 1, [section | acc], budget)
+    end
+  end
+
+  defp decode_section_bounded(input, limits, budget) do
+    with {:ok, value, rest, budget} <- WireValue.decode_bounded(input, limits, budget),
+         {:ok, section} <- section_from_value(value, :value_decode, :malformed) do
+      {:ok, section, rest, budget}
     end
   end
 

@@ -437,10 +437,13 @@ CI checks formatting, compilation, architecture, and cycles on every branch.
 The Tests workflow runs unit tests and the package archive checks on pushes
 to `main` and pull requests targeting `main`.
 
-Hex publication is sequential and cannot be atomic across packages. A failed
-or cancelled release may have published a subset; inspect Hex before retrying.
-Existing Git tags are rejected, and published package versions are never
-automatically replaced.
+Hex publication is sequential and cannot be atomic across packages. The
+release workflow therefore validates and builds every archive, then atomically
+pushes the version commit and tag, and only then publishes. Runs for the same
+version queue instead of cancelling one another. If publication stops partway,
+re-run the workflow with the same version: it resumes from the existing tag,
+verifies already-published archives byte-for-byte, and publishes the rest.
+Published package versions are never automatically replaced.
 
 ## Documentation
 

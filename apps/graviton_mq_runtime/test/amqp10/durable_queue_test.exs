@@ -234,6 +234,138 @@ defmodule GravitonMQ.Runtime.AMQP10.DurableQueueTest do
     assert {:ok, 1025} = WAL.fold(owner, :origin, 0, fn _, _, count -> {:cont, count + 1} end)
   end
 
+  test "a small log limit compacts repeatedly and restart recovers the exact durable state",
+       context do
+    config = put_in(config(context, "compacting").persistence.max_log_bytes, 16_384)
+    queue = open!(config)
+    assert {:ok, lease} = Queue.register(queue, "cycler", self())
+
+    for n <- 1..120 do
+      assert {:ok, {:accepted_durable, _}} = enqueue(queue, "cycle-#{n}", true)
+      assert {:ok, [{delivery, _, _}]} = Queue.claim(queue, "cycler", lease, 1, 8192)
+      assert :ok = Queue.settle(queue, "cycler", lease, delivery.id, %Outcome.Retire{})
+    end
+
+    assert {:ok, {:accepted_durable, _}} = enqueue(queue, "modified", true)
+    assert {:ok, {:accepted_durable, _}} = enqueue(queue, "ready", true)
+    assert {:ok, [{delivery, _, _}]} = Queue.claim(queue, "cycler", lease, 1, 8192)
+
+    assert :ok =
+             Queue.settle(queue, "cycler", lease, delivery.id, %Outcome.ModifyAndMakeAvailable{
+               delivery_failed?: true,
+               undeliverable_here?: false,
+               annotation_mutation: nil
+             })
+
+    assert {:ok, [{_inflight, _, _}]} = Queue.claim(queue, "cycler", lease, 1, 8192)
+    before = Queue.status(queue)
+    assert %{messages: 2, ready: 1, inflight: 1, storage: :ready} = before
+    assert before.durable_through.position > 360
+    :ok = GenServer.stop(queue)
+
+    files = File.ls!(queue_directory(config))
+    assert [log] = Enum.filter(files, &String.starts_with?(&1, "events"))
+    assert log =~ ~r/\Aevents\.[1-9][0-9]*\.wal\z/
+    assert File.stat!(Path.join(queue_directory(config), log)).size <= 16_384
+
+    restored = open!(config)
+    status = Queue.status(restored)
+    assert %{messages: 2, ready: 2, inflight: 0, storage: :ready} = status
+    assert status.durable_through.position >= before.durable_through.position
+    assert status.event_sequence > before.event_sequence
+    assert {:ok, fresh} = Queue.register(restored, "fresh", self())
+    assert {:ok, deliveries} = Queue.claim(restored, "fresh", fresh, 2, 8192)
+
+    assert [{"modified", 2, 1}, {"ready", 2, 0}] =
+             Enum.map(deliveries, fn {_, message, meta} ->
+               {message.encoded_content, meta.attempt, meta.failure_count}
+             end)
+  end
+
+  test "a queue whose log already reached its limit compacts on open and accepts work", context do
+    config = config(context, "stuck")
+    queue = open!(config)
+    assert {:ok, lease} = Queue.register(queue, "cycler", self())
+
+    for n <- 1..60 do
+      assert {:ok, {:accepted_durable, _}} = enqueue(queue, "cycle-#{n}", true)
+      assert {:ok, [{delivery, _, _}]} = Queue.claim(queue, "cycler", lease, 1, 8192)
+      assert :ok = Queue.settle(queue, "cycler", lease, delivery.id, %Outcome.Retire{})
+    end
+
+    assert {:ok, {:accepted_durable, _}} = enqueue(queue, "kept", true)
+    :ok = GenServer.stop(queue)
+    log = Path.join(queue_directory(config), "events.wal")
+    size = File.stat!(log).size
+    assert size > config.persistence.max_record_bytes
+
+    # Reopening with the limit equal to the current size reproduces a broker
+    # that can no longer append anything.
+    stuck = put_in(config.persistence.max_log_bytes, size)
+    restored = open!(stuck)
+    refute File.exists?(log)
+    assert File.exists?(Path.join(queue_directory(config), "events.1.wal"))
+    assert %{messages: 1, storage: :ready} = Queue.status(restored)
+    assert {:ok, {:accepted_durable, _}} = enqueue(restored, "after", true)
+    assert {:ok, fresh} = Queue.register(restored, "fresh", self())
+    assert {:ok, deliveries} = Queue.claim(restored, "fresh", fresh, 2, 8192)
+
+    assert ["kept", "after"] =
+             Enum.map(deliveries, fn {_, message, _} -> message.encoded_content end)
+  end
+
+  test "a failed compaction freezes the queue and restart keeps the last durable state",
+       context do
+    control = :ets.new(:compaction_fault, [:public])
+
+    fault = fn stage, _ ->
+      case :ets.lookup(control, stage) do
+        [{^stage, result}] -> result
+        [] -> :ok
+      end
+    end
+
+    config =
+      context
+      |> config("compaction-fault")
+      |> put_in([:persistence, :max_log_bytes], 16_384)
+      |> put_in([:persistence, :fault_injector], fault)
+
+    queue = open!(config)
+    :ets.insert(control, {:compact_sync, {:error, :injected_eio}})
+
+    assert {:ok, lease} = Queue.register(queue, "cycler", self())
+
+    failure =
+      Enum.reduce_while(1..400, nil, fn n, nil ->
+        with {:ok, {:accepted_durable, _}} <- enqueue(queue, "message-#{n}", true),
+             {:ok, [{delivery, _, _}]} <- Queue.claim(queue, "cycler", lease, 1, 8192),
+             :ok <- Queue.settle(queue, "cycler", lease, delivery.id, %Outcome.Retire{}) do
+          {:cont, nil}
+        else
+          {:error, reason} -> {:halt, reason}
+        end
+      end)
+
+    assert failure in [:unknown_outcome, :persistence_failed]
+    assert Queue.status(queue).storage == :failed
+    assert {:error, :persistence_failed} = enqueue(queue, "frozen", true)
+    assert File.exists?(Path.join(queue_directory(config), "events.1.wal"))
+    :ok = GenServer.stop(queue)
+    :ets.delete(control, :compact_sync)
+    restored = open!(config)
+    assert %{messages: messages, storage: :ready} = Queue.status(restored)
+    assert messages in [0, 1]
+    assert {:ok, {:accepted_durable, _}} = enqueue(restored, "recovered", true)
+  end
+
+  defp queue_directory(config),
+    do:
+      Path.join(
+        config.persistence.directory,
+        Base.encode16(:crypto.hash(:sha256, "orders"), case: :lower)
+      )
+
   defp config(%{tmp_dir: dir}, suffix \\ "state") do
     directory = Path.join(dir, suffix)
     File.mkdir_p!(directory)

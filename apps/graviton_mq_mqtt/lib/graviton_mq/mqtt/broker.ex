@@ -102,7 +102,9 @@ defmodule GravitonMQ.MQTT.Broker do
           receive_maximum: 65_535,
           send_quota: state.limits.max_inflight,
           incoming: %{},
-          requests: %{}
+          requests: %{},
+          held: [],
+          held_bytes: 0
         }
 
         {%{state | connections: Map.put(state.connections, id, conn)}, []}
@@ -115,11 +117,16 @@ defmodule GravitonMQ.MQTT.Broker do
         state = prune_messages(state, now)
         state = put_conn(state, id, %{conn | last_seen: now})
 
-        if is_binary(bytes) and byte_size(bytes) <= state.limits.max_packet_size and
-             valid_packet?(state, packet) do
-          receive_packet(state, id, packet, bytes, now)
-        else
-          disconnect(state, id, :malformed_packet, 0x81, now)
+        cond do
+          not (is_binary(bytes) and byte_size(bytes) <= state.limits.max_packet_size and
+                   valid_packet?(state, packet)) ->
+            disconnect(state, id, :malformed_packet, 0x81, now)
+
+          conn.phase == :authenticating ->
+            hold_packet(state, id, packet, bytes, now)
+
+          true ->
+            receive_packet(state, id, packet, bytes, now)
         end
 
       _ ->
@@ -216,6 +223,47 @@ defmodule GravitonMQ.MQTT.Broker do
   end
 
   def transition(state, _event), do: {state, []}
+
+  # MQTT 5 §3.1.4 lets a client send packets after CONNECT without awaiting
+  # CONNACK. While CONNECT authentication or Will authorization is outstanding
+  # they are held unprocessed: replayed in arrival order after the successful
+  # CONNACK, discarded with the connection when CONNECT is rejected
+  # [MQTT-3.1.4-6]. A second held CONNECT is still a protocol error on replay.
+  # The hold is bounded per connection by Receive Maximum packets and
+  # Maximum Packet Size encoded bytes, and across connections by
+  # max_incoming_bytes. Overflow refuses CONNECT with Quota exceeded (0x97):
+  # no DISCONNECT may precede a successful CONNACK [MQTT-3.14.0-1].
+  defp hold_packet(state, id, packet, bytes, now) do
+    conn = state.connections[id]
+    size = byte_size(bytes)
+
+    if length(conn.held) < state.limits.receive_maximum and
+         conn.held_bytes + size <= state.limits.max_packet_size and
+         held_bytes(state) + size <= state.limits.max_incoming_bytes do
+      {put_conn(state, id, %{
+         conn
+         | held: conn.held ++ [{packet, bytes}],
+           held_bytes: conn.held_bytes + size
+       }), []}
+    else
+      reject_connect(state, id, 0x97, :held_packet_limit, now)
+    end
+  end
+
+  defp replay_held(state, _id, _generation, [], _now), do: {state, []}
+
+  defp replay_held(state, id, generation, [{packet, bytes} | rest], now) do
+    if current?(state, id, generation) do
+      {state, effects} = receive_packet(state, id, packet, bytes, now)
+      {state, more} = replay_held(state, id, generation, rest, now)
+      {state, effects ++ more}
+    else
+      {state, []}
+    end
+  end
+
+  defp held_bytes(state),
+    do: Enum.sum(Enum.map(state.connections, fn {_id, conn} -> Map.get(conn, :held_bytes, 0) end))
 
   defp receive_packet(state, id, %Connect{} = packet, bytes, now) do
     conn = %{
@@ -801,6 +849,8 @@ defmodule GravitonMQ.MQTT.Broker do
     original_state = state
     existing = Map.get(state.sessions, client_id)
 
+    # Principal and session-count admission use the session as it exists
+    # before takeover; a refused CONNECT must not disturb the current owner.
     cond do
       existing != nil and existing.principal != principal ->
         reject_connect(state, id, 0x87, :principal_mismatch, now)
@@ -818,6 +868,11 @@ defmodule GravitonMQ.MQTT.Broker do
               {state, []}
           end
 
+        # Takeover closes the old Network Connection first. Its loss transition
+        # clears dispatch fences and transient QoS0 entries, and ends a session
+        # whose expiry is zero (MQTT 5 §3.1.2.11.2). Only the post-takeover
+        # session may be resumed; an ended one is absent [MQTT-3.2.2-3].
+        existing = Map.get(state.sessions, client_id)
         present = existing != nil and not packet.clean_start
 
         {state, _} =
@@ -825,10 +880,7 @@ defmodule GravitonMQ.MQTT.Broker do
             do: end_session(state, client_id, now),
             else: {state, []}
 
-        session =
-          if present,
-            do: state.sessions[client_id] || %{existing | connection: nil},
-            else: fresh_session(principal, state.next_id)
+        session = if present, do: existing, else: fresh_session(principal, state.next_id)
 
         state = %{state | next_id: state.next_id + 1}
         state = if present, do: cancel_delayed_will(state, session, now), else: state
@@ -857,7 +909,16 @@ defmodule GravitonMQ.MQTT.Broker do
         if will_id == :limit or session_bytes > state.limits.max_session_bytes do
           reject_connect(original_state, id, 0x97, :session_limit, now)
         else
-          conn = %{state.connections[id] | phase: :connected, client_id: client_id}
+          held = state.connections[id].held
+
+          conn = %{
+            state.connections[id]
+            | phase: :connected,
+              client_id: client_id,
+              held: [],
+              held_bytes: 0
+          }
+
           state = state |> put_session(client_id, session) |> put_conn(id, conn)
 
           properties = [
@@ -895,7 +956,8 @@ defmodule GravitonMQ.MQTT.Broker do
             )
 
           {state, sends} = pump_session(state, client_id, now)
-          {state, close_effects ++ effects ++ sends}
+          {state, replayed} = replay_held(state, id, generation, held, now)
+          {state, close_effects ++ effects ++ sends ++ replayed}
         end
     end
   end

@@ -34,11 +34,31 @@ defmodule GravitonMQ.MQTTClient.FaultIO do
   defp fault?(kind), do: Process.get(:mqtt_persistence_fault) == kind
 end
 
+defmodule GravitonMQ.MQTTClient.CountingIO do
+  @moduledoc false
+  alias GravitonMQ.MQTTClient.FaultIO
+
+  def open(path) do
+    case :persistent_term.get(__MODULE__, nil) do
+      nil -> :ok
+      counter -> :counters.add(counter, 1, 1)
+    end
+
+    FaultIO.open(path)
+  end
+
+  defdelegate write(file, bytes), to: FaultIO
+  defdelegate sync(file), to: FaultIO
+  defdelegate close(file), to: FaultIO
+  defdelegate rename(a, b), to: FaultIO
+  defdelegate sync_directory(path), to: FaultIO
+end
+
 defmodule GravitonMQ.MQTTClient.PersistenceFaultTest do
   use ExUnit.Case, async: false
   alias GravitonMQ.Client.MQTT.Store
   alias GravitonMQ.MQTTClient, as: Client
-  alias GravitonMQ.MQTTClient.FaultIO
+  alias GravitonMQ.MQTTClient.{CountingIO, FaultIO}
   @moduletag :tmp_dir
 
   for {fault, class} <- [
@@ -149,7 +169,45 @@ defmodule GravitonMQ.MQTTClient.PersistenceFaultTest do
     Store.close(recovered)
   end
 
-  defp connected!(context) do
+  test "an idle persistent client does not rewrite an unchanged checkpoint on every tick",
+       context do
+    counter = :counters.new(1, [])
+    :persistent_term.put(CountingIO, counter)
+    on_exit(fn -> :persistent_term.erase(CountingIO) end)
+    {client, socket} = connected!(context, io: CountingIO, tick_interval: 10, keep_alive: 1)
+    _ = :sys.get_state(client)
+    settled = :counters.get(counter, 1)
+    # ~100 ticks plus one keep-alive PINGREQ/PINGRESP round trip.
+    assert {:ok, <<0xC0, 0>>} = :gen_tcp.recv(socket, 0, 2_000)
+    :ok = :gen_tcp.send(socket, <<0xD0, 0>>)
+    Process.sleep(100)
+    _ = :sys.get_state(client)
+    assert :counters.get(counter, 1) == settled
+    assert Client.status(client).phase == :connected
+
+    assert {:ok, ref} = Client.publish(client, "durable", "body", qos: 1)
+    assert_receive {:graviton_mq, ^client, {:operation_identity, ^ref, _}}, 2_000
+    assert :counters.get(counter, 1) > settled
+  end
+
+  test "a change that must be durable still commits before its wire effect after idle ticks",
+       context do
+    {client, socket} = connected!(context, tick_interval: 10)
+    Process.sleep(100)
+
+    :sys.replace_state(client, fn state ->
+      Process.put(:mqtt_persistence_fault, :sync)
+      state
+    end)
+
+    assert {:error, {:persistence, {:failed, :eio}}} =
+             Client.publish(client, "no-wire", "body", qos: 1)
+
+    assert_receive {:graviton_mq, ^client, {:storage_error, {:failed, :eio}}}, 2_000
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
+  end
+
+  defp connected!(context, options \\ []) do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
     on_exit(fn -> :gen_tcp.close(listener) end)
     {:ok, port} = :inet.port(listener)
@@ -160,8 +218,12 @@ defmodule GravitonMQ.MQTTClient.PersistenceFaultTest do
         host: "127.0.0.1",
         port: port,
         observer: self(),
-        tick_interval: 60_000,
-        persistence: [directory: Path.join(context.tmp_dir, "store"), io: FaultIO]
+        tick_interval: Keyword.get(options, :tick_interval, 60_000),
+        keep_alive: Keyword.get(options, :keep_alive, 30),
+        persistence: [
+          directory: Path.join(context.tmp_dir, "store"),
+          io: Keyword.get(options, :io, FaultIO)
+        ]
       )
 
     Process.unlink(client)

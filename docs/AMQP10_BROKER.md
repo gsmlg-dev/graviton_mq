@@ -73,14 +73,28 @@ allows acquisition by another Link without promising otherwise. Original bare
 message bytes, including noncanonical encodings, are retained verbatim.
 
 Connection/Session/Link closure returns unresolved claims. The instance Manager
-serializes final known outcomes before processing Connection DOWN; queues
-monitor that settlement coordinator rather than racing their own independent
-Connection DOWN against a final outcome. Manager failure closes old sockets
-and returns its leases in surviving queues. Queue failure loses that queue's
-memory state and restarts dependent owners. VM/process memory loss has no
-WAL or restart recovery in G4. Interrupted possible publications can have an
-unknown outcome; the client must not infer successful disk storage or retry
-with an exactly-once claim.
+serializes final known outcomes before processing Connection DOWN; each queue
+monitors a per-queue lease anchor that lives exactly as long as that settlement
+coordinator, rather than racing its own independent Connection DOWN against a
+final outcome. Manager failure closes old sockets and returns its leases in
+surviving queues. Queue failure loses that queue's memory state and restarts
+dependent owners. VM/process memory loss has no WAL or restart recovery in G4.
+Interrupted possible publications can have an unknown outcome; the client must
+not infer successful disk storage or retry with an exactly-once claim.
+
+Since the 2026-11-08 maintenance changes, an unanswered queue call or an
+uncertain lease command (register, claim, settle or disconnect) fences only that
+queue instead of stopping the Manager. The Manager kills that queue's lease
+anchor, so the queue returns every claim held there when it next runs; it
+detaches the queue's attached Links with `amqp:internal-error` "queue is
+unavailable", refuses new attaches with the same error, and reports the queue as
+`:unavailable` in `amqp10_status/1`. A possible publication still closes its
+Connection with an unknown outcome. The fenced queue is probed every second
+outside the Manager and restored when it answers. Messages stay in the queue
+process. Remaining limit: the first unanswered call still blocks the Manager
+for the queue's internal 5-second call timeout. An actual queue crash still
+restarts later owners as above. Evidence: `amqp10_availability_test.exs` and
+`amqp10_boundaries_test.exs`; independent-peer requalification is pending.
 
 ## Local durable queues
 
@@ -106,13 +120,25 @@ traffic. A broker owner or whole BEAM failure can therefore redeliver an
 unsettled claim without losing authoritative bytes or Modified failure counts
 and annotation deltas. Unknown writes/synchronization poison the queue and
 suppress successful effects; a timed-out possible operation remains unknown.
-Only incomplete tails beyond the confirmed prefix are repaired. Durable-prefix
-corruption or an incompatible queue identity/configuration rejects startup.
+Only an incomplete or invalid tail beyond the confirmed prefix is truncated; a
+log with no checkpoint that holds at most a (partial) header is reinitialized.
+Durable-prefix corruption, any other log without a checkpoint, or an
+incompatible queue identity/configuration rejects startup.
 
 `:max_record_bytes` defaults to 1 MiB and `:max_log_bytes` to 1 GiB per queue.
 They are finite admission bounds; size a record for the logical event framing
-as well as the message bytes. The initial WAL has no rotation/compaction.
-Exhaustion fails closed. TTL/absolute expiry, dead-letter actions, distributed
+as well as the message bytes. Since 2026-11-08 the queue WAL is compacted, so
+`:max_log_bytes` is no longer a lifetime cap. Before an append, when the log is
+at least half its limit and at least twice its compacted base, on open, and
+once after an append rejected by the log limit, the durable machine state is
+rewritten as the identity event followed by `queue_snapshot/v1` chunk events
+(deterministic ETF, decoded with `:safe`, compressed ETF refused). Replay
+restores the exact state and counters. The compacted live state must still fit
+the limit; otherwise admission fails closed, and a failed compaction poisons
+the queue. See [ADR 0008](adr/0008-local-durability-profiles.md) for the commit
+design. Evidence: `queue_compaction_test.exs` (platform-independent) and
+`durable_queue_test.exs` plus the storage WAL tests, which are Linux-only and
+remain UNVERIFIED on Linux until CI runs. TTL/absolute expiry, dead-letter actions, distributed
 durability and hardware power-loss qualification remain outside this increment.
 G6 integrated gates and installed consumers are recorded separately from
 focused Proton/process/VM recovery evidence.
@@ -133,8 +159,22 @@ fragments, incoming/outgoing bytes, ledgers, pending operations and reserved
 control writes. Running shells bound input bytes, per-turn frames, command/
 event handoffs, writer frames/bytes and pump route inspections. Slow or failed
 socket writes do not block queue transitions. Local shutdown deadlines and
-lease cleanup are finite; an uncertain local queue cleanup stops the Manager
-so its monitored leases cannot remain orphaned.
+lease cleanup are finite; an uncertain local queue cleanup fences that queue
+(above), whose killed lease anchor releases the leases, so none remain orphaned.
+A Connection that misses the 25 ms capacity query is skipped for that pump turn
+and retried after 50 ms; it is not closed. Socket input is event-driven with
+`active: :once`, re-armed only after bounded input drains, with no periodic
+polling (`connection_input_test.exs`).
+
+The shared decoder bounds zero-width array elements (constructors `0x41`–`0x45`)
+by `Codec.Limits.max_zero_width_elements` (default 65,536), cumulatively per
+top-level decode (one performative) and shared across all sections of one
+message, one annotation check and one raw composite-field walk;
+excess fails with `:zero_width_element_limit` before allocation. Begin accepts
+any uint incoming/outgoing window. After a clean local Detach, in-flight peer
+Flow/Transfer for that handle is tolerated until the peer's Detach; such a
+Transfer still counts against the Session window and delivery-id sequence.
+After an error Detach, errant-link handling is unchanged.
 
 TCP listeners default to loopback and port zero. TLS is opt-in:
 
@@ -147,7 +187,7 @@ listeners: [[
 ]]
 ```
 
-TLS options cannot replace transport-owned binary/passive framing or write
+TLS options cannot replace transport-owned binary/active-once framing or write
 timeouts. This anonymous profile does not convert a client certificate into
 an application principal. Peer trust and hostname verification belong to the
 connecting client; the independent Proton tests cover trusted and wrong CA

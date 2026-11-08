@@ -865,4 +865,76 @@ defmodule GravitonMQ.AMQP10.EndpointTest do
                )
     end
   end
+
+  test "Begin accepts the full uint session window range in both directions" do
+    max = 0xFFFF_FFFF
+
+    {state, _} = connected()
+
+    remote = %Begin{
+      next_outgoing_id: value(:uint, 4),
+      incoming_window: value(:uint, max),
+      outgoing_window: value(:uint, max)
+    }
+
+    {remote_state, effects} = step(state, {:frame, frame(remote, 7)})
+    refute Enum.any?(effects, &match?({:send_frame, _, _, _, %Close{}, _}, &1))
+    assert Enum.any?(effects, &match?({:send_frame, _, _, _, %Begin{}, _}, &1))
+    assert {:ok, _} = ConnectionState.fetch_incoming_session(remote_state.connection, 7)
+
+    {state, effects} = step(state, {:command, :open1, {:open_session, 10, []}})
+
+    {:send_frame, _, _, local_channel, %Begin{}, _} =
+      Enum.find(effects, &match?({:send_frame, _, _, _, %Begin{}, _}, &1))
+
+    reply = %{remote | remote_channel: value(:ushort, local_channel)}
+    {state, effects} = step(state, {:frame, frame(reply, 19)})
+    assert {:operation, :open1, {:ok, 10}} in effects
+    refute Enum.any?(effects, &match?({:send_frame, _, _, _, %Close{}, _}, &1))
+
+    identity = {value(:string, "send"), :sender}
+
+    {state, effects} =
+      step(
+        state,
+        {:command, :attach, {:session, 10, {:attach, identity, [address: value(:string, "q")]}}}
+      )
+
+    state = acknowledge(state, effects)
+
+    attach = %Attach{
+      name: elem(identity, 0),
+      handle: value(:uint, 17),
+      role: value(:boolean, true),
+      snd_settle_mode: value(:ubyte, 0),
+      rcv_settle_mode: value(:ubyte, 0),
+      source: %Source{},
+      target: %Target{address: value(:string, "q")}
+    }
+
+    {state, effects} = step(state, {:frame, frame(attach, 19)})
+    assert {:operation, :attach, {:ok, identity}} in effects
+
+    flow = %Flow{
+      next_incoming_id: value(:uint, 0),
+      incoming_window: value(:uint, max),
+      next_outgoing_id: value(:uint, 4),
+      outgoing_window: value(:uint, max),
+      handle: value(:uint, 17),
+      delivery_count: value(:uint, 0),
+      link_credit: value(:uint, 1)
+    }
+
+    {state, effects} = step(state, {:frame, frame(flow, 19)})
+    refute Enum.any?(effects, &match?({:send_frame, _, _, _, %Close{}, _}, &1))
+    refute Enum.any?(effects, &match?({:send_frame, _, _, _, %End{}, _}, &1))
+
+    {_state, effects} =
+      step(
+        state,
+        {:command, :publish, {:session, 10, {:send, identity, <<0, 0x53, 0x77, 0x40>>, []}}}
+      )
+
+    assert Enum.any?(effects, &match?({:send_frame, _, _, _, %Transfer{}, _}, &1))
+  end
 end

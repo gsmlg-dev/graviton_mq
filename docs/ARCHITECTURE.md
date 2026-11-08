@@ -462,8 +462,11 @@ events without implying append, synchronization or durable-through.
 The Manager owns queue leases and monitors Connections. It processes each
 Connection's ordered final outcome events before DOWN releases remaining
 leases. Monitoring a Connection independently in Queue would race DOWN with
-the Manager's final settlement; queues instead monitor their settlement
-coordinator and release all its leases on Manager failure. Old asynchronous
+the Manager's final settlement; queues instead monitor a per-queue lease
+anchor owned by the coordinator and release all its leases when the anchor
+dies. The anchor exits with the Manager; the Manager also kills one queue's
+anchor to fence that queue alone when a call to it times out or its outcome
+is uncertain, then probes the queue and restores it when it answers. Old asynchronous
 authorization/operation results retain the opaque admission token, including
 Session incarnation, so Session/Link identity reuse cannot affect a new lease.
 
@@ -471,8 +474,9 @@ Queue child failure restarts later owners. Manager failure closes old sockets
 and releases claims in surviving queues; surviving memory is not crash recovery
 or disk durability. Event handoffs survive normal Connection exit until the
 Manager consumes them. Commands/events and retained state use bounded opaque
-ETS handoffs, keeping encoded content out of OTP debug rings. Passive reads
-poll with finite per-turn byte/frame work; writers have independent admission
+ETS handoffs, keeping encoded content out of OTP debug rings. Socket input is
+event-driven (`active: :once`), re-armed only after the previous input is
+drained, with finite per-turn byte/frame work; writers have independent admission
 credits and finite send timeouts. Pump waves count inspected routes, and a
 nonresponsive Connection has a bounded close watchdog.
 
