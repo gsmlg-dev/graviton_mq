@@ -1,5 +1,16 @@
 # Active implementation scope
 
+## Release authorization — 2026-11-09
+
+The owner requested publication of the next version containing the
+post-0.2.1 review fixes below. The target is `0.3.0` (minor: new public
+limits/APIs, forward-only compacted WAL format and the MQTT expiry-0 takeover
+change), with seven synchronized packages, released from `main` through the
+Release workflow. The owner kept the new takeover behaviour. This supersedes
+the "no version bump, release or publication" statement of the maintenance
+entry below. See the [release notes](releases/0.3.0.md) and
+[qualification record](qualification/2026-11-09-v0.3.0-release.md).
+
 ## Maintenance authorization — 2026-11-08 (post-0.2.1 review)
 
 The owner requested fixes for the High and Medium findings of the 2026-11-08
