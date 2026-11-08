@@ -253,6 +253,76 @@ defmodule GravitonMQ.AMQP10.SessionEngineTest do
     assert state.outgoing_bytes == 0
   end
 
+  test "sender capacity distinguishes a temporary writer budget from the message limit" do
+    {state, id} = attached(:sender, max_fragments: 2, max_message_bytes: 1024)
+    {state, _} = SessionEngine.step(state, {:peer, peer_flow(9, 1, 10), <<>>}, ctx())
+    context = ctx(max_frame_size: 512, max_data_frame_bytes: 512)
+
+    assert %{messages: 1, bytes: temporary, max_message_bytes: maximum} =
+             SessionEngine.send_capacity(state, id, %{context | write_bytes: 200})
+
+    assert temporary < 708
+    assert maximum >= 708
+
+    assert %{messages: 1, bytes: restored, max_message_bytes: ^maximum} =
+             SessionEngine.send_capacity(state, id, context)
+
+    assert restored >= 708
+    assert restored == maximum
+
+    # Another Link's unsettled send also consumes only transient Session memory.
+    occupied = %{state | outgoing_bytes: state.options.max_outgoing_bytes - 100}
+
+    assert %{messages: 1, bytes: 100, max_message_bytes: ^maximum} =
+             SessionEngine.send_capacity(occupied, id, context)
+  end
+
+  test "writer leftovers do not exhaust the remaining fragment allowance" do
+    {state, id} = attached(:sender, max_fragments: 2, max_message_bytes: 1024)
+    context = ctx(max_frame_size: 512, max_data_frame_bytes: 600, write_bytes: 600)
+    {state, _} = SessionEngine.step(state, {:peer, peer_flow(9, 1, 10), <<>>}, context)
+    raw = :binary.copy("x", 708)
+    {state, effects} = SessionEngine.step(state, {:command, :send, {:send, id, raw, []}}, context)
+    assert [{receipt, %Transfer{more: %Value{value: true}}, first}] = data_emits(effects)
+
+    {state, effects} = SessionEngine.step(state, {:write_result, receipt, :ok}, context)
+    assert [{_, %Transfer{more: %Value{value: false}}, last}] = data_emits(effects)
+    assert first <> last == raw
+    assert state.phase == :active
+  end
+
+  test "permanent sender capacity survives delivery ID constructor boundaries" do
+    {state, id} = attached(:sender, max_fragments: 2, max_message_bytes: 1024)
+    context = ctx(max_frame_size: 512, max_data_frame_bytes: 512)
+    {state, _} = SessionEngine.step(state, {:peer, peer_flow(9, 1, 10), <<>>}, context)
+
+    limits =
+      for next <- [0, 1, 255, 256, 0xFFFF_FFFF] do
+        capacity = SessionEngine.send_capacity(%{state | next_delivery_id: next}, id, context)
+        assert capacity.bytes == capacity.max_message_bytes
+        capacity.max_message_bytes
+      end
+
+    assert Enum.uniq(limits) == [975]
+  end
+
+  test "a send above the permanent fragment allowance fails without waiting for capacity" do
+    {state, id} = attached(:sender, max_fragments: 2, max_message_bytes: 1024)
+    context = ctx(max_frame_size: 512, max_data_frame_bytes: 600, write_bytes: 600)
+    {state, _} = SessionEngine.step(state, {:peer, peer_flow(9, 1, 10), <<>>}, context)
+
+    {state, effects} =
+      SessionEngine.step(
+        state,
+        {:command, :send, {:send, id, :binary.copy("x", 1024), []}},
+        context
+      )
+
+    assert state.phase == :closed
+    assert {:complete, :send, {:error, :transfer_limit}} in effects
+    assert data_emits(effects) == []
+  end
+
   test "receiver reserves worst-case slots and bytes before granting credit and assembles opaque fragments" do
     {state, id} =
       attached(:receiver,

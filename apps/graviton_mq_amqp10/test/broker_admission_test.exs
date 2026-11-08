@@ -243,7 +243,7 @@ defmodule GravitonMQ.AMQP10.BrokerAdmissionTest do
     {state, _} = SessionEngine.step(state, {:command, :accept, {:accept_link, id, token}}, ctx())
     assert capacity(state, id) == %{messages: 0, bytes: 0}
     {state, _} = SessionEngine.step(state, {:peer, flow(), <<>>}, ctx())
-    assert capacity(state, id) == %{messages: 1, bytes: 32}
+    assert capacity(state, id) == %{messages: 1, bytes: 32, max_message_bytes: 32}
 
     assert SessionEngine.send_capacity(state, id, ctx(write_frames: 0)) == %{
              messages: 0,
@@ -269,7 +269,7 @@ defmodule GravitonMQ.AMQP10.BrokerAdmissionTest do
     }
 
     {state, _} = SessionEngine.step(state, {:peer, pdu, <<>>}, ctx())
-    assert capacity(state, id) == %{messages: 1, bytes: 32}
+    assert capacity(state, id) == %{messages: 1, bytes: 32, max_message_bytes: 32}
     assert capacity(%{state | remote_incoming_window: 0}, id) == %{messages: 0, bytes: 0}
     assert capacity(%{state | outgoing_window: 0}, id) == %{messages: 0, bytes: 0}
 
@@ -297,7 +297,12 @@ defmodule GravitonMQ.AMQP10.BrokerAdmissionTest do
     assert {:event, {:session, 0, {:attached, id}}} in effects
     assert {:operation, :accept, {:ok, id}} in effects
     {endpoint, _} = endpoint_step(endpoint, {:frame, frame(flow(), 3)})
-    assert Endpoint.send_capacity(endpoint, 0, id) == %{messages: 1, bytes: 32}
+
+    assert Endpoint.send_capacity(endpoint, 0, id) == %{
+             messages: 1,
+             bytes: 32,
+             max_message_bytes: 32
+           }
 
     full = %{
       endpoint
@@ -342,7 +347,7 @@ defmodule GravitonMQ.AMQP10.BrokerAdmissionTest do
       SessionEngine.step(state, {:command, :accept, {:accept_link, id, token}}, ctx())
 
     assert {:link_event, {:attached, id}} in effects
-    assert capacity(state, id) == %{messages: 1, bytes: 32}
+    assert capacity(state, id) == %{messages: 1, bytes: 32, max_message_bytes: 32}
   end
 
   test "pipelined drain and echo wait for admitted Attach and owner exhaustion" do
@@ -423,7 +428,8 @@ defmodule GravitonMQ.AMQP10.BrokerAdmissionTest do
 
     assert capacity(%{state | outgoing_bytes: state.options.max_outgoing_bytes - 7}, id) == %{
              messages: 1,
-             bytes: 7
+             bytes: 7,
+             max_message_bytes: 32
            }
 
     operations = Map.new(1..state.options.max_pending, &{&1, %{}})

@@ -93,6 +93,10 @@ defmodule GravitonMQ.Client.MQTT do
     end
   end
 
+  defp call({:subscribe, <<"$share/", _::binary>>, _options}, _from, %{store: store} = state)
+       when not is_nil(store),
+       do: {:reply, {:error, :shared_subscription_persistence_unsupported}, state}
+
   defp call({:subscribe, filter, options}, from, state) do
     if valid_options?(options, [
          :qos,

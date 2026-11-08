@@ -1,5 +1,19 @@
 # Active implementation scope
 
+## Maintenance release authorization — 2026-11-08
+
+The owner requested repairs for the current AMQP/MQTT review findings and
+publication of the next version. The maintenance target is `0.2.1`, with
+seven synchronized packages, on the existing `main` branch. The work covers
+AMQP transient-capacity/fragment handling, local rejection of shared
+subscriptions by persistent MQTT clients, regression coverage, release
+qualification, commit/push and public publication. The existing selected
+profiles and deferred features remain unchanged. See the
+[release notes](releases/0.2.1.md) and
+[qualification record](qualification/2026-11-08-v0.2.1-release.md).
+
+## G0–G7 implementation authorization and history
+
 Owner authorization: 2026-10-29, four independently verifiable network roles.
 The 2026-10-28 review baseline was
 `66b4a6c161f521cb6b6379ad4f952dcdc7f3447a`; the checkout was rechecked at that

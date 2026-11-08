@@ -162,11 +162,14 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
   granted to a peer nor a promise that a socket write completes publication.
   Broker senders also expose a fenced drain token. The owner can confirm an
   exhausted external source even when Session windows currently prevent sends.
+  A positive capacity includes the permanent `max_message_bytes` bound; `bytes`
+  additionally reflects current writer and Session memory availability.
   """
   @spec send_capacity(SessionState.t(), Link.identity(), map()) ::
           %{
             required(:messages) => 0 | 1,
             required(:bytes) => non_neg_integer(),
+            optional(:max_message_bytes) => non_neg_integer(),
             optional(:drain_token) => term()
           }
   def send_capacity(%SessionState{phase: :active} = state, identity, ctx) do
@@ -203,7 +206,9 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
          true <- Map.get(ctx, :write_frames, 0) > 0,
          pdu = %Transfer{
            handle: Value.uint(link.local_handle),
-           delivery_id: Value.uint(state.next_delivery_id),
+           # A different Link can advance the Session ID before this snapshot
+           # becomes a send command. Reserve its largest wire constructor.
+           delivery_id: Value.uint(@uint_max),
            delivery_tag: Value.binary(<<Serial.add(state.next_token, 0)::32>>),
            message_format: Value.uint(0),
            settled: Value.boolean(false),
@@ -223,10 +228,25 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
           link.max_message_bytes,
           peer_max,
           state.options.max_outgoing_bytes - state.outgoing_bytes,
-          fragment_bytes * state.options.max_fragments
+          fragment_message_bytes(
+            link.local_handle,
+            overhead,
+            state.options.max_fragments,
+            Map.put(ctx, :max_data_frame_bytes, min(frame_limit, Map.get(ctx, :write_bytes, 0)))
+          )
         ])
 
-      if bytes > 0, do: %{messages: 1, bytes: bytes}, else: %{messages: 0, bytes: 0}
+      maximum =
+        Enum.min([
+          link.max_message_bytes,
+          peer_max,
+          state.options.max_outgoing_bytes,
+          fragment_message_bytes(link.local_handle, overhead, state.options.max_fragments, ctx)
+        ])
+
+      if bytes > 0,
+        do: %{messages: 1, bytes: min(bytes, maximum), max_message_bytes: maximum},
+        else: %{messages: 0, bytes: 0}
     else
       _ -> %{messages: 0, bytes: 0}
     end
@@ -1578,7 +1598,9 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
       bytes: max(0, Map.get(ctx, :write_bytes, 0)),
       control_frames: max(0, Map.get(ctx, :control_frames, Map.get(ctx, :write_frames, 0))),
       control_bytes: max(0, Map.get(ctx, :control_bytes, Map.get(ctx, :write_bytes, 0))),
-      max_frame_size: Map.get(ctx, :max_frame_size, 512)
+      max_frame_size: Map.get(ctx, :max_frame_size, 512),
+      max_data_frame_bytes:
+        Map.get(ctx, :max_data_frame_bytes, Map.get(ctx, :max_frame_size, 512))
     }
 
     flush_loop(state, ctx, budget, [])
@@ -1840,6 +1862,24 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
         entry.fragments >= state.options.max_fragments and not abort ->
           {:error, :transfer_limit}
 
+        not abort and
+            remaining >
+              fragment_message_bytes(
+                link.local_handle,
+                overhead,
+                state.options.max_fragments - entry.fragments,
+                budget
+              ) ->
+          {:error, :transfer_limit}
+
+        not abort and
+            remaining - min(capacity, remaining) >
+              continuation_bytes(link.local_handle, budget) *
+                (state.options.max_fragments - entry.fragments - 1) ->
+          # A short-lived writer remainder must not consume the last fragment
+          # slots. Its receipt will flush this delivery with restored capacity.
+          :none
+
         true ->
           count = min(capacity, remaining)
           final = count == remaining
@@ -1901,6 +1941,25 @@ defmodule GravitonMQ.AMQP10.SessionEngine do
       end
     else
       _ -> {:error, :invalid_local_transfer}
+    end
+  end
+
+  defp fragment_message_bytes(handle, first_overhead, fragments, ctx) do
+    frame_limit = Map.get(ctx, :max_frame_size, 512)
+    frame_bytes = min(frame_limit, Map.get(ctx, :max_data_frame_bytes, frame_limit))
+    max(0, frame_bytes - first_overhead) + (fragments - 1) * continuation_bytes(handle, ctx)
+  end
+
+  defp continuation_bytes(handle, ctx) do
+    frame_limit = Map.get(ctx, :max_frame_size, 512)
+    pdu = %Transfer{handle: Value.uint(handle), more: Value.boolean(true)}
+
+    case encode_size(pdu, frame_limit) do
+      {:ok, overhead} ->
+        max(0, min(frame_limit, Map.get(ctx, :max_data_frame_bytes, frame_limit)) - overhead)
+
+      _ ->
+        0
     end
   end
 

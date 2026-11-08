@@ -107,6 +107,147 @@ defmodule GravitonMQ.AMQP10.RuntimeTest do
     eventually!(fn -> queue_status(broker).messages == 0 end)
   end
 
+  test "a temporary writer budget retains the queued delivery until capacity wakes" do
+    broker = broker!(endpoint_options: [max_frame_size: 512, session_options: [max_fragments: 2]])
+    receiver = client!(broker)
+    link = attach!(receiver, "receiver", :receiver)
+    supervisor = amqp_supervisor(broker)
+    connections = child(supervisor, :connections)
+    [{_, connection, _, _}] = DynamicSupervisor.which_children(connections)
+    queue = child(supervisor, {Queue, "orders"})
+    {generation, write_id} = occupy_writer(connection, 200)
+    first = message(:binary.copy("x", 967))
+    second = message("second")
+
+    for raw <- [first, second] do
+      assert {:ok, :accepted_in_memory} =
+               Queue.enqueue(
+                 queue,
+                 raw,
+                 %GravitonMQ.Core.Message.Format{family: "amqp-1.0", identifier: 0},
+                 %GravitonMQ.Core.Message.Index{routing: %{"address" => "orders"}},
+                 false
+               )
+    end
+
+    assert {:ok, 2} = operation(Client.request(receiver, 0, link, 2, 2_097_152), receiver)
+    refute_receive {:graviton_mq, ^receiver, {:delivery, _, _, _, _, _}}, 50
+    refute_receive {:graviton_mq, ^receiver, {:session, 0, {:detached, ^link, _}}}, 50
+    assert %{ready: 1, inflight: 1, consumers: 1} = Queue.status(queue)
+
+    # An actual write receipt releases endpoint capacity and supplies the wakeup.
+    send(connection, {:amqp10_write, generation, write_id, :ok})
+    assert_receive {:graviton_mq, ^receiver, {:delivery, first_ref, 0, ^link, ^first, _}}, 2_000
+    assert {:ok, _} = operation(Client.settle(receiver, first_ref, %Outcome.Accepted{}), receiver)
+    assert_receive {:graviton_mq, ^receiver, {:delivery, second_ref, 0, ^link, ^second, _}}, 2_000
+
+    assert {:ok, _} =
+             operation(Client.settle(receiver, second_ref, %Outcome.Accepted{}), receiver)
+
+    eventually!(fn -> Queue.status(queue).messages == 0 end)
+  end
+
+  test "a pending delivery survives another Link advancing its wire ID constructor" do
+    broker = broker!(endpoint_options: [max_frame_size: 512, session_options: [max_fragments: 2]])
+    receiver = client!(broker)
+    blocked = attach!(receiver, "blocked", :receiver)
+    other = attach!(receiver, "other", :receiver)
+    supervisor = amqp_supervisor(broker)
+
+    [{_, connection, _, _}] =
+      supervisor |> child(:connections) |> DynamicSupervisor.which_children()
+
+    queue = child(supervisor, {Queue, "orders"})
+    {generation, write_id} = occupy_writer(connection, 200)
+    first = message(:binary.copy("x", 967))
+    second = message("other-link")
+
+    for raw <- [first, second] do
+      assert {:ok, :accepted_in_memory} =
+               Queue.enqueue(
+                 queue,
+                 raw,
+                 %GravitonMQ.Core.Message.Format{family: "amqp-1.0", identifier: 0},
+                 %GravitonMQ.Core.Message.Index{routing: %{"address" => "orders"}},
+                 false
+               )
+    end
+
+    assert {:ok, 1} = operation(Client.request(receiver, 0, blocked, 1, 1_048_576), receiver)
+    eventually!(fn -> match?(%{ready: 1, inflight: 1, consumers: 2}, Queue.status(queue)) end)
+    identity = {Value.string("blocked"), :sender}
+    capacity = GravitonMQ.Runtime.AMQP10.Connection.capacity(connection, 0, identity)
+    assert byte_size(first) == capacity.max_message_bytes
+    assert byte_size(first) > capacity.bytes
+
+    # The other Link emits wire delivery-id 0 while this claim waits. Its send
+    # advances the Session's next ID to 1, whose constructor needs another byte.
+    assert {:ok, 1} = operation(Client.request(receiver, 0, other, 1, 1_048_576), receiver)
+    assert_receive {:graviton_mq, ^receiver, {:delivery, ref, 0, ^other, ^second, _}}, 2_000
+    assert {:ok, _} = operation(Client.settle(receiver, ref, %Outcome.Accepted{}), receiver)
+    capacity = GravitonMQ.Runtime.AMQP10.Connection.capacity(connection, 0, identity)
+    assert byte_size(first) == capacity.max_message_bytes
+    refute_receive {:graviton_mq, ^receiver, {:session, 0, {:detached, ^blocked, _}}}, 50
+    assert %{messages: 1, ready: 0, inflight: 1, consumers: 2} = Queue.status(queue)
+    send(connection, {:amqp10_write, generation, write_id, :ok})
+
+    assert_receive {:graviton_mq, ^receiver, {:delivery, first_ref, 0, ^blocked, ^first, _}},
+                   2_000
+
+    assert {:ok, _} = operation(Client.settle(receiver, first_ref, %Outcome.Accepted{}), receiver)
+    eventually!(fn -> Queue.status(queue).messages == 0 end)
+  end
+
+  test "a message above the permanent fragment limit still refuses the receiving Link" do
+    broker = broker!(endpoint_options: [max_frame_size: 512, session_options: [max_fragments: 2]])
+    receiver = client!(broker)
+    link = attach!(receiver, "receiver", :receiver)
+    queue = broker |> amqp_supervisor() |> child({Queue, "orders"})
+
+    assert {:ok, :accepted_in_memory} =
+             Queue.enqueue(
+               queue,
+               message(:binary.copy("x", 1100)),
+               %GravitonMQ.Core.Message.Format{family: "amqp-1.0", identifier: 0},
+               %GravitonMQ.Core.Message.Index{routing: %{"address" => "orders"}},
+               false
+             )
+
+    assert {:ok, 1} = operation(Client.request(receiver, 0, link, 1, 1_048_576), receiver)
+    assert_receive {:graviton_mq, ^receiver, {:session, 0, {:detached, ^link, _}}}, 2_000
+    eventually!(fn -> match?(%{ready: 1, inflight: 0, consumers: 0}, Queue.status(queue)) end)
+  end
+
+  test "disconnect returns a delivery retained while waiting for writer capacity" do
+    broker = broker!(endpoint_options: [max_frame_size: 512, session_options: [max_fragments: 2]])
+    receiver = client!(broker)
+    link = attach!(receiver, "receiver", :receiver)
+    supervisor = amqp_supervisor(broker)
+
+    [{_, connection, _, _}] =
+      supervisor |> child(:connections) |> DynamicSupervisor.which_children()
+
+    queue = child(supervisor, {Queue, "orders"})
+    occupy_writer(connection, 200)
+
+    assert {:ok, :accepted_in_memory} =
+             Queue.enqueue(
+               queue,
+               message(:binary.copy("x", 700)),
+               %GravitonMQ.Core.Message.Format{family: "amqp-1.0", identifier: 0},
+               %GravitonMQ.Core.Message.Index{routing: %{"address" => "orders"}},
+               false
+             )
+
+    assert {:ok, 1} = operation(Client.request(receiver, 0, link, 1, 1_048_576), receiver)
+    eventually!(fn -> match?(%{ready: 0, inflight: 1, consumers: 1}, Queue.status(queue)) end)
+    event_sequence = Queue.status(queue).event_sequence
+    refute_receive {:graviton_mq, ^receiver, {:delivery, _, _, _, _, _}}, 50
+    assert Queue.status(queue).event_sequence == event_sequence
+    assert {:ok, :closed} = operation(Client.close(receiver), receiver)
+    eventually!(fn -> match?(%{ready: 1, inflight: 0, consumers: 0}, Queue.status(queue)) end)
+  end
+
   test "memory admission explicitly rejects durability, TTL and absolute expiry" do
     broker = broker!()
     sender = client!(broker)
@@ -285,6 +426,33 @@ defmodule GravitonMQ.AMQP10.RuntimeTest do
   defp message(body) do
     {:ok, raw} = MessageCodec.encode_sections([{:data, Value.binary(body)}])
     raw
+  end
+
+  defp occupy_writer(connection, free_bytes) do
+    caller = self()
+
+    :sys.replace_state(connection, fn shell ->
+      state = :ets.lookup_element(shell.table, :state, 2)
+      endpoint = state.endpoint
+      id = endpoint.next_write_id
+
+      bytes =
+        endpoint.options.max_write_bytes - endpoint.options.control_reserve_bytes - free_bytes
+
+      endpoint = %{
+        endpoint
+        | next_write_id: id + 1,
+          writes: Map.put(endpoint.writes, id, %{bytes: bytes, owner: :connection}),
+          write_bytes: endpoint.write_bytes + bytes
+      }
+
+      :ets.insert(shell.table, {:state, %{state | endpoint: endpoint}})
+      send(caller, {:occupied_writer, endpoint.generation, id})
+      shell
+    end)
+
+    assert_receive {:occupied_writer, generation, id}
+    {generation, id}
   end
 
   defp operation({:ok, reference}, client) do

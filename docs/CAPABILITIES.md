@@ -1,5 +1,11 @@
 # Capability and qualification matrix
 
+The `0.2.1` maintenance work corrects AMQP transient send-capacity handling
+and rejects shared subscriptions before persistent MQTT-client admission.
+The [maintenance qualification](qualification/2026-11-08-v0.2.1-release.md)
+records its new evidence and the initial intermittent validation failures.
+The version-specific records below retain their original scope and results.
+
 Working-tree evidence, initiated 2026-10-29 and rechecked 2026-10-30. Review baseline and checked HEAD:
 `66b4a6c161f521cb6b6379ad4f952dcdc7f3447a`. Existing uncommitted MQTT5-only
 amendments were present. This matrix is updated with implementation evidence;

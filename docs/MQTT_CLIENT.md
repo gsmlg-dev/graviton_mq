@@ -134,6 +134,13 @@ through dedicated options rather than overriding their wire properties.
 
 ## Local persistence and recovery ownership
 
+Shared subscriptions are outside the local persistence profile. When
+persistence is enabled, `subscribe/3` rejects a `$share/` filter locally with
+`{:error, :shared_subscription_persistence_unsupported}`, before allocating
+an operation reference or sending SUBSCRIBE. Ordinary subscriptions remain
+available; a client using the memory profile follows the peer's advertised
+shared-subscription capability.
+
 Configure a nonempty stable `:client_id` and
 `persistence: [directory: "/var/lib/my-app/mqtt-client", max_bytes: 8_388_608]`.
 The parent directory must exist. The client package owns this Linux adapter;

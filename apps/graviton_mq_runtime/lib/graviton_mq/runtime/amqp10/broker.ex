@@ -276,6 +276,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
               consumer: nil,
               generation: nil,
               busy: nil,
+              pending_delivery: nil,
               credit: false,
               receiving: false
             }
@@ -639,48 +640,18 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
       %{phase: :active, busy: nil, role: :sender} = route ->
         case capacity(elem(key, 0), elem(key, 1), elem(key, 2)) do
           {:ok, %{messages: messages, bytes: bytes} = capacity} when messages > 0 and bytes > 0 ->
-            status = Queue.status(route.queue)
-            if not is_map(status), do: exit({:shutdown, :queue_unavailable})
-            # Queue data charges include identity/index/mutations. Wire capacity
-            # bounds only the outbound view; these are deliberately different units.
-            charge_limit =
-              min(
-                status.limits.max_bytes,
-                status.limits.max_message_bytes + status.limits.max_mutation_bytes
-              )
-
-            case Queue.claim(route.queue, route.consumer, route.generation, 1, charge_limit) do
-              {:ok, [{delivery, message, metadata}]} ->
-                case Forwarding.prepare(message.encoded_content, metadata, capacity.bytes) do
-                  {:ok, bytes} ->
-                    {issue(state, key, {:send, delivery.id}, {:send, elem(key, 2), bytes, []}),
-                     true}
-
-                  {:error, _} ->
-                    :ok =
-                      Queue.settle(
-                        route.queue,
-                        route.consumer,
-                        route.generation,
-                        delivery.id,
-                        %CoreOutcome.MakeAvailable{}
-                      )
-
-                    {detach(state, key, "message cannot fit this link"), true}
-                end
-
-              {:ok, []} ->
-                drain_exhausted(state, key, capacity)
-
-              {:error, _} ->
-                {detach(state, key, "queue lease is unavailable"), true}
-            end
+            pump_sender(state, key, route, capacity)
 
           {:ok, %{drain_token: _} = capacity} ->
             case Queue.status(route.queue) do
-              %{ready: 0} -> drain_exhausted(state, key, capacity)
-              status when is_map(status) -> {state, false}
-              _ -> exit({:shutdown, :queue_unavailable})
+              %{ready: 0} when is_nil(route.pending_delivery) ->
+                drain_exhausted(state, key, capacity)
+
+              status when is_map(status) ->
+                {state, false}
+
+              _ ->
+                exit({:shutdown, :queue_unavailable})
             end
 
           {:ok, _} ->
@@ -692,6 +663,55 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
 
       _ ->
         {state, false}
+    end
+  end
+
+  defp pump_sender(state, key, %{pending_delivery: {delivery, bytes}} = route, capacity) do
+    if byte_size(bytes) <= capacity.bytes do
+      state = put_route(state, key, %{route | pending_delivery: nil})
+      {issue(state, key, {:send, delivery}, {:send, elem(key, 2), bytes, []}), true}
+    else
+      {state, false}
+    end
+  end
+
+  defp pump_sender(state, key, route, capacity) do
+    status = Queue.status(route.queue)
+    if not is_map(status), do: exit({:shutdown, :queue_unavailable})
+    # Queue data charges include identity/index/mutations. Wire capacity
+    # bounds only the outbound view; these are deliberately different units.
+    charge_limit =
+      min(
+        status.limits.max_bytes,
+        status.limits.max_message_bytes + status.limits.max_mutation_bytes
+      )
+
+    case Queue.claim(route.queue, route.consumer, route.generation, 1, charge_limit) do
+      {:ok, [{delivery, message, metadata}]} ->
+        case Forwarding.prepare(message.encoded_content, metadata, capacity.max_message_bytes) do
+          {:ok, bytes} ->
+            route = %{route | pending_delivery: {delivery.id, bytes}}
+            state = put_route(state, key, route)
+            pump_sender(state, key, route, capacity)
+
+          {:error, _} ->
+            :ok =
+              Queue.settle(
+                route.queue,
+                route.consumer,
+                route.generation,
+                delivery.id,
+                %CoreOutcome.MakeAvailable{}
+              )
+
+            {detach(state, key, "message cannot fit this link"), true}
+        end
+
+      {:ok, []} ->
+        drain_exhausted(state, key, capacity)
+
+      {:error, _} ->
+        {detach(state, key, "queue lease is unavailable"), true}
     end
   end
 

@@ -295,11 +295,40 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     {:ok, {_, port}} = :ssl.sockname(listener)
     {:ok, peer} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
     on_exit(fn -> :gen_tcp.close(peer) end)
-    {:ok, socket} = :ssl.transport_accept(listener, 1000)
-    connection = start_supervised!({Connection, {config!(connect_timeout: 40), relay!(), :tls}})
+    config = config!(connect_timeout: 40)
+    broker = relay!()
+    caller = self()
+
+    # Own and queue the accepted socket before its admission timer exists;
+    # release initialization only after the test has installed its monitor.
+    initializer = fn ->
+      {:ok, socket} = :ssl.transport_accept(listener, 1000)
+      send(caller, {:tls_socket_ready, self()})
+
+      receive do
+        {:begin_handshake, ^caller} ->
+          send(self(), {:accepted, socket})
+          {config, broker, :tls}
+      after
+        1000 -> exit(:tls_fixture_setup_timeout)
+      end
+    end
+
+    {:ok, supervisor} = ExUnit.fetch_test_supervisor()
+
+    startup =
+      Task.async(fn ->
+        Supervisor.start_child(supervisor, %{
+          id: make_ref(),
+          restart: :temporary,
+          start: {Connection, :start_link, [initializer]}
+        })
+      end)
+
+    assert_receive {:tls_socket_ready, connection}, 1000
     monitor = Process.monitor(connection)
-    :ok = :ssl.controlling_process(socket, connection)
-    send(connection, {:accepted, socket})
+    send(connection, {:begin_handshake, self()})
+    assert {:ok, ^connection} = Task.await(startup)
 
     assert_receive {:amqp10_endpoint_event, ^connection,
                     {:event, {:disconnected, {:handshake, :timeout}}}},

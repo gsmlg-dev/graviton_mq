@@ -89,7 +89,12 @@ defmodule GravitonMQ.AMQP10.Endpoint do
   endpoint transition instead of repeating credit or serial-number arithmetic.
   """
   @spec send_capacity(t(), non_neg_integer(), GravitonMQ.AMQP10.Link.identity()) ::
-          %{messages: 0 | 1, bytes: non_neg_integer()}
+          %{
+            required(:messages) => 0 | 1,
+            required(:bytes) => non_neg_integer(),
+            optional(:max_message_bytes) => non_neg_integer(),
+            optional(:drain_token) => term()
+          }
   def send_capacity(%__MODULE__{phase: :active} = state, session_id, identity) do
     with %{phase: :active} <- Map.get(state.session_controls, session_id),
          {:ok, session} <- Map.fetch(state.connection.sessions_by_identity, session_id),
@@ -650,6 +655,7 @@ defmodule GravitonMQ.AMQP10.Endpoint do
       now_ms: state.now_ms,
       generation: state.generation,
       max_frame_size: state.peer_max_frame_size,
+      max_data_frame_bytes: state.options.max_write_bytes - state.options.control_reserve_bytes,
       max_handle: Map.get(session, :remote_handle_max, 0xFFFF_FFFF),
       occupied_link_names: occupied_link_names(state, session.id),
       write_frames:
