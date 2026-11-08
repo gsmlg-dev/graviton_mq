@@ -164,8 +164,8 @@ before exposing recovered ownership or terminal success. Partial/unpublished
 temporary files are not recovery checkpoints. A checkpoint is rewritten only
 when its retained content changes; keep-alive and timer steps that leave it
 unchanged do not rewrite it (`mqtt_checkpoint_test.exs`; the Linux-only
-`mqtt_persistence_fault_test.exs` cases remain UNVERIFIED on Linux until CI
-runs). Failed/uncertain publication
+`mqtt_persistence_fault_test.exs` cases passed for `696dca0` on a local Linux
+host on 2026-11-08). Failed/uncertain publication
 poisons the owner, closes its connection and emits `{:storage_error, reason}`;
 it cannot send ordinary success. A possible operation remains unknown.
 

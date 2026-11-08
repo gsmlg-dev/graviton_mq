@@ -68,8 +68,8 @@ CI, model/fuzz/soak/resources and clean installed-consumer qualification.
 
 ## Amendment — 2026-11-08: WAL compaction and recovery repair
 
-Status: uncommitted maintenance change on `main`; Linux and CI verification
-pending. The original decisions above are unchanged except where stated.
+Status: committed as `696dca0` on `main` (2026-11-08); Linux tests passed
+locally; independent-peer requalification pending. The original decisions above are unchanged except where stated.
 
 `WAL.compact/2` (event streams) and `WAL.compact_records/2` (opaque streams)
 replace the whole durable log with caller-supplied base items; `WAL.usage/1`
@@ -107,6 +107,7 @@ error, as does a checkpoint naming a missing generation.
 Evidence: `wal_codec_test.exs` and `queue_compaction_test.exs` ran on macOS.
 `wal_compaction_test.exs`, the compaction crash matrix in `wal_crash_test.exs`,
 the `wal_fault_test.exs` additions, `durable_queue_test.exs` and
-`mqtt/persistence_test.exs` require Linux; they were exercised only through a
-non-repository scratch harness with the platform check stubbed, and remain
-UNVERIFIED on Linux until CI runs.
+`mqtt/persistence_test.exs` require Linux; before commit they were exercised
+only through a non-repository scratch harness with the platform check stubbed.
+On 2026-11-08 they passed for `696dca0` within the complete required sequence
+on a local NixOS Linux x86_64 host (Elixir 1.18.5/OTP 28).

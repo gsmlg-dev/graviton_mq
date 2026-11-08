@@ -268,7 +268,7 @@ source changes.
 
 ## Maintenance amendment — 2026-11-08
 
-The ledger rows above were not re-run. Uncommitted post-0.2.1 review fixes
+The ledger rows above were not re-run. Post-0.2.1 review fixes (`696dca0`)
 change behaviour cited in two clause groups:
 
 - §3.1.4 CONNECT ordering: packets pipelined after CONNECT are held
@@ -289,8 +289,9 @@ change behaviour cited in two clause groups:
   `B/test/mqtt/persistence_test.exs` and storage WAL tests (Linux-only), and
   `C/test/mqtt_checkpoint_test.exs` / `mqtt_persistence_fault_test.exs`.
 
-Only macOS runs were made. Linux-only persistence tests, hosted CI and
-independent-peer requalification of these rows are pending.
+Status `COMMITTED_LINUX_LOCAL_PASS_INTEROP_PENDING`: the Linux-only persistence
+tests passed for `696dca0` on a local Linux host; independent-peer
+requalification of these rows is pending.
 
 ## Evidence boundaries and remaining qualification
 

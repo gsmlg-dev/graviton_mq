@@ -17,7 +17,7 @@ The authoritative reference is [OASIS MQTT Version 5.0, 7 March 2019](https://do
 
 ## Maintenance amendment — 2026-11-08
 
-This ledger was not re-run. Uncommitted post-0.2.1 review fixes change the broker behaviour cited by `BSESSION`, `BTAKEOVER`, `MQTT-3.1.4-3`, `MQTT-3.1.4-6` and `MQTT-3.2.2-3`; dated notes on those entries name the new regression evidence. An expiry0 session taken over by the same principal now ends, and the new connection receives Session Present0 with a fresh session (previously the session was resumed). Packets pipelined after CONNECT are held during authentication and replayed after CONNACK or discarded on rejection. Local durable logs are now compacted (see [ADR 0008](../adr/0008-local-durability-profiles.md)). Only macOS runs were made; Linux-only persistence tests, hosted CI and independent-peer requalification are pending.
+This ledger was not re-run. Post-0.2.1 review fixes (`696dca0`) change the broker behaviour cited by `BSESSION`, `BTAKEOVER`, `MQTT-3.1.4-3`, `MQTT-3.1.4-6` and `MQTT-3.2.2-3`; dated notes on those entries name the new regression evidence. An expiry0 session taken over by the same principal now ends, and the new connection receives Session Present0 with a fresh session (previously the session was resumed). Packets pipelined after CONNECT are held during authentication and replayed after CONNACK or discarded on rejection. Local durable logs are now compacted (see [ADR 0008](../adr/0008-local-durability-profiles.md)). Status `COMMITTED_LINUX_LOCAL_PASS_INTEROP_PENDING`: the Linux-only persistence tests passed for `696dca0` on a local Linux host; independent-peer requalification is pending.
 
 ## Selected profile and reading the ledger
 

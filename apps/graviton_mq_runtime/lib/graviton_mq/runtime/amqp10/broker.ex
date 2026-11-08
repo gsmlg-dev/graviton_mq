@@ -393,14 +393,11 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
 
         case outcome do
           # No disposition is invented for an unknown publication outcome.
+          # Enqueue holds no lease, so nothing diverges here; an unresponsive
+          # queue is fenced by its next lease or status command instead, and a
+          # queue whose storage failed stays observable as such.
           :unknown ->
             close_connection(state, connection, :queue_outcome_unknown)
-
-          # An unanswered queue is isolated so other Links stop waiting on it.
-          {:unknown, :unanswered} ->
-            state
-            |> close_connection(connection, :queue_outcome_unknown)
-            |> fence(route.queue)
 
           {:reject_durable, outcome} ->
             issue(state, key, {:settle, outcome.error}, {:settle, token, outcome})
@@ -563,7 +560,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
       %Outcome.Accepted{}
     else
       {:error, reason} when reason in @uncertain ->
-        {:unknown, :unanswered}
+        :unknown
 
       {:error, :persistence_failed} ->
         :unknown

@@ -3,18 +3,32 @@
 ## Maintenance authorization — 2026-11-08 (post-0.2.1 review)
 
 The owner requested fixes for the High and Medium findings of the 2026-11-08
-repository review. The work is uncommitted on `main`; no version bump,
-release or publication is authorized. Fixed areas: a cumulative AMQP decoder
+repository review. They were committed as `696dca0` and pushed to
+`origin/main` on 2026-11-08; a follow-up commit stops fencing a queue on an
+unknown enqueue outcome. No version bump, release or publication is
+authorized. Fixed areas: a cumulative AMQP decoder
 budget for zero-width array elements; full uint Begin windows and in-flight
 Flow/Transfer tolerance after a clean local Detach; per-queue fencing instead
-of Manager exit on unanswered queue calls, non-fatal busy-Connection capacity
+of Manager exit on unanswered lease/status queue calls, non-fatal busy-Connection capacity
 retries and event-driven AMQP socket input; WAL compaction with generation
 files and amended tail/header recovery (MQTT and AMQP owners); MQTT broker
 holding of packets pipelined after CONNECT and expiry-0 takeover ending the old
 session; and MQTT client checkpoint rewrites only on content change plus
-socket/timer release after a final transport loss. Only macOS runs were done
-on this host; Linux-only WAL/durable tests, hosted CI and independent-peer
-interoperability requalification are pending.
+socket/timer release after a final transport loss.
+
+Evidence: the complete required sequence passed for `696dca0` on 2026-11-08 on a local
+NixOS Linux x86_64 host (Elixir 1.18.5/OTP 28, not the pinned `.tool-versions`):
+core 38, amqp10 467, mqtt 275, storage 82, client 103 (43 excluded), runtime
+92 and graviton_mq 158 (68 excluded) tests, 0 failures, including the
+Linux-only WAL/compaction/crash/durable tests. The excluded independent-peer
+(Mosquitto/Paho/Proton) tests did not run there. Hosted CI run 42500780476
+passed `checks` and the Tests workflow; its `interoperability` job passed the
+core/mqtt/amqp10/storage/client/runtime suites, but `graviton_mq` had 1 of 158
+failing: the Proton test "failed synchronization closes publication without
+Proton Accepted" expected `storage: :failed` and saw the queue reported
+`:unavailable`; the later sustained-traffic and archive/consumer steps were
+skipped. The follow-up addresses that case; independent-peer
+requalification is pending its CI interoperability run.
 
 ## Maintenance release authorization — 2026-11-08
 

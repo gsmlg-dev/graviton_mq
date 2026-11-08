@@ -7799,7 +7799,7 @@
   "amendments": [
     {
       "date": "2026-11-08",
-      "status": "UNCOMMITTED_NOT_REQUALIFIED",
+      "status": "COMMITTED_LINUX_LOCAL_PASS_INTEROP_PENDING",
       "summary": "Post-0.2.1 review fixes: expiry0 takeover ends the old session (Session Present 0, fresh session; previously resumed); packets pipelined after CONNECT are held during authentication, replayed after CONNACK or discarded on rejection; local durable logs are compacted. This ledger was not re-run.",
       "affected": [
         "BSESSION",
@@ -7812,7 +7812,8 @@
         "apps/graviton_mq_mqtt/test/broker_connect_hold_test.exs",
         "apps/graviton_mq_mqtt/test/broker_test.exs"
       ],
-      "pending": "Only macOS runs; Linux-only persistence tests, hosted CI and independent-peer requalification pending."
+      "commit": "696dca0",
+      "pending": "Linux-only persistence tests passed for 696dca0 on a local Linux host; independent-peer requalification pending."
     }
   ]
 }

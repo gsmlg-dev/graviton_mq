@@ -83,7 +83,7 @@ explicitly. A failed or uncertain compaction poisons storage like any other
 write failure. See [ADR 0008](adr/0008-local-durability-profiles.md) for the
 commit design. Evidence: `apps/graviton_mq_runtime/test/mqtt/persistence_test.exs`
 and the storage WAL compaction/crash/fault tests, which are Linux-only and
-remain UNVERIFIED on Linux until CI runs. The bounded
+passed for `696dca0` on a local NixOS Linux host on 2026-11-08. The bounded
 [G6 local durability exit](qualification/2026-10-30-g6-local-durability.md)
 passed its integrated gates and installed recovery consumers. Subsequent
 selected-profile G5/G7 acceptance is recorded in the matrix and G7 record.

@@ -82,19 +82,23 @@ dependent owners. VM/process memory loss has no WAL or restart recovery in G4.
 Interrupted possible publications can have an unknown outcome; the client must
 not infer successful disk storage or retry with an exactly-once claim.
 
-Since the 2026-11-08 maintenance changes, an unanswered queue call or an
-uncertain lease command (register, claim, settle or disconnect) fences only that
-queue instead of stopping the Manager. The Manager kills that queue's lease
+Since the 2026-11-08 maintenance changes, an unanswered or uncertain lease
+command (register, claim, settle or disconnect) or status/watch call fences
+only that queue instead of stopping the Manager. The Manager kills that queue's lease
 anchor, so the queue returns every claim held there when it next runs; it
 detaches the queue's attached Links with `amqp:internal-error` "queue is
 unavailable", refuses new attaches with the same error, and reports the queue as
-`:unavailable` in `amqp10_status/1`. A possible publication still closes its
-Connection with an unknown outcome. The fenced queue is probed every second
-outside the Manager and restored when it answers. Messages stay in the queue
+`:unavailable` in `amqp10_status/1`. An enqueue whose outcome is unknown (call
+timeout or storage uncertainty) only closes the publishing Connection without a
+disposition and does not fence: enqueue holds no lease, so no claim state
+diverges; a truly unresponsive queue is fenced by its next status or lease
+command, and a queue whose storage failed stays observable as
+`storage: :failed`. The fenced queue is probed every second outside the Manager and restored when it answers. Messages stay in the queue
 process. Remaining limit: the first unanswered call still blocks the Manager
 for the queue's internal 5-second call timeout. An actual queue crash still
 restarts later owners as above. Evidence: `amqp10_availability_test.exs` and
-`amqp10_boundaries_test.exs`; independent-peer requalification is pending.
+`amqp10_boundaries_test.exs`; independent-peer requalification of the
+unknown-enqueue change is pending its CI interoperability run.
 
 ## Local durable queues
 
@@ -138,7 +142,7 @@ the limit; otherwise admission fails closed, and a failed compaction poisons
 the queue. See [ADR 0008](adr/0008-local-durability-profiles.md) for the commit
 design. Evidence: `queue_compaction_test.exs` (platform-independent) and
 `durable_queue_test.exs` plus the storage WAL tests, which are Linux-only and
-remain UNVERIFIED on Linux until CI runs. TTL/absolute expiry, dead-letter actions, distributed
+passed for `696dca0` on a local NixOS Linux host on 2026-11-08. TTL/absolute expiry, dead-letter actions, distributed
 durability and hardware power-loss qualification remain outside this increment.
 G6 integrated gates and installed consumers are recorded separately from
 focused Proton/process/VM recovery evidence.
