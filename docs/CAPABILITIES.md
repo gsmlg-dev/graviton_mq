@@ -7,11 +7,11 @@ records 1,127 passing tests, hosted checks, public package/installation
 verification and the initial intermittent validation failures.
 The version-specific records below retain their original scope and results.
 
-The `0.3.0` release (in preparation, 2026-11-09) ships the post-0.2.1 review
+The published `0.3.0` release (2026-11-08 UTC) ships the post-0.2.1 review
 fixes described below. Its [qualification record](qualification/2026-11-09-v0.3.0-release.md)
 records hosted CI run 42501601934 for `438acf4`: 1,215 tests with all four
 independent peers, zero failures, plus the four-role soak and installed
-archive consumers. The 2026-11-08 notes below predate that run.
+archive consumers, and the verified Hex/GitHub publication. The 2026-11-08 notes below predate that run.
 
 Maintenance update, 2026-11-08 (committed as `696dca0`, unreleased): post-0.2.1
 review fixes are described in [active scope](ACTIVE_SCOPE.md). Rows below cite
