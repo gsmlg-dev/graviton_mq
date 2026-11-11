@@ -12,6 +12,9 @@ defmodule GravitonMQ.Runtime.MQTT.PersistenceTest do
     :ok
   end
 
+  # Each durable operation waits for a synchronous write; on a contended disk
+  # (63-418 ms per write observed 2026-11-11/12) 60 s is too small.
+  @tag timeout: 300_000
   test "repeated snapshots compact to the latest one instead of exhausting the log",
        %{tmp_dir: dir} do
     config = config(dir, 16_384)
@@ -33,7 +36,9 @@ defmodule GravitonMQ.Runtime.MQTT.PersistenceTest do
     durable = persistence.durable
     assert :ok = Persistence.close(persistence)
     assert [log] = log_files(dir)
-    assert log =~ ~r/\Aevents\.[1-9][0-9]*\.wal\z/
+    assert [_, generation] = Regex.run(~r/\Aevents\.([1-9][0-9]*)\.wal\z/, log)
+    # 300 snapshots in a 16 KiB log must compact more than once.
+    assert String.to_integer(generation) >= 2
 
     assert {:ok, reopened, _machine} = Persistence.open(config, machine, now(), wall())
     assert reopened.durable.position > durable.position

@@ -234,6 +234,9 @@ defmodule GravitonMQ.Runtime.AMQP10.DurableQueueTest do
     assert {:ok, 1025} = WAL.fold(owner, :origin, 0, fn _, _, count -> {:cont, count + 1} end)
   end
 
+  # Each durable operation waits for a synchronous write; on a contended disk
+  # (63-418 ms per write observed 2026-11-11/12) 60 s is too small.
+  @tag timeout: 300_000
   test "a small log limit compacts repeatedly and restart recovers the exact durable state",
        context do
     config = put_in(config(context, "compacting").persistence.max_log_bytes, 16_384)
@@ -265,7 +268,9 @@ defmodule GravitonMQ.Runtime.AMQP10.DurableQueueTest do
 
     files = File.ls!(queue_directory(config))
     assert [log] = Enum.filter(files, &String.starts_with?(&1, "events"))
-    assert log =~ ~r/\Aevents\.[1-9][0-9]*\.wal\z/
+    assert [_, generation] = Regex.run(~r/\Aevents\.([1-9][0-9]*)\.wal\z/, log)
+    # "Repeatedly" means at least two completed compactions.
+    assert String.to_integer(generation) >= 2
     assert File.stat!(Path.join(queue_directory(config), log)).size <= 16_384
 
     restored = open!(config)
@@ -282,6 +287,9 @@ defmodule GravitonMQ.Runtime.AMQP10.DurableQueueTest do
              end)
   end
 
+  # Each durable operation waits for a synchronous write; on a contended disk
+  # (63-418 ms per write observed 2026-11-11/12) 60 s is too small.
+  @tag timeout: 300_000
   test "a queue whose log already reached its limit compacts on open and accepts work", context do
     config = config(context, "stuck")
     queue = open!(config)
