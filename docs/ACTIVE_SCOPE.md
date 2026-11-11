@@ -1,5 +1,17 @@
 # Active implementation scope
 
+## P0–P3 implementation authorization — 2026-11-12
+
+The owner authorized sub-projects S0–S7 of the
+[P0–P3 design](superpowers/specs/2026-11-12-http-fetch-transport-and-p0-p3-design.md):
+hygiene, owned transport on `hell`/`ex_ssl` (TLS 1.3-only broker), AMQP SASL
+and client reconnect, MQTT topic aliases/subscription identifiers/shared
+subscriptions, performance/telemetry/TTL, MQTT over WebSocket via
+`http_web_socket` and `gaoxy_http`, and MQTT 3.1.1 runtime. UDP/QUIC,
+clustering/Raft, management UI, bridges, transactions and AMQP 0-9-1 remain
+excluded. Commit, push, version bump, release and publication are not
+authorized. No sub-project is complete until its recorded exit evidence exists.
+
 ## Release authorization — 2026-11-09
 
 The owner requested publication of the next version containing the
@@ -162,5 +174,4 @@ The [release qualification](qualification/2026-10-30-v0.2.0-release.md)
 records exact workflow links, archive checksums and profile limits. This
 post-publication documentation update changes no shipped library source.
 
-Agent Note has no explicitly configured project label in this checkout. Do
-not guess a label or search all notes; that limitation does not block work.
+Agent Note project: `graviton_mq` (see AGENTS.md).

@@ -1,5 +1,15 @@
 # Capability and qualification matrix
 
+## Current status (2026-11-12)
+
+Latest release: **0.3.0**, published from release commit `e63f29a`, whose
+library code is `438acf4`; hosted CI run 42501601934 for `438acf4` passed
+1,215 tests with all four independent peers (Mosquitto, Paho, Artemis and
+Proton), the four-role soak and installed consumers. The four network roles
+are qualified for the selected profiles in the table below; its limitation
+column lists what is not supported. Dated paragraphs further down are
+historical records.
+
 The published `0.2.1` maintenance release corrects AMQP transient send-capacity
 handling and rejects shared subscriptions before persistent MQTT-client admission.
 The [maintenance qualification](qualification/2026-11-08-v0.2.1-release.md)
@@ -21,9 +31,9 @@ NixOS Linux x86_64 host (Elixir 1.18.5/OTP 28, not the pinned `.tool-versions`),
 0 failures, including all Linux-only WAL/durable tests; independent-peer tests
 were excluded there. Hosted CI run 42500780476 passed `checks`; its
 interoperability job had one Proton failure (queue reported `:unavailable`
-instead of `storage: :failed` after a failed sync) and skipped later steps. A
-follow-up stops fencing on unknown enqueue outcomes; independent-peer
-requalification is PENDING its CI interoperability run.
+instead of `storage: :failed` after a failed sync) and skipped later steps. The
+follow-up `438acf4` stops fencing on unknown enqueue outcomes; its hosted CI
+run 42501601934 passed the independent-peer requalification.
 
 Working-tree evidence, initiated 2026-10-29 and rechecked 2026-10-30. Review baseline and checked HEAD:
 `66b4a6c161f521cb6b6379ad4f952dcdc7f3447a`. Existing uncommitted MQTT5-only
@@ -50,7 +60,7 @@ is inferred from unit or package tests.
 | MQTT5 client | OASIS MQTT5 §§3–4, 7; `apps/graviton_mq_client` and pure `GravitonMQ.MQTT.Client` | PASS: shared client/QoS2/terminal/property tests, shell/checkpoint/store/fault tests; [clause ledger](qualification/2026-10-30-mqtt5-clause-audit.md). 2026-11-08: content-change-only checkpoint rewrite (`mqtt_checkpoint_test.exs`; Linux `mqtt_persistence_fault_test.exs` passed locally on Linux) and socket/timer release on final transport loss (`mqtt_client_test.exs`) | PASS: Mosquitto2.1.2 send/receive, QoS0/1/2, negotiation, keep alive, TCP/TLS, negative ACKs and controlled reconnect; additional Paho2.1.0 metadata tests both directions | PASS: lost PUBACK/PUBREC/PUBCOMP, host-owned incoming delivery, session loss, owner/whole-VM recovery and failed/uncertain local synchronization | Memory and opt-in Linux local durable profiles; enhanced auth unavailable, Topic Alias Maximum0; local selected-profile qualification is recorded below |
 | MQTT5 broker | MQTT5 §§3–4, 7; pure Topic/Broker, `apps/graviton_mq_runtime/.../mqtt`, public host API | PASS: topic/session/Will/expiry/QoS2, runtime pressure/auth/privacy, checkpoint/WAL barrier tests. 2026-11-08: held post-CONNECT packets and takeover (`broker_connect_hold_test.exs`); WAL compaction (`mqtt/persistence_test.exs`, passed locally on Linux) | PASS: Mosquitto2.1.2/Paho2.1.0 TCP/TLS, host/network, real two-instance isolation, QoS2 cut/resume, mixed quota and ordered PUBREL resume; exact metadata live/retained/recovered | PASS: process/whole-VM recovery of session/subscription/retained/inflight/Will obligations; PUBACK/PUBREC/PUBCOMP withheld until durable-through; failed/uncertain sync closes admission | QoS0/1/2, configurable Maximum QoS0/1; aliases, shared subscriptions and Subscription Identifiers negotiated off; since 2026-11-08 an expiry-0 takeover ends the old session (Session Present 0; previously resumed) and compacted live state must fit `max_log_bytes`; local selected-profile qualification is recorded below |
 | AMQP1 client | OASIS AMQP1 Parts1–3; pure Endpoint/SessionEngine, `apps/graviton_mq_client/.../amqp10` | PASS: exact wire/message/array tests, bounded endpoint/session/credit/serial/settlement tests and shell/config/pressure tests; [clause ledger](qualification/2026-10-30-amqp10-clause-audit.md) | PASS: Artemis2.41.0 with Proton0.40.0 send/receive, fragmentation, release/redelivery, uint32 wrap, lost/unknown outcome and verified TLS including wrong-CA/hostname rejection; Proton late-settlement cases | PASS: bounded non-reading-peer failure, explicit failed/unknown completion and transport cleanup; reconnect/resumption and client process/VM recovery UNIMPLEMENTED | Volatile format0/no-SASL/initially-unsettled/receiver-first profile; homogeneous scalar/compound/described arrays supported; Link-name/error-path repairs are covered by the final gates; no protocol resumption |
-| AMQP1 broker | AMQP1 Parts1–3; Queue.Machine/Forwarding, `apps/graviton_mq_runtime/.../amqp10`, opt-in public lifecycle | PASS: independent queue model, pure protocol, runtime/auth/pressure, storage replay/fault/barrier tests. 2026-11-08: per-queue fencing and busy-Connection retry (`amqp10_availability_test.exs`, `amqp10_boundaries_test.exs`), active-once input (`connection_input_test.exs`), compaction replay (`queue_compaction_test.exs`); Linux `durable_queue_test.exs` and WAL `wal_compaction_test.exs`/`wal_crash_test.exs`/`wal_fault_test.exs` passed locally on Linux; independent-peer requalification pending | PASS: Proton0.40.0 fragmentation, zero credit, drain, annotations, settlement/release/redelivery, TCP/verified TLS, two-instance isolation and durable queue path | PASS: queue-owner/whole-VM recovery, abandoned lease release, Modified data, durable retirement and uncertain I/O; Accepted withheld until selected durable-through | Memory and opt-in local durable named move queues; volatile termini, no Link resumption; TTL/absolute-expiry refused; the first unanswered queue call still blocks the Manager for the queue's 5-second call timeout (a lease or status call then fences the queue; an enqueue only closes its Connection); compacted queue state must fit `max_log_bytes`; local selected-profile qualification is recorded below |
+| AMQP1 broker | AMQP1 Parts1–3; Queue.Machine/Forwarding, `apps/graviton_mq_runtime/.../amqp10`, opt-in public lifecycle | PASS: independent queue model, pure protocol, runtime/auth/pressure, storage replay/fault/barrier tests. 2026-11-08: per-queue fencing and busy-Connection retry (`amqp10_availability_test.exs`, `amqp10_boundaries_test.exs`), active-once input (`connection_input_test.exs`), compaction replay (`queue_compaction_test.exs`); Linux `durable_queue_test.exs` and WAL `wal_compaction_test.exs`/`wal_crash_test.exs`/`wal_fault_test.exs` passed locally on Linux; independent-peer requalification passed in CI run 42501601934 | PASS: Proton0.40.0 fragmentation, zero credit, drain, annotations, settlement/release/redelivery, TCP/verified TLS, two-instance isolation and durable queue path | PASS: queue-owner/whole-VM recovery, abandoned lease release, Modified data, durable retirement and uncertain I/O; Accepted withheld until selected durable-through | Memory and opt-in local durable named move queues; volatile termini, no Link resumption; TTL/absolute-expiry refused; the first unanswered queue call still blocks the Manager for the queue's 5-second call timeout (a lease or status call then fences the queue; an enqueue only closes its Connection); compacted queue state must fit `max_log_bytes`; local selected-profile qualification is recorded below |
 
 Empty lifecycle tests remain foundation evidence. G2 adds actual MQTT routing,
 dual-instance state isolation, network/host delivery and standalone/embedded
