@@ -13,8 +13,11 @@ defmodule GravitonMQ.Runtime.AMQP10.Queue do
   transition is synchronized before its effects escape. Recovery streams real
   logical events, validates stable identities and releases lost leases before
   admission. Failed/unknown storage freezes further transitions explicitly.
-  A call timeout returns `{:error, :unknown_outcome}` because an admitted command
-  may still execute. Queue loss is not proof that a message was never accepted.
+  A synchronous call timeout returns `{:error, :unknown_outcome}` because an
+  admitted command may still execute. Asynchronous callers (`send_request/3`)
+  classify a missed reply by taking the request back from their exchange:
+  a request the queue never took is never executed. Queue loss is not proof
+  that a message was never accepted.
 
   Claim byte limits use core charged units, including retained index and
   mutation data. A protocol adapter must separately bound its wire encoding.
@@ -25,7 +28,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Queue do
 
   alias GravitonMQ.Core.{Message, MessageId}
   alias GravitonMQ.Queue.{Event, Machine}
-  alias GravitonMQ.Runtime.AMQP10.Persistence
+  alias GravitonMQ.Runtime.AMQP10.{Persistence, QueueRequests}
 
   @max_generation 18_446_744_073_709_551_615
 
@@ -474,20 +477,24 @@ defmodule GravitonMQ.Runtime.AMQP10.Queue do
   defp success({:ok, _}, value), do: {:ok, value}
   defp success({:error, _} = error, _value), do: error
 
-  defp request(queue, message) do
-    # The exchange belongs to the caller and is destroyed on caller death.
-    # Incoming/outgoing GenServer debug events contain only an opaque handle
-    # and token, never request content or claimed messages.
+  @doc false
+  # Synchronous form used by boot wiring, the probe, the stand-in test queue
+  # and tests. The exchange belongs to the caller and is destroyed on caller
+  # death. GenServer debug events contain only an opaque handle and token,
+  # never request content or claimed messages.
+  def request(queue, message) do
     table = :ets.new(__MODULE__, [:set, :public])
     token = make_ref()
 
     try do
-      true = :ets.insert(table, {token, message})
+      true = :ets.insert(table, {token, {:request, message}})
 
       case GenServer.call(queue, {:execute, table, token}) do
         :ok ->
-          [{^token, result}] = :ets.take(table, token)
-          result
+          case :ets.take(table, token) do
+            [{^token, {:result, result}}] -> result
+            _ -> {:error, :queue_call_failed}
+          end
 
         {:error, _} = error ->
           error
@@ -505,11 +512,37 @@ defmodule GravitonMQ.Runtime.AMQP10.Queue do
     end
   end
 
+  @doc false
+  # Asynchronous form for the Manager and the status caller. `table` is a
+  # `:public` table owned by the caller; the reply is only `:ok`, the result
+  # stays in the table.
+  def send_request(queue, table, message) do
+    token = make_ref()
+    true = :ets.insert(table, {token, {:request, message}})
+    {:gen_server.send_request(queue, {:execute, table, token}), token}
+  end
+
+  @doc false
+  # Atomic take-back: `:not_executed`, `{:known, result}` or `:uncertain`.
+  def classify(table, token), do: QueueRequests.classify(:ets.take(table, token))
+
+  @doc false
+  # Interprets a `check_response/3` or `receive_response/2` result.
+  def response(table, token, {:reply, :ok}), do: classify(table, token)
+
+  def response(table, token, {:reply, {:error, _} = error}) do
+    :ets.delete(table, token)
+    {:known, error}
+  end
+
+  def response(table, token, {:error, {_reason, _server}}), do: classify(table, token)
+  def response(table, token, :timeout), do: classify(table, token)
+
   defp take_request(table, token, caller) do
     if :ets.info(table, :owner) == caller and :ets.info(table, :protection) == :public do
       case :ets.take(table, token) do
-        [{^token, message}] -> {:ok, message}
-        [] -> :abandoned
+        [{^token, {:request, message}}] -> {:ok, message}
+        _ -> :abandoned
       end
     else
       :abandoned
@@ -519,7 +552,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Queue do
   end
 
   defp put_result(table, token, result) do
-    :ets.insert(table, {token, result})
+    :ets.insert(table, {token, {:result, result}})
   rescue
     ArgumentError -> :ok
   end

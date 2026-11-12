@@ -306,6 +306,48 @@ defmodule GravitonMQ.Runtime.AMQP10.QueueTest do
     assert :ets.info(table) == :undefined
   end
 
+  test "asynchronous requests classify executed, taken-back and queue-down outcomes" do
+    queue = queue!()
+    table = :ets.new(:exchange, [:set, :public])
+    message = fn raw -> {:enqueue, raw, format(), %Message.Index{}, false} end
+
+    {request, token} = Queue.send_request(queue, table, message.("executed"))
+    assert {:reply, :ok} = reply = :gen_server.receive_response(request, 1_000)
+    assert {:known, {:ok, :accepted_in_memory}} = Queue.response(table, token, reply)
+    assert :ets.tab2list(table) == []
+
+    :ok = :sys.suspend(queue)
+
+    {request, token} =
+      try do
+        {request, token} = Queue.send_request(queue, table, message.("taken-back"))
+        # Exactly one of this take and the queue's take wins.
+        assert :not_executed = Queue.classify(table, token)
+        {request, token}
+      after
+        :ok = :sys.resume(queue)
+      end
+
+    assert {:reply, :ok} = :gen_server.receive_response(request, 1_000)
+    assert Queue.classify(table, token) == :uncertain
+    assert Queue.status(queue).messages == 1
+
+    {status_request, token} = Queue.send_request(queue, table, :status)
+
+    assert {:known, %{messages: 1}} =
+             Queue.response(table, token, :gen_server.receive_response(status_request, 1_000))
+
+    stopped = queue!()
+    monitor = Process.monitor(stopped)
+    assert Queue.status(stopped).messages == 0
+    :ok = GenServer.stop(stopped)
+    assert_receive {:DOWN, ^monitor, :process, ^stopped, :normal}
+    {request, token} = Queue.send_request(stopped, table, message.("never"))
+    assert {:error, {:noproc, _}} = down = :gen_server.receive_response(request, 1_000)
+    assert :not_executed = Queue.response(table, token, down)
+    assert :ets.tab2list(table) == []
+  end
+
   defp config(queue_options \\ [], extra \\ []),
     do: Map.merge(%{queue_options: queue_options, max_connections: 4}, Map.new(extra))
 
