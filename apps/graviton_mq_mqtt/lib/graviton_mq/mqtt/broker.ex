@@ -12,7 +12,7 @@ defmodule GravitonMQ.MQTT.Broker do
   alias GravitonMQ.MQTT.Packet.{Connect, Connack, Publish, Puback, Subscribe, Suback}
   alias GravitonMQ.MQTT.Packet.{Unsubscribe, Unsuback, Pingreq, Pingresp, Disconnect}
   alias GravitonMQ.MQTT.Packet.{Pubrec, Pubrel, Pubcomp}
-  alias GravitonMQ.MQTT.Topic
+  alias GravitonMQ.MQTT.{Topic, TopicAlias}
 
   @defaults %{
     max_connections: 128,
@@ -41,7 +41,13 @@ defmodule GravitonMQ.MQTT.Broker do
     max_host_outstanding: 128,
     max_demand: 128,
     auth_timeout: 5_000,
-    dispatch_retry_interval: 1_000
+    dispatch_retry_interval: 1_000,
+    topic_alias_maximum: 10,
+    max_outbound_topic_aliases: 0,
+    # Static worst case: max_connections x (inbound + outbound aliases) x
+    # min(65_535, max_packet_size) bytes. Never enforced by refusing an alias
+    # (MQTT-3.3.2-12). 128 MiB admits the defaults (83,884,800 bytes).
+    max_alias_bytes: 134_217_728
   }
 
   defstruct [
@@ -71,7 +77,12 @@ defmodule GravitonMQ.MQTT.Broker do
       if limits.max_packet_size in 1..268_435_460 and limits.receive_maximum in 1..65_535 and
            limits.max_inflight in 1..65_535 and limits.maximum_qos in 0..2 and
            limits.auth_timeout > 0 and
-           limits.dispatch_retry_interval > 0 do
+           limits.dispatch_retry_interval > 0 and
+           limits.topic_alias_maximum in 0..65_535 and
+           limits.max_outbound_topic_aliases in 0..65_535 and
+           limits.max_connections *
+             (limits.topic_alias_maximum + limits.max_outbound_topic_aliases) *
+             min(65_535, limits.max_packet_size) <= limits.max_alias_bytes do
         {:ok,
          %__MODULE__{limits: limits, codec: %Limits{max_packet_size: limits.max_packet_size}}}
       else
@@ -104,7 +115,8 @@ defmodule GravitonMQ.MQTT.Broker do
           incoming: %{},
           requests: %{},
           held: [],
-          held_bytes: 0
+          held_bytes: 0,
+          aliases: TopicAlias.new(0, 0)
         }
 
         {%{state | connections: Map.put(state.connections, id, conn)}, []}
@@ -916,7 +928,15 @@ defmodule GravitonMQ.MQTT.Broker do
             | phase: :connected,
               client_id: client_id,
               held: [],
-              held_bytes: 0
+              held_bytes: 0,
+              aliases:
+                TopicAlias.new(
+                  state.limits.topic_alias_maximum,
+                  min(
+                    Keyword.get(packet.properties, :topic_alias_maximum, 0),
+                    state.limits.max_outbound_topic_aliases
+                  )
+                )
           }
 
           state = state |> put_session(client_id, session) |> put_conn(id, conn)
@@ -926,7 +946,7 @@ defmodule GravitonMQ.MQTT.Broker do
             wildcard_subscription_available: 1,
             shared_subscription_available: 0,
             subscription_identifier_available: 0,
-            topic_alias_maximum: 0,
+            topic_alias_maximum: state.limits.topic_alias_maximum,
             maximum_packet_size: state.limits.max_packet_size,
             receive_maximum: state.limits.receive_maximum
           ]

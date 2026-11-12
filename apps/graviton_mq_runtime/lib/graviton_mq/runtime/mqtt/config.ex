@@ -2,13 +2,15 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
   @moduledoc false
 
   alias GravitonMQ.MQTT.Codec.Limits
+  alias GravitonMQ.MQTT.Broker, as: Machine
 
   @machine_keys ~w(max_connections max_sessions max_subscriptions max_pending_deliveries
     max_pending_bytes max_retained max_retained_bytes max_wills max_will_bytes
     max_prepared max_prepared_bytes max_inflight maximum_qos max_packet_size receive_maximum
     max_host_subscriptions max_host_outstanding max_demand auth_timeout max_session_bytes
     max_subscription_bytes max_offline_deliveries max_offline_bytes max_writes max_write_bytes
-    max_incoming_bytes dispatch_retry_interval)a
+    max_incoming_bytes dispatch_retry_interval topic_alias_maximum max_outbound_topic_aliases
+    max_alias_bytes)a
   @keys @machine_keys ++ ~w(versions listeners auth host_principal auth_concurrency
     tick_interval connect_timeout send_timeout max_writer_packets max_writer_bytes persistence)a
   @persistence_keys ~w(directory stream_id max_snapshot_bytes max_log_bytes fault_injector)a
@@ -51,7 +53,8 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
          ) and
            is_integer(config.auth_concurrency) and config.auth_concurrency in 1..128 and
            is_integer(config.max_writer_packets) and config.max_writer_packets > 0 and
-           is_integer(config.max_writer_bytes) and config.max_writer_bytes > 0,
+           is_integer(config.max_writer_bytes) and config.max_writer_bytes > 0 and
+           match?({:ok, _}, Machine.new(config.machine_options)),
          do: {:ok, config},
          else: invalid()
     else
@@ -79,6 +82,9 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
 
         {:ok, value} when key in [:max_inflight, :receive_maximum] ->
           is_integer(value) and value in 1..65_535
+
+        {:ok, value} when key in [:topic_alias_maximum, :max_outbound_topic_aliases] ->
+          is_integer(value) and value in 0..65_535
 
         {:ok, value} when key == :max_packet_size ->
           is_integer(value) and value in 1..268_435_460

@@ -84,7 +84,7 @@ defmodule GravitonMQ.MQTT.BrokerTest do
     assert properties[:maximum_qos] == 1
     assert properties[:shared_subscription_available] == 0
     assert properties[:subscription_identifier_available] == 0
-    assert properties[:topic_alias_maximum] == 0
+    assert properties[:topic_alias_maximum] == 10
   end
 
   test "publication admission installs every recipient and retained atomically before PUBACK" do

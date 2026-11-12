@@ -74,4 +74,28 @@ defmodule GravitonMQ.Runtime.MQTT.ConfigTest do
                Config.build(Keyword.merge([auth: :anonymous], options))
     end
   end
+
+  test "Topic Alias limits pass through and are validated by the machine" do
+    assert {:ok, config} =
+             Config.build(
+               auth: :anonymous,
+               topic_alias_maximum: 0,
+               max_outbound_topic_aliases: 4,
+               max_alias_bytes: 134_217_728
+             )
+
+    assert config.machine_options[:topic_alias_maximum] == 0
+    assert config.machine_options[:max_outbound_topic_aliases] == 4
+
+    for options <- [
+          [topic_alias_maximum: -1],
+          [topic_alias_maximum: 65_536],
+          [max_outbound_topic_aliases: 65_536],
+          [max_alias_bytes: 0],
+          [max_connections: 4_096, topic_alias_maximum: 65_535]
+        ] do
+      assert {:error, :invalid_mqtt_options} = Config.build([auth: :anonymous] ++ options),
+             inspect(options)
+    end
+  end
 end
