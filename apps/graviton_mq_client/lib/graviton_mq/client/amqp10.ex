@@ -5,13 +5,15 @@ defmodule GravitonMQ.Client.AMQP10 do
   alias GravitonMQ.AMQP10.{Endpoint, Frame}
   alias GravitonMQ.AMQP10.Codec.{Error, Performative, Stream}
   alias GravitonMQ.AMQP10.Codec.Frame, as: FrameCodec
+  alias GravitonMQ.AMQP10.SASL.{Machine, Plain}
   alias GravitonMQ.Client.AMQP10.Config
   alias GravitonMQ.Client.Transport
 
   def start_link(options) do
     with {:ok, config} <- Config.build(options),
          {:ok, endpoint} <- Endpoint.new(config.endpoint_options),
-         {:ok, stream} <- Stream.new(config.limits) do
+         {:ok, stream} <-
+           Stream.new(config.limits, accept: if(config.sasl == :none, do: [0], else: [0, 3])) do
       registration = if config.name, do: [name: config.name], else: []
       GenServer.start_link(__MODULE__, {config, endpoint, stream}, registration)
     end
@@ -29,6 +31,7 @@ defmodule GravitonMQ.Client.AMQP10 do
        config: config,
        endpoint: endpoint,
        stream: stream,
+       sasl: nil,
        socket: nil,
        input: <<>>,
        drain_pending: false,
@@ -45,7 +48,7 @@ defmodule GravitonMQ.Client.AMQP10 do
   defp continued(:connect, state) do
     state =
       case Transport.connect(state.config) do
-        {:ok, socket} -> state |> Map.put(:socket, socket) |> step(:start) |> arm_socket()
+        {:ok, socket} -> state |> Map.put(:socket, socket) |> begin() |> arm_socket()
         {:error, reason} -> step(state, {:transport_down, {:connect, transport_reason(reason)}})
       end
 
@@ -110,23 +113,29 @@ defmodule GravitonMQ.Client.AMQP10 do
     do: received(state, bytes)
 
   defp info({kind, socket}, %{socket: socket} = state) when kind in [:tcp_closed, :ssl_closed],
-    do: {:noreply, step(state, {:transport_down, :closed})}
+    do: {:noreply, route(state, {:transport_down, :closed})}
 
   defp info({kind, socket, reason}, %{socket: socket} = state)
        when kind in [:tcp_error, :ssl_error],
-       do: {:noreply, step(state, {:transport_down, {:transport, transport_reason(reason)}})}
+       do: {:noreply, route(state, {:transport_down, {:transport, transport_reason(reason)}})}
 
   defp info({:write_result, generation, id, result}, state) do
-    if generation == state.endpoint.generation,
-      do: {:noreply, step(state, {:write_result, id, result})},
-      else: {:noreply, state}
+    cond do
+      generation != state.endpoint.generation -> {:noreply, state}
+      match?({:sasl, _}, id) -> {:noreply, sasl_step(state, {:write_result, id, result})}
+      true -> {:noreply, step(state, {:write_result, id, result})}
+    end
   end
 
   defp info({:wake, generation, key, token}, state) do
     case Map.get(state.timers, key) do
       {_timer, ^generation, ^token} ->
         state = %{state | timers: Map.delete(state.timers, key)}
-        {:noreply, step(state, {:timeout, key, token})}
+        event = {:timeout, key, token}
+
+        if key == Machine.deadline_key(),
+          do: {:noreply, sasl_step(state, event)},
+          else: {:noreply, step(state, event)}
 
       _ ->
         {:noreply, state}
@@ -151,7 +160,7 @@ defmodule GravitonMQ.Client.AMQP10 do
     if byte_size(bytes) + byte_size(state.input) + byte_size(state.stream.buffer) >
          state.config.max_input_bytes do
       error = Error.new(:frame_decode, :limit_exceeded, :input_buffer_limit)
-      {:noreply, step(state, {:decode_error, error})}
+      {:noreply, route(state, {:decode_error, error})}
     else
       state =
         drain(%{state | input: state.input <> bytes}, state.config.max_input_frames_per_turn)
@@ -173,13 +182,13 @@ defmodule GravitonMQ.Client.AMQP10 do
             {:frame, frame} -> {:frame, frame}
           end
 
-        state |> Map.merge(%{stream: stream, input: rest}) |> step(event) |> drain(remaining - 1)
+        state |> Map.merge(%{stream: stream, input: rest}) |> route(event) |> drain(remaining - 1)
 
       {:more, stream} ->
         %{state | stream: stream, input: <<>>}
 
       {:error, error} ->
-        step(%{state | input: <<>>}, {:decode_error, error})
+        route(%{state | input: <<>>}, {:decode_error, error})
     end
   end
 
@@ -281,6 +290,72 @@ defmodule GravitonMQ.Client.AMQP10 do
     execute(%{state | endpoint: endpoint, link_locks: link_locks}, effects)
   end
 
+  defp begin(%{config: %{sasl: :none}} = state), do: step(state, :start)
+
+  defp begin(state) do
+    with {:ok, credentials} <- credentials(state.config.sasl),
+         {:ok, machine} <-
+           Machine.new(
+             role: :client,
+             credentials: credentials,
+             hostname: Keyword.get(state.config.endpoint_options, :hostname),
+             timeout_ms: state.config.sasl_timeout,
+             generation: state.endpoint.generation
+           ) do
+      sasl_step(%{state | sasl: machine}, :start)
+    else
+      _invalid -> step(state, {:transport_down, :invalid_sasl_credentials})
+    end
+  end
+
+  # A password provider is evaluated here, once per connect; its result lives
+  # only in the machine, which drops it once sasl-init is emitted.
+  defp credentials({:anonymous, nil}), do: {:ok, :anonymous}
+  defp credentials({:anonymous, trace}), do: {:ok, {:anonymous, trace}}
+
+  defp credentials({:plain, username, password, authzid}) do
+    password = if is_function(password, 0), do: password.(), else: password
+    Plain.new(username, password, authzid)
+  catch
+    _kind, _reason -> {:error, :invalid_plain_message}
+  end
+
+  # Input belongs to the SASL machine until it starts the Endpoint or closes.
+  defp route(state, event) do
+    if state.sasl != nil and Machine.active?(state.sasl),
+      do: sasl_step(state, event),
+      else: step(state, event)
+  end
+
+  defp sasl_step(state, event) do
+    facts = %{generation: state.endpoint.generation, now_ms: now(), event: event}
+    {machine, effects} = Machine.step(state.sasl, facts)
+
+    # A failed `expect_header` switch re-enters the machine; once that nested
+    # step has replaced the machine, this step's remaining effects are stale.
+    Enum.reduce_while(effects, %{state | sasl: machine}, fn effect, state ->
+      state = sasl_effect(effect, state)
+      if state.sasl == machine, do: {:cont, state}, else: {:halt, state}
+    end)
+  end
+
+  defp sasl_effect({:send_bytes, generation, id, bytes}, state),
+    do: write(state, generation, id, {:ok, bytes})
+
+  defp sasl_effect({:wake_at, _, _, _, _} = wake, state), do: effect(wake, state)
+  defp sasl_effect({:cancel_wake, _, _, _} = cancel, state), do: effect(cancel, state)
+
+  defp sasl_effect({:expect_header, accept}, state) do
+    case Stream.expect_header(state.stream, accept) do
+      {:ok, stream} -> %{state | stream: stream}
+      {:error, error} -> route(state, {:decode_error, error})
+    end
+  end
+
+  defp sasl_effect({:start_endpoint, nil}, state), do: step(state, :start)
+  defp sasl_effect({:close, reason}, state), do: step(state, {:transport_down, reason})
+  defp sasl_effect(_informational, state), do: state
+
   defp execute(state, effects), do: Enum.reduce(effects, state, &effect/2)
 
   defp effect({:send_header, generation, id, bytes}, state),
@@ -378,7 +453,7 @@ defmodule GravitonMQ.Client.AMQP10 do
   defp arm_socket(state) do
     case Transport.active_once(state.config.transport, state.socket) do
       :ok -> state
-      {:error, reason} -> step(state, {:transport_down, {:transport, transport_reason(reason)}})
+      {:error, reason} -> route(state, {:transport_down, {:transport, transport_reason(reason)}})
     end
   end
 

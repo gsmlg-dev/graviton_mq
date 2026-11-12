@@ -2,7 +2,16 @@ defmodule GravitonMQ.AMQP10Client do
   @moduledoc """
   Independently supervised AMQP 1.0 network client.
 
-  The initial profile uses AMQP without SASL, non-dynamic volatile termini,
+  SASL is opt-in: `sasl: :none` (default, raw `AMQP 0 1 0 0`), `:anonymous`,
+  `{:anonymous, trace}`, `{:plain, username, password}` or
+  `{:plain, username, password, authzid: authzid}`; `password` may be a
+  zero-arity function evaluated at connect. PLAIN over `transport: :tcp`
+  requires `allow_insecure_plain: true`; `sasl_timeout` (1..10_000 ms,
+  default 5_000) bounds the exchange. A SASL client never falls back to raw
+  AMQP. Failures disconnect with `{:sasl, :auth | :sys | :sys_perm | :sys_temp
+  | {:unknown, code}}`, `:sasl_not_offered`, `:sasl_mechanism_not_offered`,
+  `:sasl_protocol_error`, `:sasl_timeout` or `:invalid_sasl_credentials`.
+  The profile uses non-dynamic volatile termini,
   format-zero messages, unsettled senders and receiver-first settlement.
   TCP and verified TLS are available. Reconnect and session resumption are not
   implemented: a new owner starts a new connection without implicit replay.
