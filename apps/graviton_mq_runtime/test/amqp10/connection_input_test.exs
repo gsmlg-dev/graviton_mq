@@ -106,6 +106,50 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 4_000
   end
 
+  # T6 (spec §4.3; gsmlg-dev/http_fetch#169 fixed in ex_ssl rc.17). Listener
+  # sockets get the runtime-owned active_chunk_size: 16_384 from HellHandoff
+  # (its own test bounds every delivery); this hand-made server socket gets
+  # the same option. Without it ex_ssl coalesces the read-ahead into one
+  # delivery and the smallest max_input_bytes closes the connection.
+  @tag timeout: 30_000
+  test "more than 1 MiB of frames pipelined to a suspended TLS Connection are processed without an input-limit close" do
+    {socket, peer} = TLS.server_pair!(TLS.certificates!())
+    on_exit(fn -> :ssl.close(peer) end)
+    :ok = SSL.setopts(socket, active_chunk_size: 16_384)
+    config = config!(max_input_bytes: 65_536)
+    connection = start_supervised!({Connection, {config, relay!(), :tls}}, id: make_ref())
+    :ok = SSL.controlling_process(socket, connection)
+    send(connection, {:accepted, socket})
+    :ok = :ssl.send(peer, @header)
+    assert {:ok, @header} = :ssl.recv(peer, 8, 1_000)
+    {:ok, <<size::32, _::binary>> = frame_header} = :ssl.recv(peer, 8, 1_000)
+    {:ok, _} = :ssl.recv(peer, size - byte_size(frame_header), 1_000)
+    heartbeats = :binary.copy(heartbeat(), 140_000)
+    open = wire(%Open{container_id: Value.string("pipelined")})
+    assert byte_size(heartbeats) > 1_048_576
+    :ok = :sys.suspend(connection)
+
+    sender =
+      try do
+        sender = Task.async(fn -> :ssl.send(peer, [heartbeats, open]) end)
+        # Let ex_ssl read ahead while the Connection cannot arm.
+        Process.sleep(300)
+        sender
+      after
+        :ok = :sys.resume(connection)
+      end
+
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "pipelined"}}},
+                   15_000
+
+    assert :ok = Task.await(sender, 15_000)
+    refute_received {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _}}}
+
+    # An oversize frame is still rejected: the broker answers with Close{error}.
+    :ok = :ssl.send(peer, <<1_000_000::32, 2, 0, 0::16>>)
+    assert %Close{error: %{}} = read_tls_pdu(peer)
+  end
+
   # Messages the connection receives while nothing happens on its socket.
   defp idle_messages(connection, interval) do
     :erlang.trace(connection, true, [:receive, {:tracer, self()}])
@@ -206,6 +250,14 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     monitor = Process.monitor(pid)
     _ = :sys.get_state(pid)
     monitor
+  end
+
+  defp read_tls_pdu(peer) do
+    {:ok, <<size::32, _::binary>> = header} = :ssl.recv(peer, 8, 2_000)
+    {:ok, body} = if size > 8, do: :ssl.recv(peer, size - 8, 2_000), else: {:ok, <<>>}
+    {:ok, frame, <<>>} = Frame.decode(header <> body)
+    {:ok, pdu, _payload} = Performative.decode(frame.body)
+    pdu
   end
 
   defp relay! do

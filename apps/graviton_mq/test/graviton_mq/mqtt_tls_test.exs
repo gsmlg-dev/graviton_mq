@@ -4,7 +4,7 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
   use ExUnit.Case, async: true
 
   alias GravitonMQ.MQTT.Codec.Packet
-  alias GravitonMQ.MQTT.Packet.{Connack, Suback}
+  alias GravitonMQ.MQTT.Packet.{Connack, Disconnect, Suback, Unsuback}
   alias GravitonMQ.Runtime.Test.TLS
 
   @compile {:no_warn_undefined, :ssl}
@@ -190,6 +190,50 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
     assert fill_until_blocked(instance, owner, writer)
     assert_receive {:DOWN, ^monitor, :process, ^connection, _reason}, 4_000
     assert eventually(fn -> status(instance).connections == 0 end)
+  end
+
+  # T6 (spec §4.3; gsmlg-dev/http_fetch#169 fixed in ex_ssl rc.17). The
+  # runtime sets active_chunk_size: 16_384 on TLS listeners. The Connection is
+  # a sensitive process (no tracing), so its own bound observes the chunks:
+  # it closes on held + arriving bytes > max_packet_size + 16_384 = 16_512, so
+  # every delivery of the read-ahead stays within 16 KiB + 128 bytes.
+  test "more than 1 MiB of small packets pipelined to a suspended TLS Connection are all processed in order",
+       %{certificates: certificates} do
+    instance = broker(certificates, max_packet_size: 128, max_writer_packets: 100_000)
+    socket = tls_connected(port(instance), certificates, "pipeline")
+    connection = connection!(instance)
+    monitor = monitor!(connection)
+    count = 12_000
+    filter = "pipeline/" <> String.duplicate("f", 81)
+    # UNSUBSCRIBE of an absent filter: 97 bytes, answered by UNSUBACK 0x11.
+    packets =
+      for id <- 1..count, into: <<>>, do: <<0xA2, 95, id::16, 0, 90::16, filter::binary>>
+
+    assert byte_size(packets) > 1_048_576
+    :ok = :sys.suspend(connection)
+
+    sender =
+      try do
+        sender = Task.async(fn -> :ssl.send(socket, [packets, <<0xC0, 0>>]) end)
+        # Let ex_ssl read ahead while the Connection cannot arm.
+        Process.sleep(300)
+        sender
+      after
+        :ok = :sys.resume(connection)
+      end
+
+    deadline = System.monotonic_time(:millisecond) + 15_000
+    {acks, rest} = receive_packets(socket, count, <<>>, deadline)
+    assert Enum.all?(acks, &match?(%Unsuback{reason_codes: [0x11]}, &1))
+    assert Enum.map(acks, & &1.packet_id) == Enum.to_list(1..count)
+    {[pingresp], <<>>} = receive_packets(socket, 1, rest, deadline)
+    assert pingresp.__struct__ == GravitonMQ.MQTT.Packet.Pingresp
+    assert :ok = Task.await(sender, 15_000)
+    refute_received {:DOWN, ^monitor, :process, ^connection, _reason}
+
+    # The per-packet limit still applies.
+    :ok = :ssl.send(socket, <<0x30, 0xFF, 0x7F>>)
+    assert %Disconnect{reason_code: 0x95} = receive_packet(socket)
   end
 
   # Helpers (used by all MQTT TLS tests).
