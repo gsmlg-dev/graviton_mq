@@ -33,7 +33,7 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
     end)
   end
 
-  defp attach_as(state, id, client_id, options \\ []) do
+  defp attach_as(state, id, client_id, options) do
     {state, []} = Broker.transition(state, {:connection_open, id, 1, 0})
 
     connect = %Connect{
@@ -245,5 +245,127 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
       })
 
     assert disconnected?(effects, :pub, 0x95)
+  end
+
+  defp publish_all(state, id, topics) do
+    Enum.reduce(topics, {state, []}, fn topic, {state, acc} ->
+      {state, effects} = packet(state, id, %Publish{topic: topic, payload: topic})
+      {state, acc ++ effects}
+    end)
+  end
+
+  test "outbound aliases are bounded by the client maximum and the broker cap (MQTT-3.1.2-26/27)" do
+    {state, _} = attach(new(max_outbound_topic_aliases: 2), :pub)
+    {state, _} = attach(state, :sub, properties: [topic_alias_maximum: 5])
+    {state, _} = subscribe(state, :sub, [{"o/#", 0}])
+    {_state, effects} = publish_all(state, :pub, ["o/a", "o/a", "o/b", "o/c", "o/c", "o/b"])
+
+    assert Enum.map(publishes(effects, :sub), &{&1.topic, &1.properties[:topic_alias]}) ==
+             [{"o/a", 1}, {"", 1}, {"o/b", 2}, {"o/c", nil}, {"o/c", nil}, {"", 2}]
+  end
+
+  test "the default broker cap and a client maximum of zero never send aliases" do
+    for {options, properties} <- [
+          {[], [topic_alias_maximum: 5]},
+          {[max_outbound_topic_aliases: 5], []}
+        ] do
+      {state, _} = attach(new(options), :pub)
+      {state, _} = attach(state, :sub, properties: properties)
+      {state, _} = subscribe(state, :sub, [{"o/#", 0}])
+      {_state, effects} = publish_all(state, :pub, ["o/a", "o/a"])
+
+      assert Enum.map(publishes(effects, :sub), &{&1.topic, &1.properties[:topic_alias]}) ==
+               [{"o/a", nil}, {"o/a", nil}]
+    end
+  end
+
+  test "a reconnect starts a new outbound table and retransmits the full topic" do
+    {state, _} = attach(new(max_outbound_topic_aliases: 2), :pub)
+
+    {state, _} =
+      attach(state, :sub, properties: [topic_alias_maximum: 2, session_expiry_interval: 60])
+
+    {state, _} = subscribe(state, :sub, [{"r", 1}])
+    {state, _} = packet(state, :pub, %Publish{topic: "r", payload: "1", qos: 1, packet_id: 1})
+    {state, _} = packet(state, :pub, %Publish{topic: "r", payload: "2", qos: 1, packet_id: 2})
+    {state, _} = Broker.transition(state, {:connection_down, :sub, 1, :abnormal, 2})
+
+    {_state, effects} =
+      attach_as(state, :sub_again, "sub",
+        clean_start: false,
+        properties: [topic_alias_maximum: 2, session_expiry_interval: 60]
+      )
+
+    assert [
+             %Publish{topic: "r", dup: true, properties: first},
+             %Publish{topic: "", dup: true, properties: second}
+           ] = publishes(effects, :sub_again)
+
+    assert first[:topic_alias] == 1 and second[:topic_alias] == 1
+  end
+
+  test "a new alias that would exceed the peer Maximum Packet Size is not assigned" do
+    # The limit admits CONNACK/SUBACK and the full-topic PUBLISH, but not the
+    # 3 extra bytes of a first alias assignment.
+    payload = String.duplicate("a", 100)
+    {:ok, bytes} = Packet.encode(%Publish{topic: "s", payload: payload})
+    {state, _} = attach(new(max_outbound_topic_aliases: 2), :pub)
+
+    {state, _} =
+      attach(state, :sub,
+        properties: [topic_alias_maximum: 2, maximum_packet_size: byte_size(bytes)]
+      )
+
+    {state, _} = subscribe(state, :sub, [{"s", 0}])
+    {state, effects} = packet(state, :pub, %Publish{topic: "s", payload: payload})
+    assert [%Publish{topic: "s", properties: []}] = publishes(effects, :sub)
+    assert state.connections[:sub].aliases.outbound == %{}
+  end
+
+  test "an undeliverable oversized publication records no outbound alias" do
+    {state, _} = attach(new(max_outbound_topic_aliases: 2), :pub)
+
+    {state, _} =
+      attach(state, :sub, properties: [topic_alias_maximum: 2, maximum_packet_size: 64])
+
+    {state, _} = subscribe(state, :sub, [{"s/#", 0}])
+
+    {state, effects} =
+      packet(state, :pub, %Publish{topic: "s/big", payload: String.duplicate("b", 100)})
+
+    assert publishes(effects, :sub) == []
+    assert state.connections[:sub].aliases.outbound == %{}
+
+    {state, effects} = publish_all(state, :pub, ["s/small", "s/big"])
+
+    assert Enum.map(publishes(effects, :sub), &{&1.topic, &1.properties[:topic_alias]}) ==
+             [{"s/small", 1}, {"s/big", 2}]
+
+    assert state.connections[:sub].aliases.outbound == %{"s/small" => 1, "s/big" => 2}
+  end
+
+  test "a quota-suppressed publication records no outbound alias until it is sent" do
+    {state, _} = attach(new(max_outbound_topic_aliases: 2), :pub)
+
+    {state, _} =
+      attach(state, :sub, properties: [topic_alias_maximum: 2, receive_maximum: 1])
+
+    {state, _} = subscribe(state, :sub, [{"q/#", 1}])
+
+    {state, first} =
+      packet(state, :pub, %Publish{topic: "q/a", payload: "1", qos: 1, packet_id: 1})
+
+    {state, held} =
+      packet(state, :pub, %Publish{topic: "q/b", payload: "2", qos: 1, packet_id: 2})
+
+    assert [%Publish{topic: "q/a", packet_id: sent_id, properties: [topic_alias: 1]}] =
+             publishes(first, :sub)
+
+    assert publishes(held, :sub) == []
+    assert state.connections[:sub].aliases.outbound == %{"q/a" => 1}
+
+    {state, released} = packet(state, :sub, %Puback{packet_id: sent_id}, 2)
+    assert [%Publish{topic: "q/b", properties: [topic_alias: 2]}] = publishes(released, :sub)
+    assert state.connections[:sub].aliases.outbound == %{"q/a" => 1, "q/b" => 2}
   end
 end

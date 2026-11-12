@@ -2312,9 +2312,17 @@ defmodule GravitonMQ.MQTT.Broker do
         packet_id = if entry.qos > 0, do: entry.packet_id || free_packet_id(session), else: nil
         packet = recipient_packet(entry, packet_id, now)
 
+        # D2: deliverable iff the full topic fits (a reconnect retransmits it
+        # with an empty table); the alias form is used only if it also fits.
+        # The assigned table is kept only when the aliased packet is emitted.
+        {aliases, wire} = TopicAlias.assign(conn.aliases, packet)
+
+        {aliases, wire} =
+          if outbound_fits?(state, conn, wire), do: {aliases, wire}, else: {conn.aliases, packet}
+
         if outbound_fits?(state, conn, packet) do
           {state, effects} =
-            send_packet(state, id, packet, {:delivery, op.recipient, entry.id, entry.qos}, now)
+            send_packet(state, id, wire, {:delivery, op.recipient, entry.id, entry.qos}, now)
 
           if current?(state, id, generation) and Map.has_key?(state.sessions, op.recipient) do
             entry = %{
@@ -2329,11 +2337,8 @@ defmodule GravitonMQ.MQTT.Broker do
             state = put_delivery(state, :network, op.recipient, entry)
             session = state.sessions[op.recipient]
             conn = state.connections[id]
-
-            state =
-              if entry.qos > 0,
-                do: put_conn(state, id, %{conn | send_quota: conn.send_quota - 1}),
-                else: state
+            quota = if entry.qos > 0, do: conn.send_quota - 1, else: conn.send_quota
+            state = put_conn(state, id, %{conn | send_quota: quota, aliases: aliases})
 
             state =
               put_session(state, op.recipient, %{
