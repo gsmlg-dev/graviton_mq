@@ -129,6 +129,17 @@ def main():
         contents = contents.replace("<persistence-enabled>false</persistence-enabled>", "<persistence-enabled>false</persistence-enabled>\n<security-enabled>true</security-enabled>\n<jmx-management-enabled>false</jmx-management-enabled>")
         config.write_text(contents)
         (args.logs / "artemis-config.xml").write_text(contents)
+        # --allow-anonymous makes GuestLoginModule "sufficient" after the
+        # properties module, so a wrong PLAIN password would silently fall back
+        # to the guest role. credentialsInvalidate=true keeps anonymous peers on
+        # the guest role but refuses peers that present invalid credentials.
+        login = instance / "artemis/etc/login.config"
+        login_contents, count = re.subn(r"(GuestLoginModule\s+sufficient)", r"\1\n       credentialsInvalidate=true",
+                                        login.read_text())
+        if count != 1:
+            raise ValueError("Artemis login.config template changed")
+        login.write_text(login_contents)
+        (args.logs / "artemis-login.config").write_text(login_contents)
         with (args.logs / "artemis.log").open("w") as log:
             amqp = subprocess.Popen([str(instance / "artemis/bin/artemis"), "run"], env=env, stdout=log, stderr=subprocess.STDOUT)
             deadline, port = time.monotonic() + 30, None
@@ -173,7 +184,7 @@ def main():
                             raise TimeoutError("Mosquitto listener did not start")
                         time.sleep(0.05)
                 env["GRAVITON_MQTT_TEST_PORT"] = str(mqtt_port)
-                evidence.update(artemis_security_enabled=True, amqp_port=port, amqp_tls_port=tls_port, mqtt_port=mqtt_port, amqp_pid=amqp.pid, mqtt_pid=mqtt.pid,
+                evidence.update(artemis_security_enabled=True, artemis_guest_credentials_invalidate=True, amqp_port=port, amqp_tls_port=tls_port, mqtt_port=mqtt_port, amqp_pid=amqp.pid, mqtt_pid=mqtt.pid,
                                 amqp_tls_verified=True)
                 print(json.dumps(evidence, sort_keys=True), flush=True)
                 if command:

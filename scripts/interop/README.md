@@ -55,7 +55,9 @@ with the temporary instance.
 Artemis runs with `security-enabled=true`. `--allow-anonymous` maps peers
 without SASL or with SASL ANONYMOUS to the generated guest role; SASL PLAIN is
 checked against the temporary `graviton-test` user, so wrong passwords are
-refused (`amqp10_artemis_sasl_test.exs` A3). The startup probe sends the SASL
+refused (`amqp10_artemis_sasl_test.exs` A3): the wrapper sets
+`credentialsInvalidate=true` on the generated `GuestLoginModule`, without which
+invalid credentials fall back to the guest role. The startup probe sends the SASL
 header `AMQP 3 1 0 0`, which Artemis answers in either security mode.
 
 `prepare.py --provided` validates explicitly supplied `GRAVITON_MOSQUITTO_BIN`,
