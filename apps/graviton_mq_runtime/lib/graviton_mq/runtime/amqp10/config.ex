@@ -7,7 +7,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
 
   @keys ~w(container_id queues queue_options listeners auth authorize profile max_connections
     max_auth_jobs auth_timeout send_timeout connect_timeout max_input_bytes
-    max_input_frames_per_turn max_pump_actions endpoint_options persistence)a
+    max_input_frames_per_turn max_pump_actions endpoint_options persistence sasl
+    sasl_mechanisms allow_insecure_plain sasl_timeout max_sasl_jobs)a
   @endpoint_keys ~w(hostname max_frame_size channel_max max_sessions max_pending_operations
     max_pending_controls max_write_frames max_write_bytes control_reserve_frames
     control_reserve_bytes operation_timeout_ms close_timeout_ms idle_timeout_ms session_options)a
@@ -17,10 +18,12 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
 
   def build(options) when is_list(options) do
     with true <- keyword?(options, @keys),
-         :ok <- authentication(options),
+         {:ok, policy} <- authentication(options),
          {:ok, config} <- assemble(options),
-         {:ok, listeners} <- listeners(Keyword.get(options, :listeners, [])) do
-      {:ok, %{config | listeners: listeners}}
+         {:ok, sasl} <- sasl(options, policy, config),
+         {:ok, listeners} <- listeners(Keyword.get(options, :listeners, [])),
+         :ok <- plain_transport(sasl, listeners) do
+      {:ok, %{config | listeners: listeners, auth: policy, sasl: sasl}}
     else
       false -> {:error, :invalid_options}
       {:error, _} = error -> error
@@ -31,10 +34,73 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
 
   defp authentication(options) do
     case Keyword.get(options, :auth) do
-      :anonymous -> :ok
-      nil -> {:error, :explicit_auth_required}
-      _ -> {:error, :unsupported_authentication}
+      :anonymous ->
+        {:ok, :anonymous}
+
+      nil ->
+        {:error, :explicit_auth_required}
+
+      {module, auth_options} when is_atom(module) and is_list(auth_options) ->
+        if Keyword.keyword?(auth_options) and Code.ensure_loaded?(module) and
+             function_exported?(module, :authenticate, 2),
+           do: {:ok, {module, auth_options}},
+           else: {:error, :unsupported_authentication}
+
+      _other ->
+        {:error, :unsupported_authentication}
     end
+  end
+
+  # The SASL map is published to Connections; it never contains the policy.
+  defp sasl(options, policy, config) do
+    authenticate = policy != :anonymous
+    mode = Keyword.get(options, :sasl, if(authenticate, do: :required, else: :optional))
+
+    mechanisms =
+      Keyword.get(options, :sasl_mechanisms, if(authenticate, do: ["PLAIN"], else: ["ANONYMOUS"]))
+
+    insecure = Keyword.get(options, :allow_insecure_plain, false)
+    timeout = Keyword.get(options, :sasl_timeout, 5_000)
+    jobs = Keyword.get(options, :max_sasl_jobs, 16)
+
+    cond do
+      mode not in [:optional, :required, :disabled] ->
+        {:error, :invalid_options}
+
+      authenticate and mode != :required ->
+        {:error, :sasl_required_for_authentication}
+
+      not is_list(mechanisms) or mechanisms == [] or Enum.uniq(mechanisms) != mechanisms or
+          not Enum.all?(mechanisms, &(&1 in ["PLAIN", "ANONYMOUS"])) ->
+        {:error, :invalid_sasl_mechanisms}
+
+      "PLAIN" in mechanisms and not authenticate ->
+        {:error, :plain_requires_authentication}
+
+      not is_boolean(insecure) or not bounded?(timeout, 1, 10_000) or not bounded?(jobs, 1, 128) ->
+        {:error, :invalid_options}
+
+      true ->
+        {:ok,
+         %{
+           mode: mode,
+           mechanisms: mechanisms,
+           authenticate: authenticate,
+           allow_insecure_plain: insecure,
+           timeout: timeout,
+           max_jobs: jobs,
+           auth_timeout: config.auth_timeout
+         }}
+    end
+  end
+
+  defp plain_transport(%{mode: :disabled}, _listeners), do: :ok
+
+  defp plain_transport(sasl, listeners) do
+    if "PLAIN" in sasl.mechanisms and not sasl.allow_insecure_plain and
+         Enum.any?(listeners, &(&1.transport == :tcp)),
+       do: {:error, :plain_requires_tls},
+       else: :ok
   end
 
   defp assemble(options) do
@@ -53,6 +119,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
       queue_options: queue_options,
       endpoint_options: endpoint,
       listeners: [],
+      auth: nil,
+      sasl: nil,
       authorize: Keyword.get(options, :authorize, fn _, _, _ -> :allow end),
       max_connections: Keyword.get(options, :max_connections, 64),
       max_auth_jobs: Keyword.get(options, :max_auth_jobs, 16),
