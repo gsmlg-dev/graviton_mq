@@ -1,7 +1,7 @@
 # S2 — AMQP 1.0 SASL (ANONYMOUS and PLAIN) for client and broker
 
 Date: 2026-11-12. Status: **approved by the owner 2026-11-12** (decisions
-below); nothing here is implemented. Programme row: [P0–P3 design §2, S2](2026-11-12-http-fetch-transport-and-p0-p3-design.md)
+below); implemented on `main` and qualified in hosted CI run 43177284736 (`4967d89`). Programme row: [P0–P3 design §2, S2](2026-11-12-http-fetch-transport-and-p0-p3-design.md)
 (depends on S1; exit evidence "Artemis and Proton with SASL both directions;
 bad-credential refusal"). Authorized by [ACTIVE_SCOPE 2026-11-12](../../ACTIVE_SCOPE.md).
 Commit, push, version bump and release are not authorized by this design.

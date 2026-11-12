@@ -1,7 +1,7 @@
 # S4 — MQTT 5.0 Topic Alias, Subscription Identifiers and Shared Subscriptions
 
 Date: 2026-11-12. Status: **approved by the owner 2026-11-12** (decisions
-below). Nothing here is implemented. Programme row S4 of
+below). Implemented on `main` and qualified in hosted CI run 43177284736 (`4967d89`). Programme row S4 of
 [the P0–P3 design](2026-11-12-http-fetch-transport-and-p0-p3-design.md)
 (depends on S1; exit evidence "Mosquitto/Paho both directions per feature").
 S4 touches MQTT files only and must not overlap S2/S3 (AMQP). S6/S7 run after

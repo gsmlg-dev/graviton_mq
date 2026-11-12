@@ -165,7 +165,7 @@ process. Remaining limit: the first unanswered call still blocks the Manager
 for the queue's internal 5-second call timeout. An actual queue crash still
 restarts later owners as above. Evidence: `amqp10_availability_test.exs` and
 `amqp10_boundaries_test.exs`; independent-peer requalification of the
-unknown-enqueue change is pending its CI interoperability run.
+unknown-enqueue change passed its CI interoperability run (42501601934).
 
 ## Local durable queues
 
