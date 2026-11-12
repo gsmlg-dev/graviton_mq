@@ -2,8 +2,9 @@
 
 - Status: Accepted by the owner, 2026-11-12
 - Date: 2026-11-12
-- Implementation/acceptance: S1a implemented locally and uncommitted on `main`
-  (after `a9fd9cd`); independent-peer requalification NOT RUN (requires CI);
+- Implementation/acceptance: S1a committed on `main` (`c2accb9`..`3407f3b`,
+  pins updated to rc.14 in `ccac792`, CI test fixes in `8a368af`);
+  independent-peer requalification PASS in hosted CI run 43150172756 for `8a368af` (Mosquitto 2.1.2, Paho 2.1.0, Artemis 2.41.0, Proton 0.40.0; 1,253 tests, 0 failures; 300 s four-role soak PASS; seven archives and three installed consumers PASS);
   local packaging (seven archives, three installed consumers) PASS on a rerun; the first local run failed once in the embedding consumer's durable recovery script ("installed recovered MQTT subscription did not complete", 5 s timeout) while synchronous disk writes took 57-86 ms; the committed baseline passed once. Design and spike record:
   [P0–P3 / S1 design](../superpowers/specs/2026-11-12-http-fetch-transport-and-p0-p3-design.md);
   plan: [S1a owned transport](../superpowers/plans/2026-11-12-s1a-owned-transport.md)

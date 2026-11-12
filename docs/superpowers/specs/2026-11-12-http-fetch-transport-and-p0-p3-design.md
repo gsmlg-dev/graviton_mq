@@ -1,10 +1,12 @@
 # P0–P3 programme and S1 owned-transport migration design
 
 Date: 2026-11-12. Status: design approved by the owner (approach A); the
-written spec awaits owner review. **S1a: implemented locally, uncommitted,
-peer interop pending CI** (amended 2026-11-12, see §3.3 and §3.5.1; recorded in
-[ADR 0009](../../adr/0009-owned-network-stack.md)). S1b is blocked on
-gsmlg-dev/http_fetch#161. Commit, push, version bump, release and publication
+written spec awaits owner review. **S1a: committed and qualified — hosted CI
+run 43150172756 (`8a368af`) passed all four independent peers, the soak and
+installed consumers** (amended 2026-11-12, see §3.3 and §3.5.1; recorded in
+[ADR 0009](../../adr/0009-owned-network-stack.md)). S1b was blocked on
+gsmlg-dev/http_fetch#161, fixed in `ex_ssl` 1.0.0-rc.14 (pins updated in
+`ccac792`); S1b is unblocked but not implemented. Commit, push, version bump, release and publication
 are **not** authorized by this design.
 
 ## 1. Owner decisions recorded here
@@ -202,12 +204,12 @@ Decisions for S1:
    existing `Client.Transport`), client TLS on `SSL.connect` (after
    verifying the client-side duplex-read behaviour, `ssl/connection.ex:1003-1022`,
    under the same non-reading-peer test), architecture rules, ADR 0009 and the
-   AGENTS.md amendment. *Status 2026-11-12: implemented locally, uncommitted;
-   full `mix test` 0 failures; independent-peer interop pending CI; local packaging (seven archives, three installed consumers) PASS on a rerun; the first local run failed once in the embedding consumer's durable recovery script ("installed recovered MQTT subscription did not complete", 5 s timeout) while synchronous disk writes took 57-86 ms; the committed baseline passed once.* The client offers TLS 1.3 and 1.2 by default; unsupported caller
+   AGENTS.md amendment. *Status 2026-11-12: committed; hosted CI run 43150172756 passed
+   independent-peer interop, soak and installed consumers; local packaging (seven archives, three installed consumers) PASS on a rerun; the first local run failed once in the embedding consumer's durable recovery script ("installed recovered MQTT subscription did not complete", 5 s timeout) while synchronous disk writes took 57-86 ms; the committed baseline passed once.* The client offers TLS 1.3 and 1.2 by default; unsupported caller
    TLS options fail at connect with an explicit error. **S1b** (broker TLS on `Hell.Transports.SSL`) is
-   **blocked on #161**: resume only after a published release fixes it, the
-   pin is updated and the reproduction plus TLS interop suites pass. Until then
-   broker TLS listeners keep their current implementation unchanged.
+   **unblocked**: #161 is fixed in rc.14 and the reproduction passes (3/3);
+   it still requires the TLS interop suites. Until S1b is implemented broker
+   TLS listeners keep their current implementation unchanged.
 3. Pausing input must also set the Hell read timeout to `:infinity`
    (`Hell.Handler.set_read_timeout/2`) and restore it on resume; the default
    60 s read timeout would otherwise close a paused connection.
