@@ -4070,3 +4070,24 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
 ## Execution log
 
 (Record BASE, per-task commits, deviations, the T6 baseline failures, and every NOT RUN item here.)
+
+### Tasks 0–2 (2026-11-12)
+
+- **Task 0.** BASE = `e015263`. Upstream: gsmlg-dev/http_fetch#168 and #169
+  are both `CLOSED` (2026-11-12T09:28Z); their fixes ship in hell/ex_ssl
+  `1.0.0-rc.17`, already pinned on `main` (`e967c1d`). No upstream writes.
+  Baseline: runtime 69 tests, 0 failures; `graviton_mq` 51 tests, 0 failures
+  (interop tags excluded).
+- **Task 1.** `72924ad` test(runtime): fixture as planned; smoke load printed
+  the 13 keys and `true`. `:public_key` was reachable; no change needed.
+- **Task 2.** `35116e2` feat(runtime): red (7 tests, 7 failures, module not
+  available) → green (7 tests, 0 failures); runtime compiles with
+  `--warnings-as-errors`. Deviations per the amendment: in-memory `key`
+  (`{:RSAPrivateKey | :ECPrivateKey | :PrivateKeyInfo, der}`, ex_ssl's accepted
+  form) is accepted at top level, in `certs_keys` and in `sni_hosts`; a
+  malformed key reports `:key` (nested: the outer key); an identity needs
+  `cert | certfile` plus `key | keyfile` (missing private key still reports
+  `:keyfile`); no #168 WORKAROUND markers; `active_chunk_size` is rejected as
+  `{:unsupported_tls_option, :active_chunk_size}` (not on the allowlist). The
+  runtime-owned `active_chunk_size: 16_384` is **not** set by `hell_options/1`;
+  Task 5 adds it to HellHandoff's TLS transport options next to `buffer: 16_384`.
