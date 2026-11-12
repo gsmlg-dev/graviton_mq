@@ -475,7 +475,32 @@ the TLS-upgrade header, the hostname-equals-SNI recommendation (the client
 sends its configured Open hostname) and client reconnect/re-authentication
 (S3).
 
+## S3 maintenance amendment (2026-11-13)
+
+S3 adds opt-in AMQP client reconnect and an asynchronous broker Manager. It
+changes no requirement ID or inventory status; the 2026-10-30 ledger above is
+unchanged. Design:
+[S3 spec](../superpowers/specs/2026-11-13-s3-amqp-reconnect-manager-design.md);
+execution:
+[S3 plan log](../superpowers/plans/2026-11-13-s3-amqp-reconnect-manager.md#execution-log).
+Path abbreviations follow the S2 section above. Hosted evidence: CI run
+43223448120 (`interoperability` and `checks` PASS) and Tests run 43223447801
+(PASS) for `375f677`, Artemis 2.41.0 and Proton 0.40.0.
+
+| Specification requirement | Implementation | Unit evidence | Independent peer | Recovery / remaining gap |
+| --- | --- | --- | --- | --- |
+| Part 2 §2.4, TR-2.4.1-b001-s03 (protocol header, then Open before any other frame) and TR-2.4.3-b003-s01 (do not reuse a closed socket), per reconnect attempt | **S:** `C/client/amqp10.ex` opens a new socket, a full TLS handshake, a new `SASL.Machine` and a fresh Endpoint and Stream with the next generation per attempt; the old socket is closed before the retry is scheduled. The attempt budget resets at the peer's Open | **T:** `C/amqp10_reconnect_test.exs` ("a transport loss reconnects on a fresh generation and fences old deliveries", "the budget resets only when the peer's Open arrives and exhaustion is reported", "the password provider runs once per attempt and no password outlives sasl-init"); `C/tls_transport_test.exs` ("every reconnect performs a verified handshake; an untrusted certificate is terminal") | **I:** R1 (cut, reconnect, new publication Accepted), R4 (refusal backoff), R5 (SASL PLAIN over verified TLS per attempt), F1–F3, `C/amqp10_artemis_reconnect_test.exs` | Retry classification is product policy, not an AMQP clause. Half-open loss: a peer may refuse re-attach of a Link with the same name until its own TTL expires; reported per Link, not qualified (R6 asserts detection only). |
+| Part 2 §2.6.13 resuming deliveries (TR-2.6.13-b002-s02..b007-s01, CONDITIONAL PROFILE REFUSAL) | **S:** restoration sends a fresh Attach with the declared terminus options and no `unsettled` map; volatile termini. Deliveries of the lost Connection are voided: `settle/3` returns `{:error, :stale_delivery}` without a wire write | **T:** `C/amqp10_reconnect_test.exs` ("declared Sessions and Links are restored in order and reported; in-flight ones are not", fresh-generation fencing) | **I:** R2 (old reference `:stale_delivery`; after new credit Artemis redelivers the message on an ANYCAST queue; Accept empties the queue) | §2.6.13 stays unimplemented; the D rows are unchanged. R2 initially failed in run 43214315813 (`83567a7`) because Artemis auto-created the bare address as MULTICAST, whose temporary queue is deleted with its connection; the test uses `anycast://` since `375f677`. |
+| Unknown outcomes after connection loss (no single clause: unsettled state of a volatile Link endpoint is lost with its Connection, see §2.6.13) | **S:** an in-flight operation or transfer completes `{:unknown, reason}` (or `{:error, {:outcome_known, …}}`) at loss and is never re-run; restoration excludes in-flight declarations | **T:** `C/amqp10_reconnect_test.exs` restoration and in-flight cases | **I:** R3 (lost Disposition → `{:unknown, _}`; no Transfer after reconnect until the host sends; Proton drain finds the message at most once) | At-least-once only: a host resend may duplicate. No exactly-once claim. |
+| Part 3 §3.4.4 Released (broker as receiver of a publication) | **S:** `B/broker.ex` settles an `enqueue` that the queue definitively never took (deadline take-back) with `Released`; a fence settles abandoned enqueues before it detaches the queue's Links | **T:** `P/amqp10_availability_test.exs` ("an enqueue the queue never took is Released and leaves no copy (B5, owner Q5)"); `P/amqp10_manager_requests_test.exs` ("B4/D10: a fence Releases an enqueue it abandons before it detaches the publisher") | — (fault injection only; no independent peer drives a stalled queue) | An uncertain enqueue still closes the publishing Connection without a disposition (unchanged). |
+| Broker wire behaviour otherwise unchanged | **S:** Manager → Queue requests use `send_request` with a 5 s deadline, per-queue FIFO and fences; `amqp10_status/1` adds `queue_requests`, `queue_fences`, `:unresponsive` | **T:** B1–B8 (`P/amqp10_{availability,boundaries,manager_requests}_test.exs`, `B/amqp10/queue_requests_test.exs`) | **I:** the Proton → broker suites ran in the passing `interoperability` job of run 43223448120 | `amqp10_status/1` can still wait up to 5 s if the Manager itself is unresponsive. |
+
 ## Explicit exclusions versus unfinished acceptance
+
+2026-11-13: S3 adds opt-in client reconnect with restoration of declared
+Sessions and Links on a new Connection (previous section). "Client has no
+automatic reconnect" below no longer holds; the client still has no automatic
+replay and no Link/Session resumption.
 
 2026-11-12: S2 replaces the SASL exclusion below with the bounded SASL
 ANONYMOUS/PLAIN profile of the previous section; the rest of this paragraph is

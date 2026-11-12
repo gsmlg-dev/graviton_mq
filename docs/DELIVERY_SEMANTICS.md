@@ -18,6 +18,31 @@ boundaries. Applications that need deduplication must use stable
 application-level identity rather than AMQP link handles, delivery IDs, or
 channel numbers.
 
+## Implemented amendment — 2026-11-13 (S3, unreleased)
+
+S3 keeps the at-least-once target and adds no exactly-once claim:
+
+- **Client reconnect never replays an uncertain publication.** A transfer in
+  flight at a connection loss completes `{:unknown, reason}`; resending it on
+  the new Connection is the host's choice and may duplicate the message.
+  Delivery tags and Link handles are scoped to the lost endpoints, so they
+  cannot deduplicate a resend; applications use a stable identity such as
+  Properties `message-id`.
+- **A delivery received on the lost Connection is voided.** Its old reference
+  returns `{:error, :stale_delivery}` and never reaches the wire. The peer
+  keeps responsibility, and after the host grants new credit the message may
+  be delivered again (Artemis R2 evidence, CI run 43223448120).
+- **Broker queue fences.** A queue request that misses its 5-second deadline
+  fences that queue without blocking the Manager. A lost settlement returns
+  the claim, and the message is redelivered. A publication the queue
+  definitively never executed is settled `Released`, which tells the sender
+  that the message was not acted on and may be resent; this `Released`
+  precedes the publisher Link's Detach when a fence abandons the request. An
+  uncertain publication still closes the publishing Connection without a
+  disposition.
+
+See [AMQP10_CLIENT.md](AMQP10_CLIENT.md) and [AMQP10_BROKER.md](AMQP10_BROKER.md).
+
 ## Separate lifecycles and identities
 
 Two lifecycles interact but remain distinct:

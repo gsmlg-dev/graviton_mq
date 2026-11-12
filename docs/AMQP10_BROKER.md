@@ -161,11 +161,74 @@ disposition and does not fence: enqueue holds no lease, so no claim state
 diverges; a truly unresponsive queue is fenced by its next status or lease
 command, and a queue whose storage failed stays observable as
 `storage: :failed`. The fenced queue is probed every second outside the Manager and restored when it answers. Messages stay in the queue
-process. Remaining limit: the first unanswered call still blocks the Manager
-for the queue's internal 5-second call timeout. An actual queue crash still
-restarts later owners as above. Evidence: `amqp10_availability_test.exs` and
-`amqp10_boundaries_test.exs`; independent-peer requalification of the
-unknown-enqueue change passed its CI interoperability run (42501601934).
+process. An actual queue crash still restarts later owners as above.
+Evidence: `amqp10_availability_test.exs` and `amqp10_boundaries_test.exs`;
+independent-peer requalification of the unknown-enqueue change passed its CI
+interoperability run (42501601934). The 2026-11-08 limit "the first
+unanswered call still blocks the Manager for 5 seconds" is removed by S3
+below.
+
+### Asynchronous Manager (S3, 2026-11-13, unreleased)
+
+The instance Manager no longer makes blocking calls to queue owners. Each
+request goes to the queue through `:gen_server.send_request/2` and a
+Manager-owned exchange table, with a **5-second request deadline** per
+request, tracked per queue in FIFO order with one timer for the head entry.
+An unresponsive queue therefore delays only its own Links; other queues,
+attaches, deliveries and settlements continue. The only remaining blocking
+call is the boot `watch`, which runs once before the Manager serves messages.
+Each route has at most one outstanding queue request, and a global cap of
+4,096 pending requests refuses new Link admission
+(`amqp:resource-limit-exceeded`) and defers pump work while full.
+
+At its deadline a request is classified by an atomic take-back from the
+exchange: still there as a request means **not executed** (the queue never
+took it and never will); a written result means **known** (used as the
+reply); absent means **uncertain** (taken, not answered). A queue DOWN is
+classified the same way.
+
+| Request | Not executed | Uncertain or queue DOWN |
+| --- | --- | --- |
+| `enqueue` (publish) | the Transfer is settled `Released`; the Connection survives and the sender may resend | close the publishing Connection without a disposition (unknown outcome, as before); no fence |
+| `register` (attach) | reject the Link and fence the queue | reject the Link and fence the queue |
+| `settle`, `claim`, pump `status`, unfit `settle`, cleanup `disconnect`, `watch_ack` | fence the queue | fence the queue |
+| restore `watch`/`watch_ack` of a fenced queue | re-probe | re-probe |
+
+Fencing works as since 2026-11-08 (lease anchor killed so every claim
+returns, Links detached with `amqp:internal-error`, attaches refused,
+`:unavailable` in status, probe and restore), and now also abandons the
+queue's pending requests. Abandoned `enqueue` entries are settled first: a
+definitively not-executed publication receives its `Released` disposition
+**before** the publisher Link's Detach. Late replies from a fenced queue are
+ignored. A late `register` reply for a route that is gone issues a
+`disconnect`, so no lease is orphaned. If the Manager dies, a request the
+queue has not taken never executes, and the killed anchor returns every
+claim. Messages whose settlement was lost are redelivered (at-least-once);
+nothing here is exactly-once.
+
+`amqp10_status/1` adds `queue_requests` (pending count) and `queue_fences`
+(cumulative count). Each queue's value is a status map, `:unavailable`
+(fenced) or the new `:unresponsive` (not fenced, missed the status deadline).
+The caller queries the queues concurrently with a 900 ms deadline computed at
+entry, so the call returns within 1 second while queues are stuck. Caveat:
+the Manager round trip keeps its 5-second call timeout, so if the Manager
+itself is unresponsive, `amqp10_status/1` can still wait up to 5 seconds (and
+then reports `{:error, :not_running}`).
+
+Upgrade note (S3): hosts matching queue status values must handle
+`:unresponsive`, and a definitively not-executed enqueue is now settled
+`Released` instead of closing the publishing Connection. Wire behaviour is
+otherwise unchanged.
+
+Evidence: local fault-injection tests B1–B8 (`amqp10_availability_test.exs`,
+`amqp10_boundaries_test.exs`, `amqp10_manager_requests_test.exs` with a
+stand-in queue that takes a request and never answers, and the pure
+`queue_requests_test.exs`) cover the async Manager, fences, Released before
+Detach, restore deadline and re-probe, and `:unresponsive` status; they are
+recorded in the [S3 plan execution log](superpowers/plans/2026-11-13-s3-amqp-reconnect-manager.md#execution-log)
+and passed in Tests run 43223447801 and the `checks` job of CI run
+43223448120 for `375f677`. The `interoperability` job of that run, which
+reruns the Proton → broker suites against this Manager, passed.
 
 ## Local durable queues
 

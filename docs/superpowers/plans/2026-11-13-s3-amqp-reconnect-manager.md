@@ -4435,3 +4435,41 @@ Placeholder scan: every code step has code, and every command has an expected re
 - Regression: manager_requests, availability, boundaries, runtime, sasl, g5_flow and g5_annotations together 52 tests, 0 failures, 2 excluded, with seeds 1, 2 and 3. Runtime `test/amqp10`, seeds 1 and 2: 106 tests, 0 failures. `mix compile --warnings-as-errors` clean.
 - Out of scope: the first seed 3 runtime run had 1 failure, `AuthTest` "the watcher exits as soon as its callback finishes" (no Broker/Queue reference; no `lib/` change in this task). Two seed 3 reruns passed 106/0. Not investigated further.
 - Note for the coordinator: `Broker.status/1` keeps the 5 s Manager call timeout, so the 1 s bound (D14) holds only while the Manager itself is responsive (unchanged, as planned).
+
+### 2026-11-13 — C-tasks done
+
+- **C1 (CI gate).** CI run 43223448120 for `375f677`: `interoperability` and
+  `checks` PASS; Tests run 43223447801 PASS. All nine Artemis reconnect tests
+  R1–R6 and F1–F3 (`amqp10_artemis_reconnect_test.exs`) passed against
+  Artemis 2.41.0. The earlier CI run 43214315813 at `83567a7` failed only R2:
+  Artemis 2.41.0 auto-creates a bare address as MULTICAST when no
+  `default-address-routing-type` is set, so the receiver's temporary queue
+  was deleted with its connection, unsettled message included. `375f677`
+  makes R2 use `anycast://` (acceptor `anycastPrefix` in `run.py`); the
+  client sends no source capabilities. Test totals per job were not
+  recorded in this pass.
+- **C2 (docs).** AMQP10_CLIENT.md "Reconnect" section (options and backoff,
+  classification with the D1 close-cause note and D4 additions, owner phases
+  and command answers per D3, `:stale_delivery`, restoration events and order
+  per D13 including `f96595c`, host `close/1` during an in-flight Close final
+  per `0312b11`, host actions, SASL/TLS per attempt, D2 status keys, the
+  half-open limitation, the Artemis routing note). AMQP10_BROKER.md
+  "Asynchronous Manager" (5 s request deadline, three-way classification and
+  per-path table with D7, `Released` for a not-executed enqueue, D10 order,
+  `queue_requests`/`queue_fences`/`:unresponsive`, the 1 s bound with the
+  900 ms queue part and the 5 s Manager-call caveat, the boot `watch`, an
+  upgrade note); the 2026-11-08 "first unanswered call still blocks" limit is
+  marked removed. FAILURE_MODEL.md and DELIVERY_SEMANTICS.md S3 amendments
+  (at-least-once, no replay, no exactly-once). CAPABILITIES AMQP1 client and
+  broker rows; ACTIVE_SCOPE S3 row Complete.
+- **C3.** "S3 maintenance amendment (2026-11-13)" in
+  `docs/qualification/2026-10-30-amqp10-clause-audit.md`; no requirement ID
+  or inventory status changed.
+- **C4.** Not rerun in this documentation pass (no code change); the hosted
+  `checks` job of run 43223448120 ran `deps.get`, the format check,
+  `compile --warnings-as-errors`, `mix test`, the architecture check and the
+  cycle check on `375f677`.
+  Documentation verification: `release_test.exs` + `architecture_test.exs`
+  and `mix format --check-formatted`.
+- Task 10 concern 2 (restoration failing while the Endpoint is `:closing`)
+  was fixed by `f96595c` (D13 interruption).

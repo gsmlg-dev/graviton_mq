@@ -37,6 +37,34 @@ Linux-only WAL tests passed for `696dca0` on a local Linux host on 2026-11-08;
 independent-peer requalification is pending the follow-up's CI
 interoperability run.
 
+## Implemented amendments — 2026-11-13 (S3, unreleased)
+
+- AMQP broker: the instance Manager sends queue requests asynchronously and
+  never blocks on a queue (the boot `watch` is the only remaining blocking
+  call). Each request has a 5-second deadline. At the deadline an atomic
+  take-back classifies it as not executed, known or uncertain; the queue
+  fence now happens at that deadline without blocking the Manager, so an
+  unresponsive queue delays only its own Links. A not-executed enqueue is
+  settled `Released` (the Connection survives); an uncertain enqueue still
+  closes only its publishing Connection without a disposition. A fence
+  settles the enqueues it abandons before it detaches the queue's Links, so
+  `Released` reaches the publisher before its Detach. `amqp10_status/1`
+  answers within 1 second (900 ms for the concurrent queue part) and reports
+  a queue that misses it as `:unresponsive`; if the Manager itself is
+  unresponsive, the call can still wait up to its 5-second timeout. See
+  [AMQP10_BROKER.md](AMQP10_BROKER.md).
+- AMQP client: an opt-in bounded reconnect opens a new Connection and
+  restores the Sessions and Links the host declared. It never replays an
+  uncertain publication and does not restore credit; a delivery received on
+  the lost Connection is voided (`{:error, :stale_delivery}` on settle) and
+  may be redelivered. See [AMQP10_CLIENT.md](AMQP10_CLIENT.md).
+
+Evidence: local fault-injection tests B1–B8 (S3 plan execution log) and the
+client reconnect tests passed in Tests run 43223447801 and CI run
+43223448120 for `375f677`; Artemis 2.41.0 reconnect cases R1–R6 and F1–F3
+passed in that run's `interoperability` job. Delivery stays at-least-once;
+nothing here is exactly-once.
+
 ## Ownership and isolation
 
 Explicit ownership determines which process may mutate operational state:

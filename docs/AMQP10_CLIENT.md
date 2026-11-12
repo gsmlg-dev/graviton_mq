@@ -115,13 +115,163 @@ sasl-init. EXTERNAL, SCRAM and the TLS-upgrade header are not implemented.
 
 The current profile also uses format-zero messages, nontransactional unsettled sender/receiver-first settlement,
 volatile non-dynamic Source/Target, no filters, and no Link/session resume.
-Unsupported negotiation is rejected explicitly. Client reconnect/resumption
-and process/VM recovery remain unimplemented; broker queue persistence is a
-separate responsibility. General homogeneous arrays and all scalar wire
+Unsupported negotiation is rejected explicitly. Reconnect is opt-in (below);
+Link/delivery resumption and client process/VM recovery remain unimplemented;
+broker queue persistence is a separate responsibility. General homogeneous arrays and all scalar wire
 families are available; application properties still require simple scalar/null
 values. Exact flow/sequence/failure evidence and its limits are recorded in
 the [clause inventory](qualification/2026-10-30-amqp10-requirement-inventory.md).
 This bounded profile does not claim every AMQP 1.0 feature.
+
+## Reconnect (S3, 2026-11-13, unreleased)
+
+A reconnect is a **new AMQP Connection**: new socket, a full TLS handshake,
+a new SASL exchange, a new protocol header and Open. The Sessions and Links on
+it are new endpoints. There is no Link or delivery resumption (Part 2
+§2.6.13): termini are volatile, so the peer discards link state when the
+Connection is lost. GravitonMQ claims at-least-once delivery, never
+exactly-once.
+
+```elixir
+{GravitonMQ.AMQP10Client,
+  container_id: "orders-worker", host: "broker.example", transport: :tls,
+  observer: self(),
+  reconnect: [max_attempts: 5,     # 0..100, default 0
+              delay: 250,          # 1..60_000 ms, default 250
+              max_delay: 5_000]}   # delay..60_000 ms, default 5_000
+```
+
+The delay before attempt *n* is `min(max_delay, delay * 2^(n-1))`, the MQTT
+client's formula, with no jitter. The attempt counter resets to 0 when the
+peer's Open arrives, not at TCP connect, so a peer that accepts TCP and then
+refuses SASL or Open cannot reset the budget. An unknown key or out-of-range
+value fails `start_link/1` with `{:error, :invalid_options}`. The default
+`max_attempts: 0` keeps the previous behaviour: one connection, then a stopped
+but inspectable owner. `connect_timeout`, `sasl_timeout` and the Open deadline
+apply to each attempt.
+
+### Retry classification
+
+| Disconnect reason | Action |
+| --- | --- |
+| `:closed`, `{:transport, _}`; `{:connect, r}` for `r` in `econnrefused`, `econnreset`, `econnaborted`, `ehostunreach`, `enetunreach`, `nxdomain`, `timeout`, `etimedout`, `closed`; `{:write_failed, _}` except an encode failure | retry |
+| receive idle timeout, Open timeout, `:sasl_timeout`, `{:sasl, :sys_temp}` | retry |
+| peer Close with `amqp:connection:forced`, or a peer Close without error that the host did not request | retry |
+| `{:sasl, :auth \| :sys \| :sys_perm \| {:unknown, _}}`, `:sasl_not_offered`, `:sasl_mechanism_not_offered`, `:sasl_protocol_error`, `:invalid_sasl_credentials` | terminal |
+| any other `{:connect, _}`, including TLS alerts (verification, hostname, protocol) | terminal |
+| decode or protocol errors, a peer Close with any other condition, an encode `{:write_failed, _}`, `:owner_stopped`, host `close/1` | terminal |
+
+The Endpoint reports a Close the client itself started as
+`{:disconnected, :normal | :close_timeout | :closed}`, never as
+`:idle_timeout` or `:open_timeout`. The owner therefore records why it began
+closing (host close, receive idle, Open timeout or protocol error) and
+classifies on both; the `{:disconnected, reason}` event keeps the Endpoint's
+reason. A terminal reason or an exhausted budget leaves the owner with
+`owner: :stopped`: it holds no socket or timer, keeps answering `status/1`
+and does not exit. The host decides whether to stop or restart it.
+
+### Owner phases and commands
+
+`status/1` reports `owner: :connecting | :active | :restoring | :offline |
+:stopped`, beside `phase` (the Endpoint phase, unchanged), `generation`,
+`attempt`, `next_retry_ms` (remaining backoff, or `nil`), `intent: %{sessions:
+s, links: l}` and `restoring` (outstanding restoration items). It shows no
+host, credential, address or payload.
+
+- During the initial connection, commands keep the Endpoint's answers
+  (`{:error, :not_connected}`). After a loss, in `:offline` and while
+  reconnecting, every command returns `{:error, :disconnected}` at once;
+  nothing is queued.
+- While restoring, a command on a Session or Link still waiting for
+  restoration returns `{:error, :restoring}`; restored items work normally.
+- `close/1` in any phase cancels the retry timer and stops the owner. While
+  offline or reconnecting it replies `{:ok, ref}` and sends
+  `{:operation, ref, {:ok, :closed}}` at once. A `close/1` issued while the
+  Endpoint is already closing (after an idle or Open timeout or a protocol
+  error) is accepted, is final and completes with `{:ok, :closed}` once the
+  transport is released; the owner does not reconnect (`0312b11`).
+- Delivery references carry their generation. `settle/3` with a reference
+  from an earlier Connection returns `{:error, :stale_delivery}` immediately
+  and writes nothing.
+
+### Restoration
+
+The owner keeps a bounded in-memory **intent**: a Session's identity and
+`open_session` options, and a Link's `{name, role}` identity and `attach/5`
+options. An entry is added only when the host's `open_session/3` or
+`attach/5` completes `{:ok, _}`, and removed when the host admits
+`end_session/2` or `detach/3` or the peer ends or detaches that item (with or
+without an error). An operation in flight at the loss gets its own
+`{:unknown | :error, _}` result and is not restored. No message bytes, credit,
+delivery or credential is stored; size is bounded by `max_sessions` ×
+`max_links`.
+
+After each successful Open of a reconnect, Sessions are reopened in ascending
+identity order, and each Session's Links re-attached in their completion
+order with the same identity and options. At most `min(8, free operations)`
+restoration operations are outstanding, so host commands are not starved.
+The observer receives:
+
+```elixir
+{:graviton_mq, client, {:disconnected, reason}}
+{:graviton_mq, client, {:reconnecting, attempt}}       # only when a retry is scheduled
+{:graviton_mq, client, {:connected, remote_container_id}}
+{:graviton_mq, client, {:restored, {:session, sid}, result}}
+{:graviton_mq, client, {:restored, {:link, sid, link_identity}, result}}
+{:graviton_mq, client, {:restore_complete, %{restored: n, failed: m}}}
+{:graviton_mq, client, {:reconnect_exhausted, attempts}}  # only with max_attempts > 0
+```
+
+`result` is `{:ok, _}`, `{:error, reason}` or `{:unknown, reason}`. A failed
+item is dropped from intent. The Links of a Session that failed to restore are
+reported `{:error, :session_not_restored}` and dropped. `{:restore_complete,
+_}` follows every reconnect, also with empty intent, and never the first
+successful connection. If no `{:reconnecting, _}` follows a
+`{:disconnected, _}`, the owner has stopped.
+
+A restoration interrupted by another transport loss is not reported; its
+entries stay declared and are retried on the next connection. This includes
+an operation deadline or session error that arrives while the Endpoint is
+already closing (for example after a receive idle timeout): it counts as an
+interruption, not as the peer's decision, and the declaration is kept
+(`f96595c`).
+
+Restored automatically: Connection, SASL, TLS, Sessions and Links. **Credit is
+not restored**: call `request/5` again after `{:restored, {:link, …}, {:ok,
+_}}`. The host also resends any `{:unknown, _}` publication if it wants to
+(the client never replays one; a resend may duplicate the message, which
+at-least-once allows; use a stable application identity such as Properties
+`message-id` to deduplicate), settles redelivered messages through their new
+references, and re-declares failed restorations.
+
+Each attempt builds a new SASL exchange: a password provider runs once per
+attempt, so it may return a rotated secret. Each TLS attempt performs a full,
+verified handshake without session reuse; a changed or untrusted server
+certificate on reconnect is a terminal TLS alert. One socket and one retry
+timer exist at a time; the old socket is closed before the retry is
+scheduled, and the timer is cancelled by `close/1`, observer death and
+termination.
+
+Limitation (half-open loss): after a silent network loss, a peer may keep the
+old Link with the same name and container id until its own connection TTL
+expires. Re-attach may then be refused or redelivery delayed; the refusal is
+reported per Link through `{:restored, …, {:error, _}}`.
+
+Interop note (Artemis address routing): Artemis 2.41.0 auto-creates a bare
+address as MULTICAST when no `default-address-routing-type` is set. A receiver
+then gets a temporary subscription queue that is deleted together with its
+connection, including an unsettled message, so nothing is redelivered after a
+reconnect. Use an ANYCAST queue for redelivery across reconnects, for example
+an `anycast://` address with the acceptor's `anycastPrefix`, as the R2 test
+does. The client sends no source capabilities to select routing.
+
+Evidence: local tests `amqp10_reconnect_test.exs`, `amqp10_intent_test.exs`,
+`privacy_test.exs` and `tls_transport_test.exs` (OTP `:ssl` test peer) PASS
+in Tests run 43223447801 and the `checks` job of CI run 43223448120. Against
+Artemis 2.41.0 with independent Proton 0.40.0 senders and receivers, all nine
+reconnect cases R1–R6 and F1–F3 (`amqp10_artemis_reconnect_test.exs`, through
+a multi-accept cut proxy) passed in the `interoperability` job of the same
+run for `375f677`.
 
 External role qualification uses Apache ActiveMQ Artemis 2.41.0 and independent
 Qpid Proton 0.40.0 senders/receivers. The interop suite is enabled by
