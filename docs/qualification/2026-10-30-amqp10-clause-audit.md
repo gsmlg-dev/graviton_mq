@@ -79,7 +79,7 @@ Path abbreviations below:
 | Transport §§2.6.7, 2.7.5–.6: peer credit precedes sending; local writes do not prove terminal peer outcome | **S:** SessionEngine outgoing admission and C operation dispatch; terminal+settled gives its actual outcome, otherwise uncertainty is preserved | **T:** send-window tests, known-outcome/unknown loss and non-reading-peer shell regression | **I:** Artemis publish→independent Proton receiver; lost-outcome proxy; receiver-without-outcome Proton server then second Link | Possibly emitted timeouts report unknown; never-emitted commands fail. No automatic replay or business exactly-once claim. |
 | Transport §§2.6.12, 2.7.6: received host ownership survives spontaneous peer sender settlement | **S:** delivered host reference remains until explicit host settlement, then finishes locally without stale Disposition | **T:** late-sender, partial, wrapped range and queued/written settlement regressions | **I:** independent Proton server initially sends unsettled, later settles; client consumes/accepts and uses a second Link | Stale host token rejects after one settlement. Process/VM loss does not restore the host delivery reference. |
 | Messaging §§3.2–3.5: preserve encoded format0 content; host chooses valid negotiated receiver outcome | **S:** public send_message/settle API, shared schemas and Source outcomes checks | **T:** byte-preservation, source-outcome rejection, annotation-policy tests | **I:** Artemis large body/release/redelivery; Proton late sender tests | No application body deserialization or hidden business ACK. Independent broker corpus now covers12 noncanonical full-bare-message fixtures; root `g7-corpus-client-check.log`9/0 separately qualifies both-directions12-message Artemis corpus; root `g7-corpus-check.log`10/0 covers exact durable replay12 fixtures. These precede final root gates. |
-| Conditional transport security | **S:** client-owned transport validates trusted TLS/hostname and rejects insecure owner-option overrides; SASL config unavailable | **T:** shell config/transport tests | **I:** `amqp10_artemis_test.exs` trusted TLS send/receive and wrong-CA/hostname rejection ran in [G6 qualification](2026-10-30-g6-local-durability.md); final root gates enable the same TLS peer path | Security Part5 mechanisms are outside this three-part audit. TLS support does not imply SASL or authenticated AMQP user identity. |
+| Conditional transport security | **S:** client-owned transport validates trusted TLS/hostname and rejects insecure owner-option overrides; SASL config unavailable | **T:** shell config/transport tests | **I:** `amqp10_artemis_test.exs` trusted TLS send/receive and wrong-CA/hostname rejection ran in [G6 qualification](2026-10-30-g6-local-durability.md); final root gates enable the same TLS peer path | Security Part5 mechanisms are outside this three-part audit. TLS support does not imply SASL or authenticated AMQP user identity. 2026-11-12: SASL ANONYMOUS/PLAIN is now configurable; see Part 5 SASL below. |
 
 ## Broker role
 
@@ -431,7 +431,55 @@ forwarding after WAL replay and a second restart proving synchronized
 retirement. These remain separate from publication, hosted CI and sustained
 traffic; the final complete gates are recorded in the G7 local qualification.
 
+## Part 5 SASL (S2, 2026-11-12)
+
+This section extends the three-part audit to the OASIS AMQP 1.0
+[Part 5: Security](https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-security-v1.0-os.html)
+§§5.1 and 5.3 for SASL ANONYMOUS and PLAIN (S2, unreleased on `main`). Source
+SHA256 `d50d980bb55391037d6b6c306f0a715c64b09db5c880f81356b0ff53adcaca39`,
+fetched 2026-11-12. The provisional `SE-` rows are in the
+[inventory](2026-10-30-amqp10-requirement-inventory.md); the §§5.3.1–5.3.3
+rules below have no inventory IDs. Design:
+[S2 spec](../superpowers/specs/2026-11-12-s2-amqp-sasl-design.md); execution:
+[S2 plan log](../superpowers/plans/2026-11-12-s2-amqp-sasl.md#execution-log).
+Unit paths follow the abbreviations above; `A/` tests are under
+`apps/graviton_mq_amqp10/test/`.
+
+| Specification requirement | Implementation | Unit evidence | Independent peer | Recovery / remaining gap |
+| --- | --- | --- | --- | --- |
+| §5.3, SE-5.3-b001-s01/b002-s01, fig. 5.4: SASL header first, Part 2 §2.2 mismatch rules, then `AMQP 0 1 0 0` both ways and Open | **S:** `codec/protocol_header.ex` `recognize/2` (`accept: [0, 3]`), `codec/stream.ex` header re-entry, `sasl/machine.ex` both roles; shells start the Endpoint only after `{:start_endpoint, _}`. The broker always waits for the client header (owner Q7) | **T:** `codec/{protocol_header,stream}_test.exs`, `sasl/machine_test.exs` header refusals and pipelined-header hold, `B/amqp10/connection_test.exs`, `C/amqp10_sasl_client_test.exs` outcome+header+Open in one segment | **I:** Proton P1 (ANONYMOUS), P3/P5 (PLAIN), P6 (no-SASL refused by `:required`); client A1/A2 against Artemis | Header deferral changes TR-2.2-b003-s02 and TR-2.2-b015-s03 evidence: the reply follows the peer header, a malformed header now gets the supported header and a socket close without an AMQP Close frame (Endpoint not started). |
+| §5.3.1: type `0x01`; bytes 6–7 and the extended header ignored (SHOULD send 0 and DOFF 2); maximum SASL frame `MIN-MAX-FRAME-SIZE` (512) | **S:** `codec/frame.ex` `types: [:sasl]` only on request; decode accepts any channel and valid DOFF; encode emits channel 0, DOFF 2, ≤512 octets independently of the AMQP frame limit | **T:** `codec/frame_test.exs` ("SASL frames decode only when requested and are bounded by 512 octets", 511-octet case), `codec/frame_encode_test.exs` (512 ok / 513 refused, channel 0, offset 2), `codec/stream_test.exs` 512-octet bound | Peer frames exercised only by the P/A cases | An AMQP frame in the SASL layer or a SASL frame in the AMQP layer is malformed. Oversize input closes without an outcome. |
+| §5.3.1: exactly one `sasl-frame` body; empty frame is irrecoverable | **S:** `codec/sasl.ex` one value, no trailing bytes; machine closes on `:empty_sasl_frame` | **T:** `codec/sasl_test.exs` "frame bodies hold exactly one SASL value"; `sasl/machine_test.exs` "protocol violations close without an outcome" | — | Malformed peer permutations are local evidence only. |
+| §5.3.3: five bodies, numeric and symbolic descriptors, exact tagged fields; `sasl-server-mechanisms` multiple and mandatory | **S:** `codec/sasl.ex`, `sasl/{mechanisms,init,challenge,response,outcome}.ex`; numeric descriptor on encode; a symbol or non-empty symbol array of ≤16 names; trailing nulls trimmed | **T:** `codec/sasl_test.exs` round trip, symbolic descriptors, interior nulls, mechanism lists, 16 names; `sasl/sasl_test.exs` wire-order names and RFC 4422 name syntax | **I:** Artemis and Proton mechanism lists and outcomes in A1–A3/P1–P7 | Names outside the RFC 4422 syntax are retained as data but never selected. |
+| §5.3.3.6 sasl-code: `ok`..`sys-temp`, not whitelisted | **S:** `sasl.ex` `code_name/1` (`{:unknown, 5..255}`) | **T:** `sasl/sasl_test.exs`; `codec/sasl_test.exs` unknown codes are data; `C/amqp10_sasl_client_test.exs` code 9 → `{:sasl, {:unknown, 9}}` | **I:** A3 Artemis `auth` outcome → `{:sasl, :auth}` | Unknown codes are failures for the client. |
+| §5.3.3.2 unsupported mechanism ⇒ "authentication-failure close-code" (undefined term); adopted: send outcome, flush, close | **S:** server machine sends `auth`/`sys`/`sys-temp` then closes after the write receipt; callback mapping in `B/auth.ex`, `B/connection.ex` | **T:** `sasl/machine_test.exs` "every callback failure code becomes a flushed outcome then a close", "unoffered mechanisms and invalid messages are refused with auth and no callback"; `P/amqp10_sasl_test.exs` wrong credentials, exceptions/invalid returns (`sys`), deadlines and `max_sasl_jobs` (`sys-temp`) | **I:** Proton P4 wrong password and P7 ANONYMOUS against a PLAIN-only broker refused; A3 wrong password refused by Artemis | Callback reasons never reach the peer, logs or status; `sasl_failures` counts by code. |
+| Protocol violations (out-of-order body, malformed body, oversize, empty frame, second sasl-init, response without challenge, deadline): close **without** an outcome (owner Q8) | **S:** machine `{:close, reason}` without an outcome frame | **T:** `sasl/machine_test.exs` "protocol violations close without an outcome", deadline/stale-result fencing; `B/amqp10/connection_test.exs` "a protocol violation during SASL closes without an outcome", "a silent peer is closed by the SASL negotiation deadline" | — | Local evidence only; no independent peer sends malformed SASL. |
+| No downgrade: a SASL-configured client never falls back to raw AMQP | **S:** client machine closes on `AMQP 0` (`:sasl_not_offered`), unoffered mechanism, challenge or silence | **T:** `C/amqp10_sasl_client_test.exs` "no SASL offer, an unoffered mechanism, a challenge and silence close explicitly"; `sasl/machine_test.exs` client refusals | — | Default `sasl: :none` keeps the raw AMQP header (`C/amqp10_sasl_client_test.exs`). |
+| SE-5.3.2-b002-s01: SASL client/server roles follow the TCP roles | **S:** client shell runs role `:client`, broker Connection role `:server`; no role option | **T:** `sasl/machine_test.exs` server and client describes | **I:** P1–P7 (Proton as client), A1–A3 (Artemis as server) | — |
+| RFC 4616 PLAIN / RFC 4505 ANONYMOUS messages | **S:** `sasl/plain.ex` (authcid/passwd 1..255, authzid 0..255, UTF-8, no NUL), `sasl/anonymous.ex` (trace ≤255 characters, control characters refused) | **T:** `sasl/{plain,anonymous}_test.exs`; client config refuses credentials whose sasl-init exceeds 512 octets | **I:** P3/P4/P5, A2/A3 PLAIN; P1/A1 ANONYMOUS | StringPrep tables are not applied beyond the control-character check. |
+| Privacy (design §5.3) | **S:** sensitive Connection, client and callback processes; redacting `format_status` and `Inspect`; policy held only by `B/authenticator.ex` | **T:** `P/amqp10_sasl_test.exs` privacy tests (logs, status, published Listener specs, crash reports, Connection state during and after authentication); `C/amqp10_sasl_client_test.exs` password-provider and redaction tests; `B/amqp10/authenticator_test.exs` | — | Tests assert the password and policy secret; usernames rely on redacting `Inspect`. |
+| SE-5.1-b003-s01: on termination close the outgoing stream, then read the incoming stream until EOF | **S:** shells flush the final bytes (outcome or reply header) and close the socket | **T:** close-after-flush assertions in `B/amqp10/connection_test.exs`, `C/amqp10_sasl_client_test.exs` | — | **GAP (D6):** read-until-EOF is not implemented, as for TR-2.2-b003-s02; the inventory row is UNQUALIFIED. |
+
+Independent-evidence status: hosted CI run 43177284736 (CI) and 43177284490
+(Tests) for `4967d89` passed with all peers enabled (Mosquitto 2.1.2, Paho
+2.1.0, Artemis 2.41.0 with `security-enabled=true` and `GuestLoginModule
+credentialsInvalidate=true`, Proton 0.40.0): 1,536 tests, 0 failures,
+including Proton → broker P1–P7 (`P/amqp10_sasl_proton_test.exs`) and client →
+Artemis A1–A3 (`C/amqp10_artemis_sasl_test.exs`); the existing no-SASL Artemis
+suites also passed with Artemis security enabled (owner Q9). The previous run
+43176448954 (`b497eb0`) failed only A3, because Artemis's guest login module
+accepted a wrong PLAIN password; `4967d89` fixed the harness, not product
+code. Self-to-self client → broker tests in `P/amqp10_sasl_test.exs` are
+additional evidence only. Not covered: EXTERNAL/SCRAM, SASL security layers,
+the TLS-upgrade header, the hostname-equals-SNI recommendation (the client
+sends its configured Open hostname) and client reconnect/re-authentication
+(S3).
+
 ## Explicit exclusions versus unfinished acceptance
+
+2026-11-12: S2 replaces the SASL exclusion below with the bounded SASL
+ANONYMOUS/PLAIN profile of the previous section; the rest of this paragraph is
+unchanged.
 
 SASL, transactions, nonzero message formats, durable/dynamic termini,
 nonempty/incomplete unsettled resume maps, receiver-second, initially settled
