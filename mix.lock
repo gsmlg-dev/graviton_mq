@@ -1,5 +1,5 @@
 %{
-  "ex_ssl": {:hex, :ex_ssl, "1.0.0-rc.13", "ea2dc526d69ea5e503888dbc061be7ccb96e5c1c25b6dc6f5b65fa2b7b49f20d", [:mix], [], "hexpm", "dc06b566f8d45abe8daf493a73dc07cf07769d7b37b0945bddb6e5a65ffc232b"},
-  "hell": {:hex, :hell, "1.0.0-rc.13", "29d330bb5c347eee5af0e2905317e43c3b3008b110a5a29fe27c56ece8b0c9ae", [:mix], [{:ex_ssl, "1.0.0-rc.13", [hex: :ex_ssl, repo: "hexpm", optional: false]}, {:telemetry, "~> 0.4 or ~> 1.0", [hex: :telemetry, repo: "hexpm", optional: false]}], "hexpm", "3885a36d7f69042b24354947b360a10b6f80cf4f231bfae3982ac89db401b2c1"},
+  "ex_ssl": {:hex, :ex_ssl, "1.0.0-rc.14", "6e8d3b351269298c1a147a5bf943c45e5e407a2dc64cb46980d6926c3e472702", [:mix], [], "hexpm", "7cbc059da011f71a0652e1e9f91f50c42fad07fbeaab8a1834b7994628920333"},
+  "hell": {:hex, :hell, "1.0.0-rc.14", "b96315ab9ca1e3bf87c37cb0d370842456961d5ba10ac4285585e14bd2fddfed", [:mix], [{:ex_ssl, "1.0.0-rc.14", [hex: :ex_ssl, repo: "hexpm", optional: false]}, {:telemetry, "~> 0.4 or ~> 1.0", [hex: :telemetry, repo: "hexpm", optional: false]}], "hexpm", "9d6a7e0f20377cba1919203f25ea1dded3d579fdce30aa7b8d21da088de840f2"},
   "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
 }

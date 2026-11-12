@@ -26,7 +26,7 @@ defmodule GravitonMQClient.MixProject do
       {:graviton_mq_core, in_umbrella: true},
       {:graviton_mq_amqp10, in_umbrella: true},
       {:graviton_mq_mqtt, in_umbrella: true},
-      {:ex_ssl, "== 1.0.0-rc.13"}
+      {:ex_ssl, "== 1.0.0-rc.14"}
     ]
   end
 end

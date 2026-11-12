@@ -38,9 +38,9 @@ A throwaway spike (`hell`/`ex_ssl` `1.0.0-rc.13`, telemetry 1.4.2, Elixir
 
 `hell` and `ex_ssl` are owner-authorized infrastructure, like OTP networking.
 They are the first third-party dependencies and are pinned exactly:
-`graviton_mq_runtime` declares `{:hell, "== 1.0.0-rc.13"}` (bringing `ex_ssl`
+`graviton_mq_runtime` declares `{:hell, "== 1.0.0-rc.14"}` (bringing `ex_ssl`
 and telemetry 1.4.2 transitively); `graviton_mq_client` declares
-`{:ex_ssl, "== 1.0.0-rc.13"}`. The umbrella now has a `mix.lock`. The
+`{:ex_ssl, "== 1.0.0-rc.14"}`. The umbrella now has a `mix.lock`. The
 Ranch/Bandit/Phoenix/Ra/Khepri exclusion is unchanged for everything else.
 Dependency policy tests pin this exact external set.
 
@@ -57,9 +57,15 @@ S1 is split:
   this layout; it replaces the earlier "byte pump" layout of the design.
   Client TLS uses ex_ssl `SSL`; client plain TCP stays on `:gen_tcp`; the
   client no longer uses OTP `:ssl`.
-- **S1b (blocked on #161).** Broker TLS listeners stay on OTP `:ssl` until a
-  published release fixes #161, the pin is updated and the reproduction and
-  TLS interop suites pass. Once S1b lands the broker is TLS 1.3-only (ex_ssl
+- **S1b (unblocked 2026-11-12).** Broker TLS listeners stay on OTP `:ssl`
+  until S1b is implemented. #161 was fixed in `ex_ssl` 1.0.0-rc.14 (server
+  writes go through a writer process); after updating the pins to rc.14 the
+  original reproduction (Writer blocked by a non-reading peer while the
+  client sends) delivered the client bytes and answered `setopts` promptly in
+  3/3 runs, where rc.13 delivered nothing within 5 s. #162 was fixed in
+  `hell` 1.0.0-rc.14 (`{:pause, state}`, `pause_input/1`, `resume_input/1`);
+  the accept-only layout does not use it. S1b still requires the TLS interop
+  suites to pass. Once S1b lands the broker is TLS 1.3-only (ex_ssl
   has no TLS 1.2 server); that is a documented breaking change.
 
 The client offers `versions: [:"tlsv1.3", :"tlsv1.2"]` by default, preserving

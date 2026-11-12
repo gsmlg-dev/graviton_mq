@@ -27,7 +27,7 @@ defmodule GravitonMQRuntime.MixProject do
       {:graviton_mq_storage, in_umbrella: true},
       {:graviton_mq_amqp10, in_umbrella: true},
       {:graviton_mq_mqtt, in_umbrella: true},
-      {:hell, "== 1.0.0-rc.13"}
+      {:hell, "== 1.0.0-rc.14"}
     ]
   end
 end
