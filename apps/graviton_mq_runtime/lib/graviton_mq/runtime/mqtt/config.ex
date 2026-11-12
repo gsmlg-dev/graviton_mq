@@ -53,10 +53,15 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
          ) and
            is_integer(config.auth_concurrency) and config.auth_concurrency in 1..128 and
            is_integer(config.max_writer_packets) and config.max_writer_packets > 0 and
-           is_integer(config.max_writer_bytes) and config.max_writer_bytes > 0 and
-           match?({:ok, _}, Machine.new(config.machine_options)),
-         do: {:ok, config},
-         else: invalid()
+           is_integer(config.max_writer_bytes) and config.max_writer_bytes > 0 do
+        case Machine.new(config.machine_options) do
+          {:ok, _machine} -> {:ok, config}
+          {:error, :alias_bytes_exceeded} = error -> error
+          {:error, _reason} -> invalid()
+        end
+      else
+        invalid()
+      end
     else
       _invalid -> invalid()
     end
@@ -85,6 +90,9 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
 
         {:ok, value} when key in [:topic_alias_maximum, :max_outbound_topic_aliases] ->
           is_integer(value) and value in 0..65_535
+
+        {:ok, value} when key == :max_alias_bytes ->
+          is_integer(value) and value >= 0
 
         {:ok, value} when key == :max_packet_size ->
           is_integer(value) and value in 1..268_435_460

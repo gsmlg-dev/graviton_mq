@@ -91,11 +91,32 @@ defmodule GravitonMQ.Runtime.MQTT.ConfigTest do
           [topic_alias_maximum: -1],
           [topic_alias_maximum: 65_536],
           [max_outbound_topic_aliases: 65_536],
-          [max_alias_bytes: 0],
-          [max_connections: 4_096, topic_alias_maximum: 65_535]
+          [max_alias_bytes: -1]
         ] do
       assert {:error, :invalid_mqtt_options} = Config.build([auth: :anonymous] ++ options),
              inspect(options)
+    end
+
+    for options <- [
+          [max_alias_bytes: 0],
+          [max_connections: 4_096, topic_alias_maximum: 65_535, max_alias_bytes: 134_217_728]
+        ] do
+      assert {:error, :alias_bytes_exceeded} = Config.build([auth: :anonymous] ++ options),
+             inspect(options)
+    end
+
+    assert {:ok, config} =
+             Config.build(auth: :anonymous, topic_alias_maximum: 0, max_alias_bytes: 0)
+
+    assert config.machine_options[:max_alias_bytes] == 0
+  end
+
+  # Upgrade compatibility: before Topic Alias support any max_connections
+  # started; without an explicit max_alias_bytes the machine derives the bound.
+  test "configurations without max_alias_bytes start for any connection limit" do
+    for max_connections <- [205, 4_096, 65_536] do
+      assert {:ok, config} = Config.build(auth: :anonymous, max_connections: max_connections)
+      refute Keyword.has_key?(config.machine_options, :max_alias_bytes)
     end
   end
 end

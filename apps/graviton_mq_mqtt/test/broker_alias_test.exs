@@ -84,12 +84,39 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
   test "alias limits are validated and statically bounded by max_alias_bytes" do
     assert {:error, :invalid_options} = Broker.new(topic_alias_maximum: 65_536)
     assert {:error, :invalid_options} = Broker.new(max_outbound_topic_aliases: 65_536)
-    assert {:error, :invalid_options} = Broker.new(max_alias_bytes: 1)
+    assert {:error, :alias_bytes_exceeded} = Broker.new(max_alias_bytes: 1)
     assert {:ok, _} = Broker.new(topic_alias_maximum: 0, max_alias_bytes: 0)
 
     bounded = [max_connections: 1, topic_alias_maximum: 1, max_packet_size: 100]
     assert {:ok, _} = Broker.new(bounded ++ [max_alias_bytes: 100])
-    assert {:error, :invalid_options} = Broker.new(bounded ++ [max_alias_bytes: 99])
+    assert {:error, :alias_bytes_exceeded} = Broker.new(bounded ++ [max_alias_bytes: 99])
+
+    outbound = [max_connections: 2, topic_alias_maximum: 1, max_outbound_topic_aliases: 2]
+    assert {:ok, _} = Broker.new(outbound ++ [max_packet_size: 10, max_alias_bytes: 60])
+
+    assert {:error, :alias_bytes_exceeded} =
+             Broker.new(outbound ++ [max_packet_size: 10, max_alias_bytes: 59])
+  end
+
+  # Upgrade compatibility: configurations that started before Topic Alias
+  # support (any max_connections) must still start; an omitted bound is the
+  # derived static worst case, never a rejection.
+  test "an omitted max_alias_bytes is derived as the static worst case" do
+    assert {:ok, state} = Broker.new()
+    assert state.limits.max_alias_bytes == 128 * 10 * 65_535
+
+    assert {:ok, state} = Broker.new(max_connections: 4_096)
+    assert state.limits.max_alias_bytes == 4_096 * 10 * 65_535
+
+    assert {:ok, state} =
+             Broker.new(
+               max_connections: 3,
+               topic_alias_maximum: 2,
+               max_outbound_topic_aliases: 5,
+               max_packet_size: 100
+             )
+
+    assert state.limits.max_alias_bytes == 3 * 7 * 100
   end
 
   test "inbound aliases resolve before every PUBLISH check and never reach subscribers" do

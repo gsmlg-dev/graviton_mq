@@ -46,8 +46,10 @@ defmodule GravitonMQ.MQTT.Broker do
     max_outbound_topic_aliases: 0,
     # Static worst case: max_connections x (inbound + outbound aliases) x
     # min(65_535, max_packet_size) bytes. Never enforced by refusing an alias
-    # (MQTT-3.3.2-12). 128 MiB admits the defaults (83,884,800 bytes).
-    max_alias_bytes: 134_217_728
+    # (MQTT-3.3.2-12). When omitted, `new/1` derives it as that worst case, so
+    # configurations that predate Topic Alias support still start; an explicit
+    # value below the worst case fails with `:alias_bytes_exceeded`.
+    max_alias_bytes: nil
   }
 
   defstruct [
@@ -79,12 +81,20 @@ defmodule GravitonMQ.MQTT.Broker do
            limits.auth_timeout > 0 and
            limits.dispatch_retry_interval > 0 and
            limits.topic_alias_maximum in 0..65_535 and
-           limits.max_outbound_topic_aliases in 0..65_535 and
-           limits.max_connections *
-             (limits.topic_alias_maximum + limits.max_outbound_topic_aliases) *
-             min(65_535, limits.max_packet_size) <= limits.max_alias_bytes do
-        {:ok,
-         %__MODULE__{limits: limits, codec: %Limits{max_packet_size: limits.max_packet_size}}}
+           limits.max_outbound_topic_aliases in 0..65_535 do
+        alias_bytes =
+          limits.max_connections *
+            (limits.topic_alias_maximum + limits.max_outbound_topic_aliases) *
+            min(65_535, limits.max_packet_size)
+
+        if limits.max_alias_bytes == nil or alias_bytes <= limits.max_alias_bytes do
+          limits = %{limits | max_alias_bytes: limits.max_alias_bytes || alias_bytes}
+
+          {:ok,
+           %__MODULE__{limits: limits, codec: %Limits{max_packet_size: limits.max_packet_size}}}
+        else
+          {:error, :alias_bytes_exceeded}
+        end
       else
         {:error, :invalid_options}
       end
