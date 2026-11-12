@@ -3,6 +3,7 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
 
   alias GravitonMQ.MQTT.Codec.Limits
   alias GravitonMQ.MQTT.Broker, as: Machine
+  alias GravitonMQ.Runtime.TLSOptions
 
   @machine_keys ~w(max_connections max_sessions max_subscriptions max_pending_deliveries
     max_pending_bytes max_retained max_retained_bytes max_wills max_will_bytes
@@ -17,8 +18,7 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
     tick_interval connect_timeout send_timeout max_writer_packets max_writer_bytes persistence)a
   @persistence_keys ~w(directory stream_id max_snapshot_bytes max_log_bytes fault_injector)a
   @listener_keys ~w(id transport ip port tls_options backlog)a
-  @tls_keys ~w(certfile keyfile password cacertfile cacerts certs_keys versions verify
-    fail_if_no_peer_cert depth ciphers secure_renegotiate reuse_sessions honor_cipher_order)a
+  @tls_errors [:unsupported_tls_option, :invalid_tls_option]
 
   def build(options) do
     with true <- keyword?(options, @keys),
@@ -68,6 +68,7 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
         invalid()
       end
     else
+      {:error, {reason, _key}} = error when reason in @tls_errors -> error
       _invalid -> invalid()
     end
   end
@@ -153,7 +154,7 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
            backlog when is_integer(backlog) and backlog in 1..65_535 <-
              Keyword.get(options, :backlog, 128),
            tls <- Keyword.get(options, :tls_options, []),
-           true <- valid_tls?(transport, tls) do
+           :ok <- tls(transport, tls) do
         listener = %{
           id: Keyword.get(options, :id, index),
           transport: transport,
@@ -167,6 +168,7 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
           do: {:halt, invalid()},
           else: {:cont, {:ok, [listener | configured]}}
       else
+        {:error, {reason, _key}} = error when reason in @tls_errors -> {:halt, error}
         _invalid -> {:halt, invalid()}
       end
     end)
@@ -178,14 +180,9 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
 
   defp listeners(_listeners), do: invalid()
 
-  defp valid_tls?(:tcp, []), do: true
-  defp valid_tls?(:tcp, _tls), do: false
-
-  defp valid_tls?(:tls, tls) do
-    keyword?(tls, @tls_keys) and
-      ((path?(Keyword.get(tls, :certfile)) and path?(Keyword.get(tls, :keyfile))) or
-         match?([_ | _], Keyword.get(tls, :certs_keys)))
-  end
+  defp tls(:tcp, []), do: :ok
+  defp tls(:tcp, _tls), do: invalid()
+  defp tls(:tls, tls), do: TLSOptions.validate(tls)
 
   defp keyword?(options, keys) when is_list(options) do
     Keyword.keyword?(options) and Enum.all?(Keyword.keys(options), &(&1 in keys)) and
@@ -201,6 +198,5 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
     do: ip |> Tuple.to_list() |> Enum.all?(&(is_integer(&1) and &1 in 0..65_535))
 
   defp valid_ip?(_ip), do: false
-  defp path?(path), do: (is_binary(path) and path != "") or (is_list(path) and path != [])
   defp invalid, do: {:error, :invalid_mqtt_options}
 end

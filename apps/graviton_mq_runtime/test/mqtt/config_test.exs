@@ -52,17 +52,6 @@ defmodule GravitonMQ.Runtime.MQTT.ConfigTest do
           [listeners: [[transport: :tcp, ip: {300, 0, 0, 1}, port: 0]]],
           [listeners: [[transport: :tcp, ip: {127, 0, 0, 1}, port: -1]]],
           [listeners: [[transport: :tcp, ip: {127, 0, 0, 1}, port: 0, active: true]]],
-          [listeners: [[transport: :tls, ip: {127, 0, 0, 1}, port: 0]]],
-          [
-            listeners: [
-              [
-                transport: :tls,
-                ip: {127, 0, 0, 1},
-                port: 0,
-                tls_options: [certfile: "cert", keyfile: "key", active: true]
-              ]
-            ]
-          ],
           [
             listeners: [
               [id: :same, transport: :tcp, ip: {127, 0, 0, 1}, port: 0],
@@ -73,6 +62,52 @@ defmodule GravitonMQ.Runtime.MQTT.ConfigTest do
       assert {:error, :invalid_mqtt_options} =
                Config.build(Keyword.merge([auth: :anonymous], options))
     end
+  end
+
+  test "TLS listener options are validated by key with explicit error terms" do
+    tls = fn options ->
+      Config.build(
+        auth: :anonymous,
+        listeners: [[transport: :tls, ip: {127, 0, 0, 1}, port: 0, tls_options: options]]
+      )
+    end
+
+    identity = [certfile: "cert.pem", keyfile: "key.pem"]
+
+    assert {:ok, %{listeners: [%{transport: :tls, tls_options: ^identity}]}} = tls.(identity)
+    assert {:error, {:invalid_tls_option, :certfile}} = tls.([])
+
+    assert {:error, {:invalid_tls_option, :certfile}} =
+             Config.build(
+               auth: :anonymous,
+               listeners: [[transport: :tls, ip: {127, 0, 0, 1}, port: 0]]
+             )
+
+    for key <-
+          ~w(active packet send_timeout secure_renegotiate reuse_sessions honor_cipher_order)a do
+      assert {:error, {:unsupported_tls_option, ^key}} = tls.(identity ++ [{key, true}])
+    end
+
+    assert {:error, {:unsupported_tls_option, :versions}} =
+             tls.(identity ++ [versions: [:"tlsv1.3", :"tlsv1.2"]])
+
+    # The runtime owns the per-delivery bound; it is not a user option.
+    assert {:error, {:unsupported_tls_option, :active_chunk_size}} =
+             tls.(identity ++ [active_chunk_size: 16_384])
+
+    # In-memory identities are accepted (gsmlg-dev/http_fetch#168 is fixed).
+    in_memory = [certs_keys: [%{cert: <<48>>, key: {:RSAPrivateKey, <<48>>}}]]
+    assert {:ok, %{listeners: [%{tls_options: ^in_memory}]}} = tls.(in_memory)
+
+    assert {:error, {:invalid_tls_option, :fail_if_no_peer_cert}} =
+             tls.(identity ++ [fail_if_no_peer_cert: true])
+
+    # TCP listeners still take no TLS options at all.
+    assert {:error, :invalid_mqtt_options} =
+             Config.build(
+               auth: :anonymous,
+               listeners: [[transport: :tcp, ip: {127, 0, 0, 1}, port: 0, tls_options: identity]]
+             )
   end
 
   test "Topic Alias limits pass through and are validated by the machine" do
