@@ -6,8 +6,8 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
   alias GravitonMQ.AMQP10.Value
   alias GravitonMQ.AMQP10.Codec.{Performative, Frame}
   alias GravitonMQ.AMQP10.Frame, as: Envelope
-  alias GravitonMQ.AMQP10.Performative.{Begin, Open}
-  alias GravitonMQ.Runtime.AMQP10.{Config, Connection}
+  alias GravitonMQ.AMQP10.Performative.{Begin, Close, Open}
+  alias GravitonMQ.Runtime.AMQP10.{Config, Connection, Writer}
   alias GravitonMQ.Runtime.Test.TLS
 
   @compile {:no_warn_undefined, :ssl}
@@ -83,6 +83,29 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1_000
   end
 
+  # T5
+  test "a TLS Writer blocked by a non-reading peer does not stop the peer's Close" do
+    {connection, peer} = tls_connected!(send_timeout: 3_000)
+    monitor = monitor!(connection)
+    %{writer: writer, writer_handle: handle} = data(connection)
+    assert fill_until_blocked(handle, writer)
+
+    sent = System.monotonic_time(:millisecond)
+    :ok = :ssl.send(peer, wire(%Close{}))
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _}}}, 2_000
+    assert System.monotonic_time(:millisecond) - sent < 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 4_000
+  end
+
+  test "a TLS Writer blocked by a non-reading peer closes by send_timeout" do
+    {connection, _peer} = tls_connected!(send_timeout: 1_000)
+    monitor = monitor!(connection)
+    %{writer: writer, writer_handle: handle} = data(connection)
+    assert fill_until_blocked(handle, writer)
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _}}}, 4_000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 4_000
+  end
+
   # Messages the connection receives while nothing happens on its socket.
   defp idle_messages(connection, interval) do
     :erlang.trace(connection, true, [:receive, {:tracer, self()}])
@@ -117,6 +140,72 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     {:ok, _} = :gen_tcp.recv(peer, size - 8, 1000)
     on_exit(fn -> :gen_tcp.close(peer) end)
     {connection, peer}
+  end
+
+  # An ex_ssl server socket handed to a Connection; header and Open exchanged.
+  defp tls_connected!(options) do
+    {socket, peer} = TLS.server_pair!(TLS.certificates!(), recbuf: 8_192)
+    on_exit(fn -> :ssl.close(peer) end)
+
+    connection =
+      start_supervised!({Connection, {config!(options), relay!(), :tls}}, id: make_ref())
+
+    :ok = SSL.controlling_process(socket, connection)
+    send(connection, {:accepted, socket})
+    :ok = :ssl.send(peer, @header)
+    assert {:ok, @header} = :ssl.recv(peer, 8, 1_000)
+    {:ok, <<size::32, _::binary>> = frame_header} = :ssl.recv(peer, 8, 1_000)
+    {:ok, _} = :ssl.recv(peer, size - byte_size(frame_header), 1_000)
+    :ok = :ssl.send(peer, wire(%Open{container_id: Value.string("tls-peer")}))
+
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "tls-peer"}}},
+                   1_000
+
+    {connection, peer}
+  end
+
+  # Unknown write ids are ignored by the Endpoint (write_result {nil, _}).
+  defp fill_until_blocked(handle, writer, remaining \\ 2_000) do
+    cond do
+      blocked_in_tls_send?(writer) ->
+        true
+
+      remaining == 0 ->
+        false
+
+      true ->
+        _ = Writer.enqueue(handle, {:t5_fill, remaining}, :binary.copy(<<0>>, 65_536))
+        Process.sleep(2)
+        fill_until_blocked(handle, writer, remaining - 1)
+    end
+  end
+
+  # Blocked: inside SSL.send and still there 200 ms later without consuming a
+  # queued write. One sample can catch an ordinary send in progress.
+  defp blocked_in_tls_send?(writer) do
+    with {:ok, queued} <- in_tls_send(writer),
+         :ok <- Process.sleep(200),
+         {:ok, later} when later >= queued <- in_tls_send(writer) do
+      true
+    else
+      _other -> false
+    end
+  end
+
+  defp in_tls_send(writer) do
+    case Process.info(writer, [:current_stacktrace, :message_queue_len]) do
+      [current_stacktrace: stack, message_queue_len: queued] ->
+        if Enum.any?(stack, &match?({SSL, _, _, _}, &1)), do: {:ok, queued}, else: :error
+
+      nil ->
+        :error
+    end
+  end
+
+  defp monitor!(pid) do
+    monitor = Process.monitor(pid)
+    _ = :sys.get_state(pid)
+    monitor
   end
 
   defp relay! do

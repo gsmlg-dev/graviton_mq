@@ -4,7 +4,7 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
   use ExUnit.Case, async: true
 
   alias GravitonMQ.MQTT.Codec.Packet
-  alias GravitonMQ.MQTT.Packet.Connack
+  alias GravitonMQ.MQTT.Packet.{Connack, Suback}
   alias GravitonMQ.Runtime.Test.TLS
 
   @compile {:no_warn_undefined, :ssl}
@@ -141,6 +141,57 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
     refute_received {:peer, _client_id, _peer}
   end
 
+  # T5
+  test "a Writer blocked by a non-reading TLS peer does not stop the peer's DISCONNECT",
+       %{certificates: certificates} do
+    instance =
+      broker(certificates,
+        send_timeout: 3_000,
+        max_writer_bytes: 8_388_608,
+        max_pending_bytes: 16_777_216
+      )
+
+    %{owner: owner} = status(instance)
+    socket = tls_connected(port(instance), certificates, "slow-reader", recbuf: 8_192)
+    subscribe!(socket)
+    connection = connection!(instance)
+    writer = :sys.get_state(connection).writer
+    monitor = monitor!(connection)
+    assert fill_until_blocked(instance, owner, writer)
+
+    sent = System.monotonic_time(:millisecond)
+    :ok = :ssl.send(socket, <<0xE0, 0>>)
+    # The broker processes the DISCONNECT (ending the Clean Start session)
+    # while the Writer is still blocked. It closes the Connection only once
+    # the pending write settles, so the DOWN follows send_timeout.
+    assert eventually(fn -> status(instance).sessions == 0 end)
+    assert System.monotonic_time(:millisecond) - sent < 2_000
+    assert {:ok, _queued} = in_tls_send(writer)
+    assert %{connections: 1} = status(instance)
+    assert_receive {:DOWN, ^monitor, :process, ^connection, _reason}, 4_000
+    assert eventually(fn -> status(instance).connections == 0 end)
+  end
+
+  test "a Writer blocked by a non-reading TLS peer closes by send_timeout and never hangs",
+       %{certificates: certificates} do
+    instance =
+      broker(certificates,
+        send_timeout: 1_000,
+        max_writer_bytes: 8_388_608,
+        max_pending_bytes: 16_777_216
+      )
+
+    %{owner: owner} = status(instance)
+    socket = tls_connected(port(instance), certificates, "stuck-reader", recbuf: 8_192)
+    subscribe!(socket)
+    connection = connection!(instance)
+    writer = :sys.get_state(connection).writer
+    monitor = monitor!(connection)
+    assert fill_until_blocked(instance, owner, writer)
+    assert_receive {:DOWN, ^monitor, :process, ^connection, _reason}, 4_000
+    assert eventually(fn -> status(instance).connections == 0 end)
+  end
+
   # Helpers (used by all MQTT TLS tests).
 
   defp broker(certificates, options \\ [], tls \\ []) do
@@ -261,6 +312,53 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
     end
   end
 
+  defp subscribe!(socket) do
+    # SUBSCRIBE id 1, no properties, "load/#" at QoS 0.
+    :ok = :ssl.send(socket, <<0x82, 12, 0, 1, 0, 0, 6, "load/#", 0>>)
+    assert %Suback{packet_id: 1, reason_codes: [0]} = receive_packet(socket)
+  end
+
+  # Publishes 64 KiB host messages until the Writer is blocked in SSL.send.
+  defp fill_until_blocked(instance, owner, writer, remaining \\ 400) do
+    cond do
+      blocked_in_tls_send?(writer) ->
+        true
+
+      remaining == 0 ->
+        false
+
+      true ->
+        {:ok, reference} =
+          GravitonMQ.publish(instance, "load/x", :binary.copy(<<1>>, 65_536), qos: 0)
+
+        assert_receive {:graviton_mq, ^owner, {:operation, ^reference, _result}}, 2_000
+        fill_until_blocked(instance, owner, writer, remaining - 1)
+    end
+  end
+
+  # Blocked: inside SSL.send and still there 200 ms later without consuming a
+  # queued write. One sample can catch an ordinary send in progress; queued
+  # deliveries may still arrive meanwhile, so the queue may grow.
+  defp blocked_in_tls_send?(writer) do
+    with {:ok, queued} <- in_tls_send(writer),
+         :ok <- Process.sleep(200),
+         {:ok, later} when later >= queued <- in_tls_send(writer) do
+      true
+    else
+      _other -> false
+    end
+  end
+
+  defp in_tls_send(writer) do
+    case Process.info(writer, [:current_stacktrace, :message_queue_len]) do
+      [current_stacktrace: stack, message_queue_len: queued] ->
+        if Enum.any?(stack, &match?({SSL, _, _, _}, &1)), do: {:ok, queued}, else: :error
+
+      nil ->
+        :error
+    end
+  end
+
   # TLS 1.3: the client may finish before the server rejects its certificate;
   # then the server's alert (or close) is the first read result.
   defp refused!({:error, _reason}), do: :ok
@@ -275,6 +373,12 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
       {:ok, _bytes} -> closed(raw, deadline)
       {:error, reason} -> reason
     end
+  end
+
+  defp monitor!(pid) do
+    monitor = Process.monitor(pid)
+    _ = :sys.get_state(pid)
+    monitor
   end
 
   defp eventually(predicate, timeout \\ 2_000),
