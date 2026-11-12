@@ -50,6 +50,19 @@ defmodule GravitonMQ.MQTTClient.SharedSubscriptionTest do
              )
   end
 
+  test "subscribe rejects an out-of-range Subscription Identifier option" do
+    {client, socket} = connected([])
+
+    for identifier <- [0, 268_435_456, :one] do
+      assert {:error, {:invalid_packet, :invalid_property_value}} =
+               MQTTClient.subscribe(client, "ids/#", subscription_identifier: identifier)
+    end
+
+    assert {:error, :timeout} = :gen_tcp.recv(socket, 0, 100)
+    assert MQTTClient.status(client).phase == :connected
+    assert MQTTClient.status(client).pending == 0
+  end
+
   test "alias options are advertised and the wire property stays forbidden in :properties" do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
     on_exit(fn -> :gen_tcp.close(listener) end)

@@ -2,7 +2,7 @@ defmodule GravitonMQ.MQTT.ClientAliasTest do
   use ExUnit.Case, async: true
 
   alias GravitonMQ.MQTT.Client
-  alias GravitonMQ.MQTT.Packet.{Connack, Connect, Disconnect, Publish}
+  alias GravitonMQ.MQTT.Packet.{Connack, Connect, Disconnect, Publish, Subscribe}
 
   defp connect(properties \\ []),
     do: %Connect{
@@ -209,5 +209,67 @@ defmodule GravitonMQ.MQTT.ClientAliasTest do
     assert state.phase == :connected
     refute Enum.any?(effects, &match?({:send, %Disconnect{}, _}, &1))
     assert {delivered.topic, delivered.payload, delivered.properties} == {topic, payload, []}
+  end
+
+  test "an aliased first send that does not fit the server limit falls back to the full topic" do
+    full = %Publish{topic: "a", payload: "x"}
+    {:ok, bytes} = GravitonMQ.MQTT.Codec.Packet.encode(full)
+    limit = byte_size(bytes)
+
+    {state, _} =
+      online([topic_alias_maximum: 2, maximum_packet_size: limit], max_outbound_topic_aliases: 2)
+
+    {state, first} = Client.transition(state, {:publish, :one, full, 10})
+    assert [%Publish{topic: "a", properties: []}] = sends(first)
+    assert state.aliases.outbound == %{}
+    {state, second} = Client.transition(state, {:publish, :two, full, 11})
+    assert [%Publish{topic: "a", properties: []}] = sends(second)
+    assert state.aliases.outbound == %{}
+  end
+
+  test "a QoS2 duplicate sent alias-only is recognised as the same delivery" do
+    {state, _} = online([], topic_alias_maximum: 2)
+    {state, _} = Client.transition(state, {:demand, 5, 2})
+    first = %Publish{topic: "a", payload: "x", qos: 2, packet_id: 5, properties: [topic_alias: 1]}
+    {state, [delivered], _effects} = deliver(state, first, 3)
+    assert delivered.topic == "a"
+
+    duplicate = %{first | topic: "", dup: true}
+    {state, [], effects} = deliver(state, duplicate, 4)
+    assert state.phase == :connected
+    refute Enum.any?(effects, &match?({:send, %Disconnect{}, _}, &1))
+    assert map_size(state.deliveries) == 1
+  end
+
+  test "a Subscription Identifier is refused locally when the server does not support it" do
+    {state, _} = online(subscription_identifier_available: 0)
+
+    subscribe = %Subscribe{
+      packet_id: 0,
+      subscriptions: [{"a", %{qos: 0}}],
+      properties: [subscription_identifier: 1]
+    }
+
+    assert {_state,
+            [{:notify, {:operation, :op, {:error, :subscription_identifiers_not_available}}}]} =
+             Client.transition(state, {:subscribe, :op, subscribe, 10})
+  end
+
+  test "Subscription Identifiers on an incoming PUBLISH reach the host (Q13)" do
+    {state, _} = online([])
+    {state, _} = Client.transition(state, {:demand, 5, 2})
+
+    {_state, [delivered], _} =
+      deliver(
+        state,
+        %Publish{
+          topic: "a",
+          payload: "x",
+          properties: [subscription_identifier: 3, subscription_identifier: 7]
+        },
+        3
+      )
+
+    assert Keyword.get_values(delivered.properties, :subscription_identifier) == [3, 7]
   end
 end
