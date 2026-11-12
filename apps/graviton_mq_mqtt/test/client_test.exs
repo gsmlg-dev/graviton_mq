@@ -361,7 +361,7 @@ defmodule GravitonMQ.MQTT.ClientTest do
              Client.new(connect(), limits: %GravitonMQ.MQTT.Codec.Limits{max_properties: 0})
 
     assert {:error, _} = Client.new(connect(receive_maximum: 2), max_deliveries: 1)
-    assert {:error, :topic_aliases_unsupported} = Client.new(connect(topic_alias_maximum: 1))
+    assert {:ok, _} = Client.new(connect(topic_alias_maximum: 1))
   end
 
   test "a resumed session schedules retransmits within the newly negotiated receive maximum" do

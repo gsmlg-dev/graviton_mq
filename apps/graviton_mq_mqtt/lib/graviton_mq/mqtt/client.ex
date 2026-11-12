@@ -13,6 +13,7 @@ defmodule GravitonMQ.MQTT.Client do
   alias GravitonMQ.MQTT.Codec.{Limits, Packet}
   alias GravitonMQ.MQTT.Packet.{Connect, Connack, Disconnect, Pingreq, Pingresp, Puback, Publish}
   alias GravitonMQ.MQTT.Packet.{Pubrec, Pubrel, Pubcomp, Suback, Subscribe, Unsuback, Unsubscribe}
+  alias GravitonMQ.MQTT.TopicAlias
 
   defstruct [
     :connect,
@@ -44,6 +45,9 @@ defmodule GravitonMQ.MQTT.Client do
     session_expiry_interval: 0,
     session_available: false,
     ever_connected: false,
+    topic_alias_maximum: 0,
+    max_outbound_topic_aliases: 0,
+    aliases: %TopicAlias{},
     limits: %Limits{}
   ]
 
@@ -73,11 +77,18 @@ defmodule GravitonMQ.MQTT.Client do
       receive_maximum =
         Keyword.get(connect.properties, :receive_maximum, min(max_deliveries, 65_535))
 
+      topic_alias_maximum =
+        Keyword.get(
+          options,
+          :topic_alias_maximum,
+          Keyword.get(connect.properties, :topic_alias_maximum, 0)
+        )
+
       if receive_maximum > max_deliveries do
         {:error, :receive_maximum_exceeds_deliveries}
       else
         properties = Keyword.put(connect.properties, :receive_maximum, receive_maximum)
-        properties = Keyword.put_new(properties, :topic_alias_maximum, 0)
+        properties = Keyword.put(properties, :topic_alias_maximum, topic_alias_maximum)
         connect = %{connect | properties: properties}
 
         case Packet.encode(connect, limits) do
@@ -92,6 +103,9 @@ defmodule GravitonMQ.MQTT.Client do
                max_deliveries: max_deliveries,
                receive_maximum: receive_maximum,
                reconnect_max: Keyword.get(options, :reconnect_max, 0),
+               topic_alias_maximum: topic_alias_maximum,
+               max_outbound_topic_aliases: Keyword.get(options, :max_outbound_topic_aliases, 0),
+               aliases: TopicAlias.new(topic_alias_maximum, 0),
                session_expiry_interval: Keyword.get(properties, :session_expiry_interval, 0)
              }}
 
@@ -114,9 +128,6 @@ defmodule GravitonMQ.MQTT.Client do
           Keyword.has_key?(connect.properties, :authentication_data) ->
         {:error, :enhanced_authentication_unsupported}
 
-      Keyword.get(connect.properties, :topic_alias_maximum, 0) != 0 ->
-        {:error, :topic_aliases_unsupported}
-
       connect.will != nil and
         Keyword.get(connect.will.properties, :payload_format_indicator, 0) == 1 and
           not String.valid?(connect.will.payload) ->
@@ -136,9 +147,15 @@ defmodule GravitonMQ.MQTT.Client do
         is_integer(value) and value > 0
       end)
 
+    aliases_valid? =
+      Enum.all?([:topic_alias_maximum, :max_outbound_topic_aliases], fn key ->
+        value = Keyword.get(options, key, 0)
+        is_integer(value) and value in 0..65_535
+      end)
+
     retries = Keyword.get(options, :reconnect_max, 0)
 
-    if values_valid? and is_integer(retries) and retries >= 0,
+    if values_valid? and aliases_valid? and is_integer(retries) and retries >= 0,
       do: :ok,
       else: {:error, :invalid_options}
   end
@@ -158,7 +175,8 @@ defmodule GravitonMQ.MQTT.Client do
          | phase: :awaiting_connack,
            handshake_connect: connect,
            last_sent: now,
-           ping_at: nil
+           ping_at: nil,
+           aliases: TopicAlias.new(state.topic_alias_maximum, 0)
        }, [{:send, connect, :connect}]}
     else
       {state, []}
@@ -331,19 +349,31 @@ defmodule GravitonMQ.MQTT.Client do
     do: terminal(state, :expected_connack, nil)
 
   defp receive_packet(state, %Publish{} = packet, now) do
-    cond do
-      not valid_packet?(packet, state) ->
-        terminal(state, :malformed_publish, 0x81)
+    if valid_packet?(packet, state) do
+      case TopicAlias.resolve(state.aliases, packet) do
+        {:error, :topic_alias_invalid} ->
+          terminal(state, :topic_alias_invalid, 0x94)
 
-      Keyword.has_key?(packet.properties, :topic_alias) ->
-        terminal(state, :topic_alias_invalid, 0x94)
+        {:error, :topic_alias_unknown} ->
+          terminal(state, :topic_alias_unknown, 0x82)
 
-      Keyword.get(packet.properties, :payload_format_indicator, 0) == 1 and
-          not String.valid?(packet.payload) ->
-        terminal(state, :payload_format_invalid, 0x99)
+        {:ok, aliases, resolved} ->
+          state = %{state | aliases: aliases}
 
-      true ->
-        incoming_publication(state, packet, now)
+          cond do
+            not valid_packet?(resolved, state) ->
+              terminal(state, :resolved_packet_too_large, 0x95)
+
+            Keyword.get(resolved.properties, :payload_format_indicator, 0) == 1 and
+                not String.valid?(resolved.payload) ->
+              terminal(state, :payload_format_invalid, 0x99)
+
+            true ->
+              incoming_publication(state, resolved, now)
+          end
+      end
+    else
+      terminal(state, :malformed_publish, 0x81)
     end
   end
 
@@ -570,7 +600,12 @@ defmodule GravitonMQ.MQTT.Client do
               disconnected_at: nil,
               initial_send_quota: min(state.max_inflight, peer.receive_maximum),
               send_quota: min(state.max_inflight, peer.receive_maximum),
-              received_inflight: MapSet.new()
+              received_inflight: MapSet.new(),
+              aliases:
+                TopicAlias.new(
+                  state.topic_alias_maximum,
+                  min(peer.topic_alias_maximum, state.max_outbound_topic_aliases)
+                )
           }
 
           {state, resumed_effects} =
@@ -654,7 +689,8 @@ defmodule GravitonMQ.MQTT.Client do
               send_quota: state.send_quota - 1
           }
 
-          {state, effects ++ [{:send, packet, publication_token(ref, entry)}]}
+          {state, wire} = outbound_wire(state, packet)
+          {state, effects ++ [{:send, wire, publication_token(ref, entry)}]}
 
         true ->
           {state, effects}
@@ -674,6 +710,18 @@ defmodule GravitonMQ.MQTT.Client do
     do: {:qos2_publish, ref, order}
 
   defp publication_token(ref, _entry), do: {:operation, ref}
+
+  # D2: admission checked the full packet; the alias form is sent only if it
+  # also fits. Stored outbound packets always keep the full topic.
+  defp outbound_wire(state, %Publish{} = packet) do
+    {aliases, wire} = TopicAlias.assign(state.aliases, packet)
+
+    if wire != packet and peer_fits?(state, wire),
+      do: {%{state | aliases: aliases}, wire},
+      else: {state, packet}
+  end
+
+  defp outbound_wire(state, packet), do: {state, packet}
 
   defp qos2_response(state, packet, token) do
     if peer_fits?(state, packet),
@@ -833,13 +881,16 @@ defmodule GravitonMQ.MQTT.Client do
             do: state.send_quota - 1,
             else: state.send_quota
 
-        {%{
-           state
-           | outbound: Map.put(state.outbound, ref, entry),
-             next_packet_id: next_packet_id,
-             next_order: state.next_order + 1,
-             send_quota: quota
-         }, [{:send, packet, publication_token(ref, entry)}]}
+        state = %{
+          state
+          | outbound: Map.put(state.outbound, ref, entry),
+            next_packet_id: next_packet_id,
+            next_order: state.next_order + 1,
+            send_quota: quota
+        }
+
+        {state, wire} = outbound_wire(state, packet)
+        {state, [{:send, wire, publication_token(ref, entry)}]}
 
       {:error, error} ->
         reject(state, ref, {:invalid_packet, error.reason})
@@ -1243,7 +1294,13 @@ defmodule GravitonMQ.MQTT.Client do
     can_retry? = state.reconnect_attempts < state.reconnect_max
     preserve? = state.session_available and state.session_expiry_interval > 0
     {state, failures} = if preserve?, do: {state, []}, else: reset_session(state)
-    state = %{state | ping_at: nil, disconnected_at: state.disconnected_at || now}
+
+    state = %{
+      state
+      | ping_at: nil,
+        disconnected_at: state.disconnected_at || now,
+        aliases: TopicAlias.new(state.topic_alias_maximum, 0)
+    }
 
     if can_retry? do
       attempt = state.reconnect_attempts + 1
