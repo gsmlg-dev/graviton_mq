@@ -5,7 +5,11 @@ defmodule GravitonMQ.AMQP10Client do
   SASL is opt-in: `sasl: :none` (default, raw `AMQP 0 1 0 0`), `:anonymous`,
   `{:anonymous, trace}`, `{:plain, username, password}` or
   `{:plain, username, password, authzid: authzid}`; `password` may be a
-  zero-arity function evaluated at connect. PLAIN over `transport: :tcp`
+  zero-arity function evaluated once per connect, in the owner, after the
+  socket connects and before the `sasl_timeout` deadline is armed. It must
+  return promptly (e.g. read an already-loaded secret): a blocking provider
+  blocks the owner and no SASL deadline bounds it; a raise or a non-binary
+  result disconnects with `:invalid_sasl_credentials`. PLAIN over `transport: :tcp`
   requires `allow_insecure_plain: true`; `sasl_timeout` (1..10_000 ms,
   default 5_000) bounds the exchange. A SASL client never falls back to raw
   AMQP. Failures disconnect with `{:sasl, :auth | :sys | :sys_perm | :sys_temp

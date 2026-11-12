@@ -101,7 +101,9 @@ defmodule GravitonMQ.Client.AMQP10.Config do
   # Normalized forms: :none | {:anonymous, trace | nil} |
   # {:plain, username, password | (-> password), authzid | nil}. The
   # credential (or provider) stays in redacted owner state for the connection
-  # lifetime so a later reconnect can re-authenticate (owner Q11).
+  # lifetime so a later reconnect can re-authenticate (owner Q11). A provider
+  # runs in the owner's `handle_continue` before the SASL deadline is armed,
+  # so it must return promptly; nothing here bounds it.
   defp sasl(:none), do: :none
   defp sasl(:anonymous), do: {:anonymous, nil}
 
