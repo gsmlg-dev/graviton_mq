@@ -209,6 +209,40 @@ defmodule GravitonMQ.MQTTBroker.FeatureTest do
       assert [%Disconnect{reason_code: 0x94}] = recv(socket, 1)
     end
 
+    # Maximum Packet Size bounds the wire packet only (§3.1.2.11.4): restoring
+    # the full topic may exceed the broker's receive limit.
+    test "a resolved publication larger than the receive limit reaches the subscriber" do
+      {_instance, port} = broker(max_packet_size: 100)
+      topic = String.duplicate("t", 40)
+      payload = String.duplicate("p", 60)
+      {sub, _} = connect(port, "raw-alias-large-sub")
+      subscribe(sub, [{topic, 1}])
+      {pub, _} = connect(port, "raw-alias-large-pub")
+      send_packet(pub, %Publish{topic: topic, payload: "", properties: [topic_alias: 1]})
+
+      aliased = %Publish{
+        topic: "",
+        payload: payload,
+        qos: 1,
+        packet_id: 1,
+        properties: [topic_alias: 1]
+      }
+
+      {:ok, wire} = Packet.encode(aliased)
+      assert byte_size(wire) <= 100
+      send_packet(pub, aliased)
+      assert [%Puback{packet_id: 1, reason_code: 0}] = recv(pub, 1)
+
+      assert [
+               %Publish{topic: ^topic, payload: ""},
+               %Publish{topic: ^topic, payload: ^payload} = large
+             ] =
+               recv(sub, 2)
+
+      send_packet(sub, %Puback{packet_id: large.packet_id})
+      quiet(pub)
+    end
+
     test "a mapping is not carried across a reconnect" do
       {_instance, port} = broker()
       {first, _} = connect(port, "raw-alias-again")

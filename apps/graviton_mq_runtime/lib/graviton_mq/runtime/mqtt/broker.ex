@@ -508,10 +508,15 @@ defmodule GravitonMQ.Runtime.MQTT.Broker do
     end
   end
 
+  # `config.limits` bounds what the broker receives. The pure machine already
+  # bounds every outbound packet by the peer's Maximum Packet Size, and a
+  # resolved aliased publication may exceed the receive limit (§3.1.2.11.4).
   defp effect({:send, id, generation, send_id, packet}, state) do
+    limits = %{state.config.limits | max_packet_size: 268_435_460}
+
     result =
       with %{generation: ^generation, writer: writer} <- Map.get(state.connections, id),
-           {:ok, encoded} <- Packet.encode(packet, state.config.limits) do
+           {:ok, encoded} <- Packet.encode(packet, limits) do
         Writer.enqueue(writer, send_id, encoded)
       else
         {:error, _} = error -> error

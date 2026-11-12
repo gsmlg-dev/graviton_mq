@@ -431,12 +431,16 @@ defmodule GravitonMQ.MQTT.Broker do
       {:ok, aliases, resolved} ->
         state = put_conn(state, id, %{conn | aliases: aliases})
 
-        # The incoming packet already passed `valid_packet?/2`, and resolution
-        # only substitutes a previously validated topic, so exceeding Maximum
-        # Packet Size is the only failure reachable from the wire (D3). Any
-        # other failure is an internal invariant breach: close this connection
-        # (0x83) rather than crash the owner of every connection.
-        case Packet.encode(resolved, state.codec) do
+        # Maximum Packet Size bounds the wire packet only (§3.1.2.11.4): the
+        # resolved form is re-encoded under the protocol maximum, not the
+        # receive limit (D3 as amended). Delivery to each subscriber is then
+        # bounded by that subscriber's limit. The incoming packet already
+        # passed `valid_packet?/2` and resolution only substitutes a
+        # previously validated topic, so exceeding the protocol maximum is the
+        # only failure reachable from the wire. Any other failure is an
+        # internal invariant breach: close this connection (0x83) rather than
+        # crash the owner of every connection.
+        case Packet.encode(resolved, stored_codec(state)) do
           {:ok, encoded} ->
             resolved_publish(state, id, resolved, encoded, now)
 
@@ -1452,7 +1456,7 @@ defmodule GravitonMQ.MQTT.Broker do
           packet = recipient_packet(entry, if(qos > 0, do: 1, else: nil), now)
 
           size =
-            case Packet.encode(packet, %Limits{state.codec | max_packet_size: 268_435_460}) do
+            case Packet.encode(packet, stored_codec(state)) do
               {:ok, bytes} -> byte_size(bytes)
               _ -> nil
             end
@@ -2280,6 +2284,10 @@ defmodule GravitonMQ.MQTT.Broker do
   defp live?(_state, %{source: {:host, _}}), do: true
   defp live?(state, %{source: {:will, id}}), do: Map.has_key?(state.wills, id)
   defp valid_packet?(state, packet), do: match?({:ok, _}, Packet.encode(packet, state.codec))
+
+  # Stored (resolved) publications are bounded by the protocol maximum, not
+  # by the receive limit that bounds wire packets.
+  defp stored_codec(state), do: %Limits{state.codec | max_packet_size: 268_435_460}
 
   defp same_publish?(old, packet) do
     %{old | dup: true, properties: Keyword.delete(old.properties, :message_expiry_interval)} ==

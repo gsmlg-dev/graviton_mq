@@ -257,22 +257,59 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
     assert Enum.map(publishes(effects, :sub), &{&1.topic, &1.payload}) == [{"h", "1"}, {"h", "2"}]
   end
 
-  test "a resolved publication larger than Maximum Packet Size disconnects with 0x95" do
-    {state, _} = attach(new(max_packet_size: 64), :pub)
+  # Maximum Packet Size bounds the wire packet only (§3.1.2.11.4): restoring the
+  # full topic may exceed the receive limit, and the sender did nothing wrong.
+  defp oversized_resolution(state, qos) do
     topic = String.duplicate("t", 40)
+    payload = String.duplicate("p", 60)
 
     {state, _} =
       packet(state, :pub, %Publish{topic: topic, payload: "", properties: [topic_alias: 1]})
 
-    {_state, effects} =
-      packet(state, :pub, %Publish{
-        topic: "",
-        payload: String.duplicate("p", 40),
-        properties: [topic_alias: 1]
-      })
+    aliased = %Publish{
+      topic: "",
+      payload: payload,
+      qos: qos,
+      packet_id: if(qos == 0, do: nil, else: 1),
+      properties: [topic_alias: 1]
+    }
 
-    assert disconnected?(effects, :pub, 0x95)
-    assert {:close, :pub, 1, :resolved_packet_too_large} in effects
+    {:ok, wire} = Packet.encode(aliased)
+    assert byte_size(wire) <= 100
+    {:ok, resolved} = Packet.encode(%{aliased | topic: topic, properties: []})
+    assert byte_size(resolved) > 100
+    {state, effects} = packet(state, :pub, aliased)
+    {state, effects, topic, payload}
+  end
+
+  test "a resolved publication larger than the receive limit is accepted and routed" do
+    {state, _} = attach(new(max_packet_size: 100), :pub)
+    {state, _} = attach(state, :sub)
+    {state, _} = subscribe(state, :sub, [{String.duplicate("t", 40), 0}])
+    {_state, effects, topic, payload} = oversized_resolution(state, 0)
+
+    refute Enum.any?(effects, &match?({:send, :pub, _, _, %Disconnect{}}, &1))
+    refute Enum.any?(effects, &match?({:close, :pub, _, _}, &1))
+    assert [%Publish{topic: ^topic, payload: ^payload, properties: []}] = publishes(effects, :sub)
+  end
+
+  test "a stored resolved delivery larger than the receive limit survives a checkpoint round trip" do
+    {state, _} = attach(new(max_packet_size: 100), :pub)
+    {state, _} = attach(state, :sub, properties: [session_expiry_interval: 60])
+    {state, _} = subscribe(state, :sub, [{String.duplicate("t", 40), 1}])
+    {state, _} = Broker.transition(state, {:connection_down, :sub, 1, :abnormal, 1})
+    {state, effects, topic, payload} = oversized_resolution(state, 1)
+    refute Enum.any?(effects, &match?({:send, :pub, _, _, %Disconnect{}}, &1))
+
+    assert [%{message: %{topic: ^topic, payload: ^payload, encoded: encoded}}] =
+             state.sessions["sub"].deliveries
+
+    assert byte_size(encoded) > 100
+    assert {:ok, snapshot} = Checkpoint.capture(state, 2, 100_000)
+    assert {:ok, restored} = Checkpoint.restore(new(max_packet_size: 100), snapshot, 3, 100_001)
+
+    assert [%{message: %{topic: ^topic, payload: ^payload}}] =
+             restored.sessions["sub"].deliveries
   end
 
   defp publish_all(state, id, topics) do

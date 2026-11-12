@@ -15,7 +15,7 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
 
   alias GravitonMQ.Core.CheckpointCodec
   alias GravitonMQ.MQTT.{Broker, Topic}
-  alias GravitonMQ.MQTT.Codec.{Packet, Wire}
+  alias GravitonMQ.MQTT.Codec.{Limits, Packet, Wire}
   alias GravitonMQ.MQTT.Packet.Publish
 
   @session ~w(principal token expiry expires_at will_id subscriptions incoming_qos2 deliveries next_packet_id online)a
@@ -227,7 +227,7 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
 
   defp message?(message, template) do
     keys?(message, @message) and timestamp?(message.expires_at) and
-      is_binary(message.encoded) and byte_size(message.encoded) <= template.limits.max_packet_size and
+      is_binary(message.encoded) and byte_size(message.encoded) <= 268_435_460 and
       origin?(message.origin) and
       match?(
         {:ok, _},
@@ -240,7 +240,10 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
             retain: message.retain,
             properties: message.properties
           },
-          template.codec
+          # A stored message may be a resolved aliased publication: Maximum
+          # Packet Size bounds wire packets only, so the protocol maximum
+          # applies here. Wills keep the receive limit (never aliased).
+          %Limits{template.codec | max_packet_size: 268_435_460}
         )
       )
   end
