@@ -7,8 +7,9 @@ defmodule GravitonMQ.MQTT.TopicAlias do
   applies §3.3.4 inbound rules and removes the hop-local `topic_alias`
   property. `assign/2` applies the "stable first-N" outbound policy: the first
   `outbound_max` distinct topics receive aliases 1..N, which are never
-  replaced. The caller records an assigned mapping only when it emits the
-  aliased packet.
+  replaced. An empty topic is never aliased. `assign/2` returns the updated
+  table immediately; the caller must keep it only when it actually emits the
+  returned packet and otherwise retain the previous table.
   """
 
   alias GravitonMQ.MQTT.Packet.Publish
@@ -57,7 +58,7 @@ defmodule GravitonMQ.MQTT.TopicAlias do
   @spec assign(t(), Publish.t()) :: {t(), Publish.t()}
   def assign(%__MODULE__{} = table, %Publish{topic: topic, properties: properties} = packet) do
     cond do
-      Keyword.has_key?(properties, :topic_alias) ->
+      topic == "" or Keyword.has_key?(properties, :topic_alias) ->
         {table, packet}
 
       Map.has_key?(table.outbound, topic) ->

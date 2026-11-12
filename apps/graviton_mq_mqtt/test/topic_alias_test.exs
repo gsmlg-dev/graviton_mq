@@ -79,4 +79,10 @@ defmodule GravitonMQ.MQTT.TopicAliasTest do
     aliased = publish("a", topic_alias: 4)
     assert {^table, ^aliased} = TopicAlias.assign(table, aliased)
   end
+
+  test "an empty topic is never assigned an outbound alias" do
+    table = TopicAlias.new(0, 5)
+    packet = publish("")
+    assert {^table, ^packet} = TopicAlias.assign(table, packet)
+  end
 end
