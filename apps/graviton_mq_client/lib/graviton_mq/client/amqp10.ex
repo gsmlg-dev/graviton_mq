@@ -44,6 +44,7 @@ defmodule GravitonMQ.Client.AMQP10 do
        attempt: 0,
        retry: nil,
        close_cause: nil,
+       host_closes: [],
        lost: nil,
        observer_monitor: Process.monitor(config.observer)
      }, {:continue, :connect}}
@@ -90,13 +91,32 @@ defmodule GravitonMQ.Client.AMQP10 do
     do: {:reply, {:error, :invalid_delivery}, state}
 
   defp call({:command, command}, {caller, _tag}, state) do
-    if offline?(state) do
-      offline_command(state, command, caller)
-    else
-      case admit(state, command, %{caller: caller}) do
-        {:ok, reference, state} -> {:reply, {:ok, reference}, state}
-        {:error, reason, state} -> {:reply, {:error, reason}, state}
-      end
+    cond do
+      offline?(state) ->
+        offline_command(state, command, caller)
+
+      # A Close already in flight (idle/open timeout, protocol error) becomes
+      # final: the owner does not reconnect, and the host learns `:closed`
+      # once the transport is released (after_loss/1).
+      command == :close and state.endpoint.phase == :closing and
+          length(state.host_closes) >= state.config.max_operations ->
+        {:reply, {:error, :operation_limit}, state}
+
+      command == :close and state.endpoint.phase == :closing ->
+        reference = make_ref()
+
+        {:reply, {:ok, reference},
+         %{
+           state
+           | close_cause: :host_close,
+             host_closes: [{caller, reference} | state.host_closes]
+         }}
+
+      true ->
+        case admit(state, command, %{caller: caller}) do
+          {:ok, reference, state} -> {:reply, {:ok, reference}, state}
+          {:error, reason, state} -> {:reply, {:error, reason}, state}
+        end
     end
   end
 
@@ -586,7 +606,11 @@ defmodule GravitonMQ.Client.AMQP10 do
   defp after_loss(state) do
     reason = state.lost
     policy = state.config.reconnect
-    state = %{state | lost: nil}
+
+    for {caller, reference} <- Enum.reverse(state.host_closes),
+        do: send(caller, {:graviton_mq, self(), {:operation, reference, {:ok, :closed}}})
+
+    state = %{state | lost: nil, host_closes: []}
 
     cond do
       Reconnect.classify(reason, state.close_cause) == :stop ->

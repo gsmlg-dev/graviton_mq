@@ -191,11 +191,9 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
       assert_receive {:graviton_mq, ^client, {:reconnecting, 1}}, 1_000
 
       # TCP is accepted but the peer never sends Open: no reset.
-      for attempt <- [2] do
-        {:ok, refused} = :gen_tcp.accept(listener, 1_000)
-        :ok = :gen_tcp.close(refused)
-        assert_receive {:graviton_mq, ^client, {:reconnecting, ^attempt}}, 1_000
-      end
+      {:ok, refused} = :gen_tcp.accept(listener, 1_000)
+      :ok = :gen_tcp.close(refused)
+      assert_receive {:graviton_mq, ^client, {:reconnecting, 2}}, 1_000
 
       {:ok, refused} = :gen_tcp.accept(listener, 1_000)
       :ok = :gen_tcp.close(refused)
@@ -271,6 +269,25 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
       assert_receive {:graviton_mq, ^client, {:disconnected, :close_timeout}}, 1_000
       assert_receive {:graviton_mq, ^client, {:reconnecting, 1}}, 1_000
       handshake!(listener, client)
+    end
+
+    test "a host close during an idle-timeout Close is still final" do
+      {listener, client} =
+        client!(
+          idle_timeout_ms: 200,
+          close_timeout_ms: 300,
+          reconnect: [max_attempts: 1, delay: 20, max_delay: 20]
+        )
+
+      socket = handshake!(listener, client)
+      assert %Close{} = recv_pdu!(socket, 2_000)
+      assert {:ok, closing} = Client.close(client)
+      refute_receive {:graviton_mq, ^client, {:operation, ^closing, _}}, 100
+      assert_receive {:graviton_mq, ^client, {:disconnected, :close_timeout}}, 1_000
+      assert_receive {:graviton_mq, ^client, {:operation, ^closing, {:ok, :closed}}}, 100
+      refute_receive {:graviton_mq, ^client, {:reconnecting, _}}, 200
+      assert %{owner: :stopped} = Client.status(client)
+      assert {:error, :timeout} = :gen_tcp.accept(listener, 100)
     end
   end
 
