@@ -793,6 +793,162 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     refute log =~ password
   end
 
+  test "sasl: :disabled bounds the protocol-header wait with sasl_timeout" do
+    {connection, peer, socket} = pending!(sasl: :disabled, sasl_timeout: 30)
+    monitor = Process.monitor(connection)
+    send(connection, {:accepted, socket})
+
+    assert_receive {:amqp10_endpoint_event, ^connection,
+                    {:event, {:disconnected, :sasl_timeout}}},
+                   1000
+
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+  end
+
+  # Minor 2: a failed expect_header switch re-enters the SASL machine; the
+  # rest of the step's effects belong to a negotiation that has ended.
+  test "a failed header switch stops the remaining SASL effects of its step" do
+    # PLAIN: the machine closes; the callback must never start.
+    {connection, peer} = authenticated!(mode: :gate)
+    monitor = monitor!(connection)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: "secret"})
+    init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
+    unswitchable!(connection, sasl_wire(init))
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _reason}}}
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    refute_received {:authenticating, _task}
+    refute_received {:amqp10_sasl_authenticating, ^connection, true}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+
+    # ANONYMOUS: the machine refuses with the AMQP header; no success
+    # outcome follows it and no principal is reported.
+    {connection, peer} = accepted!()
+    monitor = monitor!(connection)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    unswitchable!(connection, sasl_wire(%Init{mechanism: Value.symbol("ANONYMOUS")}))
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    refute_received {:amqp10_principal, ^connection, _principal}
+  end
+
+  # Minor 3: a socket that cannot be re-armed is transport loss for SASL too.
+  test "a re-arm failure during authentication tells the machine and cancels the callback" do
+    {connection, peer} = authenticated!(mode: :gate)
+    monitor = monitor!(connection)
+    plain_init!(peer, "graviton-password")
+    assert_receive {:authenticating, task}, 1000
+    assert_receive {:amqp10_sasl_authenticating, ^connection, true}
+    task_monitor = Process.monitor(task)
+
+    # Close the socket underneath the Connection (a local close sends no
+    # close message), then ask it to re-arm.
+    socket =
+      replace_data!(connection, fn data ->
+        :ok = :gen_tcp.close(data.socket)
+        %{data | read_armed: false}
+      end).socket
+
+    send(connection, {:tcp_passive, socket})
+    assert_killed(task, task_monitor)
+    assert_receive {:amqp10_sasl_authenticating, ^connection, false}
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _reason}}}
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    refute_received {:amqp10_sasl_failure, ^connection, _code}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+  end
+
+  # Minor 4.
+  test "a pipelined header and Open are discarded when authentication is refused" do
+    {connection, peer} = authenticated!(mode: :gate)
+    monitor = monitor!(connection)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: "secret"})
+    init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
+
+    :ok =
+      :gen_tcp.send(
+        peer,
+        sasl_wire(init) <> @header <> wire(%Open{container_id: Value.string("peer")})
+      )
+
+    assert_receive {:authenticating, task}, 1000
+    send(task, {:release, {:error, :denied}})
+    assert %Outcome{code: %Value{value: 1}} = read_sasl(peer)
+    # Neither an AMQP header nor an Open answers the discarded bytes.
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+
+    assert_receive {:amqp10_endpoint_event, ^connection,
+                    {:event, {:disconnected, {:sasl, :auth}}}}
+
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    refute_received {:amqp10_endpoint_event, ^connection, {:event, {:connected, _}}}
+    refute_received {:amqp10_principal, ^connection, _principal}
+  end
+
+  test "input held while paused is bounded by max_input_bytes with the input-limit reason" do
+    {connection, peer} =
+      authenticated!([mode: :gate],
+        max_input_bytes: 65_536,
+        endpoint_options: [max_frame_size: 512]
+      )
+
+    monitor = monitor!(connection)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: "secret"})
+    init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
+    :ok = :gen_tcp.send(peer, sasl_wire(init) <> @header)
+    assert_receive {:authenticating, task}, 1000
+    task_monitor = Process.monitor(task)
+    :ok = :gen_tcp.send(peer, :binary.copy(<<0>>, 70_000))
+
+    assert_receive {:amqp10_endpoint_event, ^connection,
+                    {:event, {:disconnected, {:decode_error, :input_buffer_limit}}}},
+                   1000
+
+    assert_killed(task, task_monitor)
+    assert_receive {:amqp10_sasl_authenticating, ^connection, false}
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    refute_received {:amqp10_sasl_failure, ^connection, _code}
+  end
+
+  # Places a complete SASL frame plus one extra octet in the stream buffer
+  # and drains it: the frame decodes, but the buffer is not empty when the
+  # machine asks the stream to expect the AMQP header.
+  defp unswitchable!(connection, frame) do
+    data =
+      replace_data!(connection, fn data ->
+        %{data | stream: %{data.stream | buffer: frame <> "A"}, drain_pending: true}
+      end)
+
+    send(connection, {:drain, data.endpoint.generation})
+  end
+
+  defp replace_data!(connection, update) do
+    caller = self()
+    reference = make_ref()
+
+    :sys.replace_state(connection, fn shell ->
+      data = update.(:ets.lookup_element(shell.table, :state, 2))
+      :ets.insert(shell.table, {:state, data})
+      send(caller, {reference, data})
+      shell
+    end)
+
+    assert_receive {^reference, data}, 1000
+    data
+  end
+
   # A monitor is a signal from this test process, while socket input (and
   # signals from other processes) reach the monitored process by another
   # path; the two are unordered, so a stimulus could stop it before the

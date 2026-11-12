@@ -324,13 +324,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
     if byte_size(bytes) + byte_size(state.input) + byte_size(state.stream.buffer) >
          state.config.max_input_bytes do
       error = Error.new(:frame_decode, :limit_exceeded, :input_buffer_limit)
+      state = %{state | input: <<>>, stream: %{state.stream | buffer: <<>>}}
 
-      continue(
-        route(
-          %{state | input: <<>>, stream: %{state.stream | buffer: <<>>}},
-          {:decode_error, error}
-        )
-      )
+      # The bound is local, not a peer SASL violation: during negotiation
+      # (including paused input) it closes with the same reason as the AMQP
+      # layer's decode error, and cancels any running callback.
+      if Machine.active?(state.sasl),
+        do: continue(sasl_step(state, {:transport_down, {:decode_error, error.reason}})),
+        else: continue(step(state, {:decode_error, error}))
     else
       state =
         drain(%{state | input: state.input <> bytes}, state.config.max_input_frames_per_turn)
@@ -419,7 +420,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
         event: event
       })
 
-    Enum.reduce(effects, %{state | sasl: sasl}, &sasl_effect/2)
+    # A failed `expect_header` switch re-enters the machine, which then closes
+    # or refuses. Once that nested step has replaced the machine, this step's
+    # remaining effects (an authentication, a success outcome) are stale.
+    Enum.reduce_while(effects, %{state | sasl: sasl}, fn effect, state ->
+      state = sasl_effect(effect, state)
+      if state.sasl == sasl, do: {:cont, state}, else: {:halt, state}
+    end)
   end
 
   defp sasl_effect({:send_bytes, generation, id, bytes}, state),
@@ -677,8 +684,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   defp arm_socket(state) do
     case setopts(state.transport, state.socket, active: :once) do
       :ok -> %{state | read_armed: true}
-      # A closed or failed socket is reported once as transport loss.
-      {:error, reason} -> step(state, {:transport_down, transport_reason(reason)})
+      # A closed or failed socket is reported once as transport loss (to the
+      # SASL machine while it owns input, so a running callback is cancelled).
+      {:error, reason} -> route(state, {:transport_down, transport_reason(reason)})
     end
   end
 
