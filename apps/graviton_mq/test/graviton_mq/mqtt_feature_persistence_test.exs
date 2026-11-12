@@ -72,12 +72,13 @@ defmodule GravitonMQ.MQTTBroker.FeaturePersistenceTest do
     end
   end
 
+  # `{:error, _}` while the owner restarts means "not yet".
   defp wait(instance, predicate, deadline \\ 100) do
-    {:ok, status} = GravitonMQ.status(instance)
+    result = GravitonMQ.status(instance)
 
     cond do
-      predicate.(status) -> status
-      deadline == 0 -> flunk("status condition timed out: #{inspect(status)}")
+      match?({:ok, _}, result) and predicate.(elem(result, 1)) -> elem(result, 1)
+      deadline == 0 -> flunk("status condition timed out: #{inspect(result)}")
       true -> Process.sleep(50) && wait(instance, predicate, deadline - 1)
     end
   end
