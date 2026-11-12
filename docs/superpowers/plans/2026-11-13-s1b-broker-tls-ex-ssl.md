@@ -4295,3 +4295,56 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
     Umbrella `mqtt_connection` + `amqp10_sasl` + `amqp10_runtime` +
     `mqtt_privacy` 45 tests, 0 failures. No compile warnings.
     `DurableQueueTest` was not run in these sets.
+
+### Tasks 13–15 (2026-11-12)
+
+- **Task 13.** `31becde` feat(runtime): red (`architecture_test` +
+  `release_test` 38 tests, 2 failures: the runtime `:ssl` reference was
+  allowed; the application list was `[:ssl]`) → green (+
+  `dependency_graph_test` 41 tests, 0 failures). Umbrella
+  `compile --warnings-as-errors` clean; `mix graviton_mq.check_architecture`
+  passed (7943 source references across 7 applications); runtime app-wide
+  `mix test` 171 tests, 0 failures. **`extra_applications: [:ssl]` removed**
+  (now `[:crypto]`). Evidence that nothing needs OTP `:ssl` started:
+  runtime lib has no `:ssl` module reference (only the `{:ssl, socket, bytes}`
+  message tags ex_ssl sends); ex_ssl and hell lib call no `:ssl.` function;
+  their built `.app` files list `[kernel, stdlib, elixir, crypto, public_key,
+  logger]` and `[kernel, stdlib, elixir, logger, ex_ssl, telemetry]` (each adds
+  `:ssl` only under its own `Mix.env() == :test`). In a plain `erl` VM (no Mix)
+  the runtime's dependency closure has no `:ssl` and
+  `ensure_all_started(:graviton_mq_runtime)` leaves `:ssl` unstarted. Under
+  `mix run` `:ssl` is always started beforehand by Hex (hex.app lists `ssl`,
+  `inets`), so Mix-hosted observations cannot show this.
+- **Task 12 hand-off (`idle_messages/2`).** `ac581c3` test(amqp): the trace
+  probe is replaced by a `:sys.install/2` debug function that runs inside the
+  sensitive Connection and reports each `{:in, message}`; `:sys.remove/2` is
+  synchronous, so collection uses `after 0`. Production `:sensitive` is kept.
+  Mutation proof (temporary, reverted): a 50 ms self-rescheduling
+  `:mutation_poll` armed with `active: :once` in `amqp10/connection.ex` →
+  6 tests, 2 failures (both idle tests list `:mutation_poll`); the old trace
+  probe under the same mutation → 6 tests, 0 failures (vacuous, confirmed).
+  Green 6 tests, 0 failures (three runs).
+- **Task 14.** `5410ea3` test(interop): Paho peer + test, Mosquitto and Proton
+  TLS evidence (shared-file check of `amqp10_proton_test.exs` clean). Local
+  compile-only run: 26 tests, 0 failures, 26 excluded, no warnings
+  (`--warnings-as-errors`); `py_compile` OK. **Independent-peer TLS: NOT RUN
+  (requires CI).** Deviations: stray `client.tls_context = None` dropped (plan
+  allowance); `completed!/1` waits 15 s (default 5 s is tight with `--hold 2`);
+  `tls_protocol/1` skips a Connection whose socket is still `nil`; Proton
+  reuses the file's existing `child/2` instead of a duplicate `find/2` and its
+  existing `context.python`. The Mosquitto "peer" OpenSSL line is the host
+  `openssl version` (as planned), not libmosquitto's linked library.
+- **Task 15.** `a124d3f` test(release): certificates in the staging directory
+  and the planned `tls_smoke`. **Deviation:** the `:ssl`-not-started assertion
+  cannot run under `mix run` (Hex has already started `:ssl`), so the smoke
+  runs in a separate `elixir -pa <consumer>/_build/lib/*/ebin` VM (no Mix/Hex)
+  that starts `:graviton_mq_runtime` itself, for the main consumer and for the
+  embedding consumer (no client package: ex_ssl through hell only); the
+  planned `embedding_smoke` in-`mix run` assertion is replaced by that run.
+  Local run (`stage_hex.exs` + `build_hex.exs`, Hex reachable): exit 0, seven
+  archives, three consumers, `Broker TLS 1.3 listener round trip PASS; OTP :ssl
+  not started` printed twice; Mosquitto/Proton/Artemis/client network parts
+  NOT RUN (no peers). Mutation in the same VM (`ensure_all_started(:ssl)`
+  first) fails the assertion with `MatchError`.
+- Regressions: umbrella `mqtt_tls` + `amqp10_tls` 20 tests, 0 failures; final
+  architecture check passed.
