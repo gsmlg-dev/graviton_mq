@@ -7,8 +7,11 @@ defmodule GravitonMQ.AMQP10.Endpoint do
   notifications and transport closure. A write receipt proves only local socket
   acceptance. Session-owned delivery responsibility remains in `SessionEngine`.
 
-  This initial profile uses AMQP 1.0 without SASL, volatile nontransactional
-  format-zero messages and receiver-first settlement. There is no transport
+  The Endpoint itself never negotiates SASL and rejects a `sasl:` option.
+  Running shells compose `GravitonMQ.AMQP10.SASL.Machine` before stepping
+  `:start`, which then emits `AMQP 0 1 0 0` and Open exactly as without SASL.
+  The profile uses volatile nontransactional format-zero messages and
+  receiver-first settlement. There is no transport
   reconnection or implicit replay. Frame bodies remain opaque until this layer
   explicitly invokes the performative codec.
   """

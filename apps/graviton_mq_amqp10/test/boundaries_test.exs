@@ -27,6 +27,16 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
     GravitonMQ.AMQP10.Outcome,
     GravitonMQ.AMQP10.OutcomeMapper,
     GravitonMQ.AMQP10.SASL,
+    GravitonMQ.AMQP10.Codec.Stream,
+    GravitonMQ.AMQP10.Codec.SASL,
+    GravitonMQ.AMQP10.SASL.Mechanisms,
+    GravitonMQ.AMQP10.SASL.Init,
+    GravitonMQ.AMQP10.SASL.Challenge,
+    GravitonMQ.AMQP10.SASL.Response,
+    GravitonMQ.AMQP10.SASL.Outcome,
+    GravitonMQ.AMQP10.SASL.Plain,
+    GravitonMQ.AMQP10.SASL.Anonymous,
+    GravitonMQ.AMQP10.SASL.Machine,
     GravitonMQ.AMQP10.Error
   ]
 
@@ -72,8 +82,31 @@ defmodule GravitonMQ.AMQP10.BoundariesTest do
           GravitonMQ.AMQP10.Performative.End,
           GravitonMQ.AMQP10.Performative.Close
         ] do
+      # function_exported?/3 does not load modules; load them so the checks
+      # do not depend on test order.
+      assert {:module, ^module} = Code.ensure_loaded(module)
       refute function_exported?(module, :start_link, 1)
       refute function_exported?(module, :child_spec, 1)
     end
+  end
+
+  test "SASL layer modules are pure data and functions without process entry points" do
+    for module <- [
+          GravitonMQ.AMQP10.Codec.SASL,
+          GravitonMQ.AMQP10.SASL.Machine,
+          GravitonMQ.AMQP10.SASL.Plain,
+          GravitonMQ.AMQP10.SASL.Anonymous
+        ] do
+      # function_exported?/3 does not load modules; load them so the checks
+      # do not depend on test order.
+      assert {:module, ^module} = Code.ensure_loaded(module)
+      refute function_exported?(module, :start_link, 1)
+      refute function_exported?(module, :child_spec, 1)
+    end
+
+    assert function_exported?(GravitonMQ.AMQP10.SASL.Machine, :step, 2)
+    # SASL is composed by shells; the Endpoint option stays rejected.
+    assert {:error, :sasl_not_supported} =
+             GravitonMQ.AMQP10.Endpoint.new(container_id: "c", sasl: true)
   end
 end
