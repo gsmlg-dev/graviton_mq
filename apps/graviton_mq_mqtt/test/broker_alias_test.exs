@@ -3,7 +3,7 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
 
   alias GravitonMQ.MQTT.{Broker, Broker.Checkpoint}
   alias GravitonMQ.MQTT.Codec.Packet
-  alias GravitonMQ.MQTT.Packet.{Connack, Connect, Disconnect, Publish, Puback, Subscribe}
+  alias GravitonMQ.MQTT.Packet.{Connack, Connect, Disconnect, Publish, Puback, Pubrec, Subscribe}
 
   defp new(options \\ []) do
     {:ok, state} = Broker.new(options)
@@ -395,5 +395,91 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
     {state, released} = packet(state, :sub, %Puback{packet_id: sent_id}, 2)
     assert [%Publish{topic: "q/b", properties: [topic_alias: 2]}] = publishes(released, :sub)
     assert state.connections[:sub].aliases.outbound == %{"q/a" => 1, "q/b" => 2}
+  end
+
+  test "a QoS 2 duplicate in alias form after PUBREC is acknowledged, not redelivered" do
+    {state, _} = attach(new(), :pub)
+    {state, _} = attach(state, :sub)
+    {state, _} = subscribe(state, :sub, [{"x/#", 2}])
+
+    first = %Publish{
+      topic: "x/q2",
+      payload: "once",
+      qos: 2,
+      packet_id: 7,
+      properties: [topic_alias: 3]
+    }
+
+    {state, effects} = packet(state, :pub, first)
+    assert [%Publish{topic: "x/q2"}] = publishes(effects, :sub)
+    assert Enum.any?(effects, &match?({:send, :pub, 1, _, %Pubrec{packet_id: 7}}, &1))
+    assert Map.has_key?(state.sessions["pub"].incoming_qos2, 7)
+
+    {state, effects} = packet(state, :pub, %Publish{first | topic: "", dup: true}, 2)
+    assert publishes(effects, :sub) == []
+    assert Enum.any?(effects, &match?({:send, :pub, 1, _, %Pubrec{packet_id: 7}}, &1))
+    assert Map.has_key?(state.connections, :pub)
+  end
+
+  test "a client Topic Alias Maximum below the broker cap bounds outbound aliases" do
+    {state, _} = attach(new(max_outbound_topic_aliases: 5), :pub)
+    {state, _} = attach(state, :sub, properties: [topic_alias_maximum: 1])
+    {state, _} = subscribe(state, :sub, [{"o/#", 0}])
+    {state, effects} = publish_all(state, :pub, ["o/a", "o/b", "o/a", "o/b"])
+
+    assert Enum.map(publishes(effects, :sub), &{&1.topic, &1.properties[:topic_alias]}) ==
+             [{"o/a", 1}, {"o/b", nil}, {"", 1}, {"o/b", nil}]
+
+    assert state.connections[:sub].aliases.outbound == %{"o/a" => 1}
+  end
+
+  test "checkpointed QoS 1 messages carry no topic_alias property" do
+    {state, _} = attach(new(max_outbound_topic_aliases: 5), :pub)
+
+    {state, _} =
+      attach(state, :sub, properties: [topic_alias_maximum: 5, session_expiry_interval: 60])
+
+    {state, _} = subscribe(state, :sub, [{"k/#", 1}])
+
+    {state, _} =
+      packet(state, :pub, %Publish{
+        topic: "k/a",
+        payload: "1",
+        qos: 1,
+        packet_id: 1,
+        properties: [topic_alias: 1]
+      })
+
+    {state, _} =
+      packet(state, :pub, %Publish{
+        topic: "",
+        payload: "2",
+        qos: 1,
+        packet_id: 2,
+        properties: [topic_alias: 1]
+      })
+
+    {state, _} = Broker.transition(state, {:connection_down, :sub, 1, :abnormal, 2})
+
+    {state, _} =
+      packet(state, :pub, %Publish{
+        topic: "",
+        payload: "3",
+        qos: 1,
+        packet_id: 3,
+        properties: [topic_alias: 1]
+      })
+
+    assert {:ok, snapshot} = Checkpoint.capture(state, 3, 100_000)
+    deliveries = snapshot.state.sessions["sub"].deliveries
+    assert Enum.map(deliveries, & &1.message.payload) == ["1", "2", "3"]
+
+    for %{message: message} <- deliveries do
+      assert message.topic == "k/a"
+      refute Keyword.has_key?(message.properties, :topic_alias)
+
+      assert {:ok, %Publish{topic: "k/a", properties: []}, <<>>} =
+               Packet.decode(message.encoded, :v5)
+    end
   end
 end
