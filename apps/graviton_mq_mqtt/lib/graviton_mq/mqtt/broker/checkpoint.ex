@@ -301,11 +301,20 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
     subscriptions = for {_, session} <- data.sessions, {_, sub} <- session.subscriptions, do: sub
     entries = for {_, session} <- data.sessions, entry <- session.deliveries, do: entry
 
-    if limits.subscription_identifiers == 0 and
-         (Enum.any?(subscriptions, &(&1.subscription_identifier != nil)) or
-            Enum.any?(entries, &(&1.subscription_identifiers != []))),
-       do: {:error, :checkpoint_capability_mismatch},
-       else: :ok
+    cond do
+      limits.subscription_identifiers == 0 and
+          (Enum.any?(subscriptions, &(&1.subscription_identifier != nil)) or
+             Enum.any?(entries, &(&1.subscription_identifiers != []))) ->
+        {:error, :checkpoint_capability_mismatch}
+
+      limits.shared_subscriptions == 0 and
+          (Enum.any?(subscriptions, &(&1.shared != nil)) or
+             Enum.any?(entries, &(&1.shared != nil))) ->
+        {:error, :checkpoint_capability_mismatch}
+
+      true ->
+        :ok
+    end
   end
 
   # Owner decision Q9: v1 is upgraded in memory at read time; the next commit

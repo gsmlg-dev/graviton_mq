@@ -50,7 +50,8 @@ defmodule GravitonMQ.MQTT.Broker do
     # configurations that predate Topic Alias support still start; an explicit
     # value below the worst case fails with `:alias_bytes_exceeded`.
     max_alias_bytes: nil,
-    subscription_identifiers: 1
+    subscription_identifiers: 1,
+    shared_subscriptions: 1
   }
 
   defstruct [
@@ -63,7 +64,11 @@ defmodule GravitonMQ.MQTT.Broker do
     operations: %{},
     wills: %{},
     writes: %{},
-    next_id: 1
+    next_id: 1,
+    # Transient: the Shared Subscription round-robin cursor and the count of
+    # shared entries no member could take. Never captured.
+    share_cursor: %{},
+    shared_discarded: 0
   ]
 
   @spec new(keyword() | map()) :: {:ok, %__MODULE__{}} | {:error, atom()}
@@ -83,7 +88,8 @@ defmodule GravitonMQ.MQTT.Broker do
            limits.dispatch_retry_interval > 0 and
            limits.topic_alias_maximum in 0..65_535 and
            limits.max_outbound_topic_aliases in 0..65_535 and
-           limits.subscription_identifiers in 0..1 do
+           limits.subscription_identifiers in 0..1 and
+           limits.shared_subscriptions in 0..1 do
         alias_bytes =
           limits.max_connections *
             (limits.topic_alias_maximum + limits.max_outbound_topic_aliases) *
@@ -519,7 +525,8 @@ defmodule GravitonMQ.MQTT.Broker do
           Keyword.has_key?(packet.properties, :subscription_identifier) ->
         disconnect(state, id, :subscription_identifiers_not_supported, 0xA1, now)
 
-      Enum.any?(packet.subscriptions, &match?({<<"$share/", _::binary>>, _}, &1)) ->
+      state.limits.shared_subscriptions == 0 and
+          Enum.any?(packet.subscriptions, &match?({<<"$share/", _::binary>>, _}, &1)) ->
         disconnect(state, id, :shared_subscriptions_not_supported, 0x9E, now)
 
       true ->
@@ -994,7 +1001,7 @@ defmodule GravitonMQ.MQTT.Broker do
           properties = [
             retain_available: 1,
             wildcard_subscription_available: 1,
-            shared_subscription_available: 0,
+            shared_subscription_available: state.limits.shared_subscriptions,
             subscription_identifier_available: state.limits.subscription_identifiers,
             topic_alias_maximum: state.limits.topic_alias_maximum,
             maximum_packet_size: state.limits.max_packet_size,
@@ -1047,7 +1054,7 @@ defmodule GravitonMQ.MQTT.Broker do
     }
 
   defp publication(state, source, generation, principal, message, reply, now) do
-    targets = route(state, message)
+    {state, targets} = route(state, message, now)
 
     requests =
       [{:authorize, principal, :publish, message.topic}] ++
@@ -1088,7 +1095,7 @@ defmodule GravitonMQ.MQTT.Broker do
     }
   end
 
-  defp route(state, message) do
+  defp route(state, message, now) do
     network =
       Enum.flat_map(state.sessions, fn {id, session} ->
         matches =
@@ -1139,7 +1146,9 @@ defmodule GravitonMQ.MQTT.Broker do
               incarnations: [],
               message: message,
               qos: min(message.qos, host.options.qos),
-              retain: message.retain and host.options.retain_as_published
+              retain: message.retain and host.options.retain_as_published,
+              subscription_identifiers: [],
+              shared: nil
             }
           ]
         else
@@ -1147,7 +1156,134 @@ defmodule GravitonMQ.MQTT.Broker do
         end
       end)
 
-    Enum.sort_by(network ++ host, &{&1.kind, &1.recipient})
+    {state, shared} = shared_targets(state, message, now)
+    {state, Enum.sort_by(network ++ shared ++ host, &{&1.kind, &1.recipient})}
+  end
+
+  # MQTT 5 §4.8.2: one copy per matching Shared Subscription group, bound to a
+  # member at publication time (Q5). Members are ordered by Client Identifier
+  # after a transient round-robin cursor (Q4); the cursor is fairness state,
+  # not responsibility, and is never captured.
+  defp shared_targets(state, message, now) do
+    state.sessions
+    |> Enum.flat_map(fn {client_id, session} ->
+      for {filter, %{shared: {_name, inner}} = sub} <- session.subscriptions,
+          Topic.matches?(inner, message.topic),
+          do: {filter, {client_id, sub}}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce({state, []}, fn {filter, members}, {state, targets} ->
+      members = Enum.sort_by(members, &elem(&1, 0))
+
+      case select_member(state, filter, members, message, now, :all) do
+        nil ->
+          {state, targets}
+
+        {client_id, sub} ->
+          state = %{state | share_cursor: Map.put(state.share_cursor, filter, client_id)}
+          {state, targets ++ [shared_target(state, filter, client_id, sub, message)]}
+      end
+    end)
+  end
+
+  defp shared_target(state, filter, client_id, sub, message) do
+    session = state.sessions[client_id]
+
+    %{
+      kind: :network,
+      recipient: client_id,
+      token: session.token,
+      principal: session.principal,
+      incarnations: [{filter, sub.id}],
+      message: message,
+      shared: filter,
+      qos: min(message.qos, sub.options.qos),
+      retain: message.retain and sub.options.retain_as_published,
+      subscription_identifiers: List.wrap(sub.subscription_identifier)
+    }
+  end
+
+  # Tiers (spec §4.4): connected members that fit and can send now; other
+  # connected members that fit; for QoS > 0 and tiers == :all, offline
+  # persistent members within the offline limits (Q7).
+  defp select_member(state, filter, members, message, now, tiers) do
+    cursor = Map.get(state.share_cursor, filter)
+
+    {later, earlier} =
+      Enum.split_with(members, fn {client_id, _} -> cursor != nil and client_id > cursor end)
+
+    ordered = later ++ earlier
+
+    connected =
+      Enum.filter(ordered, fn {client_id, sub} ->
+        member_fits?(state, client_id, sub, message, now)
+      end)
+
+    ready =
+      Enum.filter(connected, fn {client_id, sub} ->
+        min(message.qos, sub.options.qos) == 0 or
+          member_connection(state, client_id).send_quota > 0
+      end)
+
+    offline =
+      if tiers == :all,
+        do:
+          Enum.filter(ordered, fn {client_id, sub} ->
+            min(message.qos, sub.options.qos) > 0 and offline_member?(state, client_id, message)
+          end),
+        else: []
+
+    List.first(ready) || List.first(connected) || List.first(offline)
+  end
+
+  defp member_connection(state, client_id) do
+    with %{connection: {id, generation}} <- Map.get(state.sessions, client_id),
+         %{generation: ^generation, phase: :connected} = conn <- Map.get(state.connections, id) do
+      conn
+    else
+      _ -> nil
+    end
+  end
+
+  defp member_fits?(state, client_id, sub, message, now) do
+    case member_connection(state, client_id) do
+      nil ->
+        false
+
+      conn ->
+        qos = min(message.qos, sub.options.qos)
+
+        entry = %{
+          message: message,
+          qos: qos,
+          retain: message.retain and sub.options.retain_as_published,
+          ever_sent: false,
+          subscription_identifiers: List.wrap(sub.subscription_identifier)
+        }
+
+        outbound_fits?(state, conn, recipient_packet(entry, if(qos > 0, do: 1, else: nil), now))
+    end
+  end
+
+  defp offline_member?(state, client_id, message) do
+    session = state.sessions[client_id]
+
+    offline =
+      Enum.flat_map(state.sessions, fn {_id, session} ->
+        if session.connection == nil, do: session.deliveries, else: []
+      end)
+
+    session.connection == nil and session.expiry > 0 and
+      length(offline) + 1 <= state.limits.max_offline_deliveries and
+      pending_bytes(offline) + message_bytes(message) <= state.limits.max_offline_bytes
+  end
+
+  defp shared_of(filter) do
+    case Topic.parse_filter(filter) do
+      {:shared, name, inner} -> {name, inner}
+      _ -> nil
+    end
   end
 
   defp target_current?(state, %{kind: :network} = target) do
@@ -1963,7 +2099,7 @@ defmodule GravitonMQ.MQTT.Broker do
                                                                 {state, subscriptions, codes} ->
             code =
               cond do
-                not Topic.valid_filter?(filter) -> 0x9E
+                not Topic.valid_subscription_filter?(filter) -> 0x9E
                 decision == {:error, :denied} -> 0x87
                 true -> min(opts.qos, state.limits.maximum_qos)
               end
@@ -1973,7 +2109,7 @@ defmodule GravitonMQ.MQTT.Broker do
                 id: state.next_id,
                 options: %{opts | qos: code},
                 subscription_identifier: op.subscription_identifier,
-                shared: nil
+                shared: shared_of(filter)
               }
 
               {%{state | next_id: state.next_id + 1}, Map.put(subscriptions, filter, sub),

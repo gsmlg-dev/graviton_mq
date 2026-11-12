@@ -10,9 +10,9 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
     max_host_subscriptions max_host_outstanding max_demand auth_timeout max_session_bytes
     max_subscription_bytes max_offline_deliveries max_offline_bytes max_writes max_write_bytes
     max_incoming_bytes dispatch_retry_interval topic_alias_maximum max_outbound_topic_aliases
-    max_alias_bytes subscription_identifiers)a
+    max_alias_bytes subscription_identifiers shared_subscriptions)a
   # Boolean runtime switches mapped to the machine's 0/1 availability flags.
-  @flag_keys ~w(subscription_identifiers)a
+  @flag_keys ~w(subscription_identifiers shared_subscriptions)a
   @keys @machine_keys ++ ~w(versions listeners auth host_principal auth_concurrency
     tick_interval connect_timeout send_timeout max_writer_packets max_writer_bytes persistence)a
   @persistence_keys ~w(directory stream_id max_snapshot_bytes max_log_bytes fault_injector)a

@@ -130,5 +130,13 @@ defmodule GravitonMQ.Runtime.MQTT.ConfigTest do
 
     assert {:error, :invalid_mqtt_options} =
              Config.build(auth: :anonymous, subscription_identifiers: 1)
+
+    assert {:ok, config} = Config.build(auth: :anonymous, shared_subscriptions: false)
+    assert config.machine_options[:shared_subscriptions] == 0
+    assert {:ok, config} = Config.build(auth: :anonymous, shared_subscriptions: true)
+    assert config.machine_options[:shared_subscriptions] == 1
+
+    assert {:error, :invalid_mqtt_options} =
+             Config.build(auth: :anonymous, shared_subscriptions: 0)
   end
 end

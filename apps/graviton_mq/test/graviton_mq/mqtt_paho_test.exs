@@ -35,7 +35,7 @@ defmodule GravitonMQ.MQTTBroker.PahoTest do
   end
 
   test "Paho receives DISCONNECT 0x9E after violating advertised Shared Subscriptions availability" do
-    instance = broker()
+    instance = broker(shared_subscriptions: false)
     assert {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.status(instance)
     peer = peer!(port, "shared-off")
     assert assert_peer!(peer) =~ "DISCONNECT 0x9E"
@@ -78,17 +78,18 @@ defmodule GravitonMQ.MQTTBroker.PahoTest do
     refute_receive {:graviton_mq, ^owner, {:delivery, ^subscription, _, _}}, 1_500
   end
 
-  defp broker do
+  defp broker(extra \\ []) do
     start_supervised!(
       {GravitonMQ,
        name: nil,
        runtime_supervisor_name: nil,
-       mqtt: [
-         auth: :anonymous,
-         host_principal: :host,
-         tick_interval: 10,
-         listeners: [[transport: :tcp, ip: {127, 0, 0, 1}, port: 0]]
-       ]}
+       mqtt:
+         [
+           auth: :anonymous,
+           host_principal: :host,
+           tick_interval: 10,
+           listeners: [[transport: :tcp, ip: {127, 0, 0, 1}, port: 0]]
+         ] ++ extra}
     )
   end
 

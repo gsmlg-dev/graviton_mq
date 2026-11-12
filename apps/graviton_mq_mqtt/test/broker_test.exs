@@ -82,7 +82,7 @@ defmodule GravitonMQ.MQTT.BrokerTest do
     assert state.sessions["one"].principal == :user
     assert [{:send, :one, 1, _, %Connack{reason_code: 0, properties: properties}}] = effects
     assert properties[:maximum_qos] == 1
-    assert properties[:shared_subscription_available] == 0
+    assert properties[:shared_subscription_available] == 1
     assert properties[:subscription_identifier_available] == 1
     assert properties[:topic_alias_maximum] == 10
   end
@@ -596,7 +596,9 @@ defmodule GravitonMQ.MQTT.BrokerTest do
   end
 
   test "a shared subscription after advertising unavailable disconnects before authorization" do
-    {state, _} = attach(new(), :one, 1, properties: [session_expiry_interval: 60])
+    {state, _} =
+      attach(new(shared_subscriptions: 0), :one, 1, properties: [session_expiry_interval: 60])
+
     packet = %Subscribe{packet_id: 9, subscriptions: [{"a", 1}, {"$share/g/a", 1}]}
     {state, effects} = Broker.transition(state, {:packet, :one, 1, packet, <<1, 2>>, 1})
     assert Enum.any?(effects, &match?({:send, :one, 1, _, %Disconnect{reason_code: 0x9E}}, &1))
