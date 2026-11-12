@@ -63,4 +63,40 @@ defmodule GravitonMQ.AMQP10.Codec.ProtocolHeaderTest do
               details: %{protocol_id: 0, major: 1, minor: 0, revision: 1}
             }} = ProtocolHeader.recognize(<<"AMQP", 0, 1, 0, 1>>)
   end
+
+  test "recognize/2 accepts the SASL header only when the caller accepts protocol ID 3" do
+    sasl = <<"AMQP", 3, 1, 0, 0>>
+    amqp = <<"AMQP", 0, 1, 0, 0>>
+
+    assert {:ok, %ProtocolHeader{protocol_id: 3, major: 1, minor: 0, revision: 0}, <<9>>} =
+             ProtocolHeader.recognize(sasl <> <<9>>, [3])
+
+    assert {:ok, %ProtocolHeader{protocol_id: 3}, <<>>} = ProtocolHeader.recognize(sasl, [0, 3])
+    assert {:ok, %ProtocolHeader{protocol_id: 0}, <<>>} = ProtocolHeader.recognize(amqp, [0, 3])
+
+    assert {:error, %Error{reason: :sasl_not_supported, offset: 4, details: %{protocol_id: 3}}} =
+             ProtocolHeader.recognize(sasl, [0])
+
+    assert {:error, %Error{reason: :unsupported_protocol_id, details: %{protocol_id: 0}}} =
+             ProtocolHeader.recognize(amqp, [3])
+
+    assert {:error,
+            %Error{
+              reason: :unsupported_version,
+              offset: 5,
+              details: %{protocol_id: 3, major: 1, minor: 1, revision: 0}
+            }} = ProtocolHeader.recognize(<<"AMQP", 3, 1, 1, 0>>, [0, 3])
+
+    assert {:error, %Error{reason: :unsupported_protocol_id}} =
+             ProtocolHeader.recognize(<<"AMQP", 2, 1, 0, 0>>, [0, 3])
+
+    assert {:more, 4} = ProtocolHeader.recognize("AMQP", [0, 3])
+    assert {:more, 6} = ProtocolHeader.recognize("AM", [3])
+
+    assert {:error, %Error{class: :invalid_value, reason: :invalid_accept}} =
+             ProtocolHeader.recognize(sasl, [1])
+
+    assert ProtocolHeader.accept?([0, 3])
+    refute ProtocolHeader.accept?([])
+  end
 end
