@@ -196,6 +196,19 @@ defmodule GravitonMQ.AMQP10.ProtonTest do
     url = "amqps://localhost:#{port}"
     path = body_file(context, "verified-tls")
     receiver = receiver!(context, url, "orders", path, ["--cafile", certificate])
+    assert eventually_protocol(broker) == :"tlsv1.3"
+    {openssl, 0} = System.cmd("openssl", ["version"])
+
+    {proton_ssl, 0} =
+      System.cmd(context.python, [
+        "-c",
+        "import ssl, proton; assert proton.SSL.present(); print(ssl.OPENSSL_VERSION)"
+      ])
+
+    IO.puts(
+      "Proton TLS: broker protocol=tlsv1.3; host #{String.trim(openssl)}; peer #{String.trim(proton_ssl)}"
+    )
+
     {output, status} = proton(context, "send", url, "orders", path, ["--cafile", certificate])
     assert status == 0, output
     eventually!(fn -> PeerProcess.snapshot(receiver).exit_status != nil end)
@@ -234,6 +247,39 @@ defmodule GravitonMQ.AMQP10.ProtonTest do
   defp queue(broker) do
     assert {:ok, %{queues: %{"orders" => status}}} = GravitonMQ.amqp10_status(broker)
     status
+  end
+
+  defp eventually_protocol(broker, deadline \\ System.monotonic_time(:millisecond) + 5_000) do
+    connections =
+      broker
+      |> child(GravitonMQ.Runtime.Supervisor)
+      |> child(GravitonMQ.Runtime.AMQP10.Supervisor)
+      |> child(:connections)
+
+    protocol =
+      Enum.find_value(DynamicSupervisor.which_children(connections), fn {_, connection, _, _} ->
+        test = self()
+        reference = make_ref()
+
+        :sys.replace_state(connection, fn shell ->
+          socket = :ets.lookup_element(shell.table, :state, 2).socket
+          send(test, {reference, socket && SSL.connection_information(socket, [:protocol])})
+          shell
+        end)
+
+        receive do
+          {^reference, {:ok, [protocol: protocol]}} -> protocol
+          {^reference, _other} -> nil
+        after
+          1_000 -> nil
+        end
+      end)
+
+    cond do
+      protocol -> protocol
+      System.monotonic_time(:millisecond) >= deadline -> nil
+      true -> Process.sleep(20) && eventually_protocol(broker, deadline)
+    end
   end
 
   defp child(supervisor, id) do

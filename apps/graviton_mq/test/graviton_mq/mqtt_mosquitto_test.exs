@@ -233,6 +233,9 @@ defmodule GravitonMQ.MQTTBroker.MosquittoTest do
 
     tls = [host: "localhost", extra: ["--cafile", certificates.ca_certificate]]
     peer = subscriber(context.executables, broker, "secure/#", tls)
+    assert tls_protocol(broker.instance) == :"tlsv1.3"
+    {openssl, 0} = System.cmd(context.executables.openssl, ["version"])
+    IO.puts("Mosquitto TLS: broker protocol=tlsv1.3; peer #{String.trim(openssl)}")
     Mosquitto.publish!(context.executables, broker, "secure/value", "tls", 1, tls)
     assert completed(peer) =~ "secure/value|1|0|tls"
 
@@ -527,5 +530,27 @@ defmodule GravitonMQ.MQTTBroker.MosquittoTest do
 
     publish(broker, "heartbeat/value", "alive", qos: 1)
     assert completed(peer) =~ "heartbeat/value|1|0|alive"
+  end
+
+  defp tls_protocol(instance) do
+    connections =
+      instance
+      |> find(GravitonMQ.Runtime.Supervisor)
+      |> find(GravitonMQ.Runtime.MQTT.Supervisor)
+      |> find(:connections)
+
+    # The socket is nil until the Connection receives {:accepted, socket}.
+    with [{_, connection, _, _} | _] <- DynamicSupervisor.which_children(connections),
+         %SSL.Socket{} = socket <- :sys.get_state(connection).socket,
+         {:ok, information} <- SSL.connection_information(socket, [:protocol]) do
+      information[:protocol]
+    else
+      _ -> nil
+    end
+  end
+
+  defp find(supervisor, id) do
+    {^id, pid, _, _} = List.keyfind(Supervisor.which_children(supervisor), id, 0)
+    pid
   end
 end
