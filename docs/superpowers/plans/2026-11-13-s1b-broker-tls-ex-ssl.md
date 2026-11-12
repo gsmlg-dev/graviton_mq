@@ -4133,3 +4133,46 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
     supervisor's `max_children`. **Coordinator decision needed** on the spec
     statement (accept 4 × `max_connections`, or e.g. a single TLS acceptor,
     which would conflict with the parallel-release case that needs ≥ 2).
+- **Coordinator fix.** `fa45b0f` fix(runtime): each of HellHandoff's 4
+  acceptors takes `num_connections: ceil(max_connections / 4)`; spec §4.8
+  amended accordingly.
+
+### Tasks 6–7 (2026-11-12)
+
+- **Task 6.** `b423c6e` feat(mqtt): red (1 test, 1 failure:
+  `SSL.connection_information/1` returned `{:error, :badarg}` on the OTP
+  socket) → green. Verify: `mqtt_tls` + `mqtt_connection` + `mqtt_privacy`
+  + `mqtt_host` 19 tests, 0 failures; runtime `hell_handoff_test.exs` +
+  `test/mqtt` 54 tests, 0 failures; extra regressions `mqtt_feature`,
+  `mqtt_persistence`, `mqtt_feature_persistence` + `mqtt_tls` 31 tests,
+  0 failures; no `:ssl.` in `runtime/mqtt/*.ex`. Deviations: to keep the
+  test file warning-free, `mqtt_tls_test.exs` omits the helpers and aliases
+  only Tasks 8–12 use (`import ExUnit.CaptureLog`, aliases `Disconnect`,
+  `Suback`, `Unsuback`, `Listener`; `tcp_connected/2`, `listener!/2`,
+  `find_listener/2`, `monitor!/1`, `free_port/0`) and reduces `tls_listener`
+  to `tls_listener(certificates, tls)` (id `:tls`, port 0); Tasks 8–12
+  restore them from the plan text. The listener `child_spec` comment now
+  says "never kills a listener mid-stop" (was "a TCP listener").
+- **Task 7.** `77006a5` feat(amqp): shared-file check of the five files
+  clean. Red: `amqp10_tls_test.exs` 2 tests, 2 failures (`{:error, :badarg}`;
+  silent-peer count `active: 1`); `connection_input_test.exs` 3 tests,
+  1 failure (`:ssl.recv` `{:error, :closed}`: the Connection crashed calling
+  `:ssl.handshake/2` on an `%SSL.Socket{}`) → green. The Connection-level
+  test "TLS handshake with a silent peer respects the finite connection
+  timeout" was deleted from `connection_test.exs`; its behaviour moved to
+  the listener-level case "a silent TCP peer to a TLS listener is closed
+  within connect_timeout and starts no Connection" in `amqp10_tls_test.exs`
+  (and Task 9). The `{:transport_down, {:handshake, _}}` reason no longer
+  exists. Verify: runtime `test/amqp10` + `hell_handoff_test.exs` 131 tests,
+  1 failure in `DurableQueueTest` "a small log limit compacts repeatedly…"
+  (`{:error, :unknown_outcome}`). It drives the S3-owned `Queue` directly,
+  touches no listener/Connection, and passed 3/3 isolated reruns (10 tests,
+  0 failures each): load flake, not this change. Umbrella `amqp10_tls` +
+  `amqp10_runtime` + `amqp10_sasl` + `amqp10_boundaries` 39 tests,
+  0 failures; after S3's `e71e62d` landed, `amqp10_tls` + `mqtt_tls` +
+  `amqp10_sasl` 17 tests, 0 failures. `grep -rn ":ssl\." runtime/lib` prints
+  nothing. Same test-helper trimming as Task 6 (`CaptureLog`, the SASL
+  aliases, `@sasl`, `plain!/1`, `read_sasl!/1`, `listener!/2`,
+  `find_listener/2`, `monitor!/1`, `free_port/0`; `broker!/2`,
+  `tls_listener/1`, `port/1`); the `Auth` module is kept. The AMQP listener
+  comment gets the same "a listener" wording.
