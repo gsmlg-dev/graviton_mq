@@ -6,18 +6,20 @@ defmodule GravitonMQ.Client.AMQP10 do
   alias GravitonMQ.AMQP10.Codec.{Error, Performative, Stream}
   alias GravitonMQ.AMQP10.Codec.Frame, as: FrameCodec
   alias GravitonMQ.AMQP10.SASL.{Machine, Plain}
-  alias GravitonMQ.Client.AMQP10.Config
+  alias GravitonMQ.Client.AMQP10.{Config, Reconnect}
   alias GravitonMQ.Client.Transport
 
   def start_link(options) do
     with {:ok, config} <- Config.build(options),
          {:ok, endpoint} <- Endpoint.new(config.endpoint_options),
-         {:ok, stream} <-
-           Stream.new(config.limits, accept: if(config.sasl == :none, do: [0], else: [0, 3])) do
+         {:ok, stream} <- Stream.new(config.limits, accept: accept(config)) do
       registration = if config.name, do: [name: config.name], else: []
       GenServer.start_link(__MODULE__, {config, endpoint, stream}, registration)
     end
   end
+
+  defp accept(%{sasl: :none}), do: [0]
+  defp accept(_config), do: [0, 3]
 
   @impl true
   def init(argument), do: protect(fn -> initialize(argument) end)
@@ -38,6 +40,11 @@ defmodule GravitonMQ.Client.AMQP10 do
        operations: %{},
        link_locks: %{},
        timers: %{},
+       owner: :connecting,
+       attempt: 0,
+       retry: nil,
+       close_cause: nil,
+       lost: nil,
        observer_monitor: Process.monitor(config.observer)
      }, {:continue, :connect}}
   end
@@ -45,14 +52,13 @@ defmodule GravitonMQ.Client.AMQP10 do
   @impl true
   def handle_continue(event, state), do: protect(fn -> continued(event, state) end)
 
-  defp continued(:connect, state) do
-    state =
-      case Transport.connect(state.config) do
-        {:ok, socket} -> state |> Map.put(:socket, socket) |> begin() |> arm_socket()
-        {:error, reason} -> step(state, {:transport_down, {:connect, transport_reason(reason)}})
-      end
+  defp continued(:connect, state), do: {:noreply, connect(state)}
 
-    {:noreply, state}
+  defp connect(state) do
+    case Transport.connect(state.config) do
+      {:ok, socket} -> state |> Map.put(:socket, socket) |> begin() |> arm_socket()
+      {:error, reason} -> step(state, {:transport_down, {:connect, transport_reason(reason)}})
+    end
   end
 
   @impl true
@@ -62,7 +68,10 @@ defmodule GravitonMQ.Client.AMQP10 do
     {:reply,
      %{
        phase: state.endpoint.phase,
+       owner: state.owner,
        generation: state.endpoint.generation,
+       attempt: state.attempt,
+       next_retry_ms: next_retry_ms(state),
        pending: map_size(state.operations),
        sessions: map_size(state.endpoint.connection.sessions_by_identity),
        writes: map_size(state.endpoint.writes),
@@ -71,37 +80,84 @@ defmodule GravitonMQ.Client.AMQP10 do
   end
 
   defp call({:settle_delivery, {owner, session, token}, outcome}, from, state)
-       when owner == self(),
-       do: call({:command, {:session, session, {:settle, token, outcome}}}, from, state)
+       when owner == self() do
+    if stale_delivery?(state, token),
+      do: {:reply, {:error, :stale_delivery}, state},
+      else: call({:command, {:session, session, {:settle, token, outcome}}}, from, state)
+  end
 
   defp call({:settle_delivery, _reference, _outcome}, _from, state),
     do: {:reply, {:error, :invalid_delivery}, state}
 
   defp call({:command, command}, {caller, _tag}, state) do
-    if map_size(state.operations) >= state.config.max_operations do
-      {:reply, {:error, :operation_limit}, state}
+    if offline?(state) do
+      offline_command(state, command, caller)
     else
-      reference = make_ref()
-      {endpoint, effects, link_locks} = transition(state, {:command, reference, command})
-
-      rejected =
-        Enum.find_value(effects, fn
-          {:operation, ^reference, {:error, _reason} = result} -> result
-          _ -> nil
-        end)
-
-      state = %{state | endpoint: endpoint, link_locks: link_locks}
-
-      if rejected do
-        {:reply, rejected, execute(state, effects)}
-      else
-        state = %{state | operations: Map.put(state.operations, reference, caller)}
-        {:reply, {:ok, reference}, execute(state, effects)}
+      case admit(state, command, %{caller: caller}) do
+        {:ok, reference, state} -> {:reply, {:ok, reference}, state}
+        {:error, reason, state} -> {:reply, {:error, reason}, state}
       end
     end
   end
 
   defp call(_request, _from, state), do: {:reply, {:error, :unsupported_command}, state}
+
+  # Between connections nothing is queued and nothing claims success (D3).
+  defp offline?(%{owner: :offline}), do: true
+  defp offline?(%{owner: :connecting, endpoint: %{generation: generation}}), do: generation > 0
+  defp offline?(_state), do: false
+
+  defp offline_command(state, :close, caller) do
+    reference = make_ref()
+    state = %{cancel_retry(state) | close_cause: :host_close}
+
+    state =
+      if state.owner == :connecting,
+        do: route(state, {:transport_down, :owner_stopped}),
+        else: state
+
+    send(caller, {:graviton_mq, self(), {:operation, reference, {:ok, :closed}}})
+    {:reply, {:ok, reference}, %{state | owner: :stopped}}
+  end
+
+  defp offline_command(state, _command, _caller), do: {:reply, {:error, :disconnected}, state}
+
+  # Shared by host commands and restoration. `owner` is stored with the
+  # operation: `%{caller: pid}`.
+  defp admit(state, command, owner) do
+    if map_size(state.operations) >= state.config.max_operations do
+      {:error, :operation_limit, state}
+    else
+      reference = make_ref()
+      before = state.endpoint.phase
+      event = {:command, reference, command}
+      {endpoint, effects, link_locks} = transition(state, event)
+
+      rejected =
+        Enum.find_value(effects, fn
+          {:operation, ^reference, {:error, reason}} -> reason
+          _ -> nil
+        end)
+
+      state = track_close(%{state | endpoint: endpoint, link_locks: link_locks}, before, event)
+
+      if rejected do
+        {:error, rejected, execute(state, effects)}
+      else
+        state = %{state | operations: Map.put(state.operations, reference, owner)}
+        {:ok, reference, execute(state, effects)}
+      end
+    end
+  end
+
+  # An incoming delivery token is {generation, sid, incarnation, n, id}.
+  defp stale_delivery?(state, token) when is_tuple(token) and tuple_size(token) == 5,
+    do: is_integer(elem(token, 0)) and elem(token, 0) != state.endpoint.generation
+
+  defp stale_delivery?(_state, _token), do: false
+
+  defp next_retry_ms(%{retry: {_timer, _token, at}}), do: max(0, at - now())
+  defp next_retry_ms(_state), do: nil
 
   @impl true
   def handle_info(message, state), do: protect(fn -> info(message, state) end)
@@ -149,6 +205,29 @@ defmodule GravitonMQ.Client.AMQP10 do
     else
       {:noreply, state}
     end
+  end
+
+  defp info({:retry, token}, %{retry: {_timer, token, _at}} = state) do
+    generation = state.endpoint.generation + 1
+    options = Keyword.put(state.config.endpoint_options, :generation, generation)
+    # Both were validated by the identical first construction in start_link/1.
+    {:ok, endpoint} = Endpoint.new(options)
+    {:ok, stream} = Stream.new(state.config.limits, accept: accept(state.config))
+
+    state = %{
+      state
+      | retry: nil,
+        owner: :connecting,
+        endpoint: endpoint,
+        stream: stream,
+        sasl: nil,
+        close_cause: nil,
+        lost: nil,
+        input: <<>>,
+        drain_pending: false
+    }
+
+    {:noreply, connect(state)}
   end
 
   defp info({:DOWN, monitor, :process, _pid, _reason}, %{observer_monitor: monitor} = state),
@@ -286,9 +365,23 @@ defmodule GravitonMQ.Client.AMQP10 do
   end
 
   defp step(state, event) do
+    before = state.endpoint.phase
     {endpoint, effects, link_locks} = transition(state, event)
-    execute(%{state | endpoint: endpoint, link_locks: link_locks}, effects)
+    state = track_close(%{state | endpoint: endpoint, link_locks: link_locks}, before, event)
+    execute(state, effects)
   end
+
+  # D1: remember why this Endpoint began a local Close.
+  defp track_close(state, before, event) do
+    if before not in [:closing, :closed] and state.endpoint.phase == :closing,
+      do: %{state | close_cause: close_cause(event)},
+      else: state
+  end
+
+  defp close_cause({:command, _reference, :close}), do: :host_close
+  defp close_cause({:timeout, :receive_idle, _token}), do: :idle_timeout
+  defp close_cause({:timeout, :open, _token}), do: :open_timeout
+  defp close_cause(_event), do: :protocol
 
   defp begin(%{config: %{sasl: :none}} = state), do: step(state, :start)
 
@@ -376,7 +469,7 @@ defmodule GravitonMQ.Client.AMQP10 do
       {nil, _operations} ->
         state
 
-      {caller, operations} ->
+      {%{caller: caller}, operations} ->
         send(caller, {:graviton_mq, self(), {:operation, reference, result}})
         %{state | operations: operations}
     end
@@ -385,6 +478,16 @@ defmodule GravitonMQ.Client.AMQP10 do
   defp effect({:delivery, session, link, token, raw, metadata}, state) do
     notify(state, {:delivery, {self(), session, token}, session, link, raw, metadata})
     state
+  end
+
+  defp effect({:event, {:connected, _container} = event}, state) do
+    notify(state, event)
+    %{state | owner: :active, attempt: 0}
+  end
+
+  defp effect({:event, {:disconnected, reason} = event}, state) do
+    notify(state, event)
+    %{state | lost: reason}
   end
 
   defp effect({:event, event}, state) do
@@ -405,8 +508,12 @@ defmodule GravitonMQ.Client.AMQP10 do
     end
   end
 
+  # Release the transport first, then decide: a stopped owner holds no socket
+  # or timer (MQTT parity, spec §3.7).
   defp effect({:close_transport, generation, _reason}, state) do
-    if generation == state.endpoint.generation, do: close_socket(state), else: state
+    if generation == state.endpoint.generation,
+      do: state |> close_socket() |> after_loss(),
+      else: state
   end
 
   defp write(state, generation, id, encoded) do
@@ -474,6 +581,45 @@ defmodule GravitonMQ.Client.AMQP10 do
     )
   end
 
+  defp after_loss(%{lost: nil} = state), do: state
+
+  defp after_loss(state) do
+    reason = state.lost
+    policy = state.config.reconnect
+    state = %{state | lost: nil}
+
+    cond do
+      Reconnect.classify(reason, state.close_cause) == :stop ->
+        %{state | owner: :stopped}
+
+      state.attempt >= policy.max_attempts ->
+        if policy.max_attempts > 0, do: notify(state, {:reconnect_exhausted, state.attempt})
+        %{state | owner: :stopped}
+
+      true ->
+        attempt = state.attempt + 1
+        notify(state, {:reconnecting, attempt})
+
+        schedule_retry(
+          %{state | owner: :offline, attempt: attempt},
+          Reconnect.delay(policy, attempt)
+        )
+    end
+  end
+
+  defp schedule_retry(state, delay) do
+    token = make_ref()
+    timer = Process.send_after(self(), {:retry, token}, delay)
+    %{state | retry: {timer, token, now() + delay}}
+  end
+
+  defp cancel_retry(%{retry: {timer, _token, _at}} = state) do
+    Process.cancel_timer(timer)
+    %{state | retry: nil}
+  end
+
+  defp cancel_retry(state), do: state
+
   defp cancel_timer(state, key) do
     case Map.pop(state.timers, key) do
       {nil, _timers} ->
@@ -490,6 +636,8 @@ defmodule GravitonMQ.Client.AMQP10 do
   @impl true
   def terminate(_reason, state) do
     protect(fn ->
+      state = cancel_retry(state)
+
       state =
         if state.endpoint.phase == :active,
           do: step(state, {:command, make_ref(), :close}),

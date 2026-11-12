@@ -4367,3 +4367,11 @@ Placeholder scan: every code step has code, and every command has an expected re
 ## Execution log
 
 (Append dated entries: Task 0 baseline and `S3_BASE`, per-task red/green lines with commit ids, deviations with root cause, mutation-check results, out-of-scope failures, C1 run id/SHA/outcome, C4 totals.)
+
+### 2026-11-12 — Stream A, Task 8 (shell reconnect loop)
+
+- Build root `/tmp/gmq-build-s3a`, `TMPDIR=/tmp/gmq-s3a-tmp` (Stream B uses `/tmp/gmq-build-s3`).
+- Red: `test/amqp10_reconnect_test.exs` 11 tests, 8 failures (every shell test: `owner:` absent from status, no `{:reconnecting, 1}`).
+- Green: the same file 11 tests, 0 failures. `mix compile --warnings-as-errors` clean. Seeds 1, 2, 3 over `amqp10_reconnect_test`, `amqp10_client_test`, `amqp10_sasl_client_test`, `tls_transport_test`, `privacy_test` and the three Artemis files (interop tags excluded): 60 tests, 0 failures, 13 excluded each.
+- Folded in the Task 7 review test: `Reconnect.delay(%{delay: 1, max_delay: 60_000}, 100) == 60_000` (the `min(attempt - 1, 20)` exponent cap).
+- Deviations: none in `amqp10.ex` beyond the plan's code. The plan's `recv_frame!/2` helper default was never used and raised a test-compile warning, so the default was dropped. Task 9 may restore it if it calls `recv_frame!(socket)`.
