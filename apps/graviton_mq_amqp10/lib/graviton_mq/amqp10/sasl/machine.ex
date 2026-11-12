@@ -24,7 +24,22 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
   its credentials once sasl-init is emitted. Final refusal bytes (a protocol
   header or a failing sasl-outcome) are flushed before `{:close, reason}`;
   protocol violations close without an outcome. ANONYMOUS and PLAIN are
-  single-step, so a challenge or response is a protocol error.
+  single-step, so a challenge or response is a protocol error. An
+  unrecognised result for the current authentication fails closed with a `sys`
+  outcome. A server built with `authenticate: true` requires `mode: :required`,
+  so a no-SASL peer can never bypass the callback.
+
+  ## Input pausing (pipelined AMQP header)
+
+  A client may pipeline `AMQP 0 1 0 0` (and AMQP frames such as Open) after
+  sasl-init, before the sasl-outcome. The server holds that header while the
+  callback runs, and from then on `input_paused?/1` is true: the shell must stop
+  taking items from its stream and leave all following bytes untouched in its
+  buffer. It becomes false again only when the machine emits
+  `{:start_endpoint, header}` (the shell then feeds the buffered bytes to the
+  Endpoint) or closes (the buffered bytes are discarded with the connection).
+  Input is also paused while a final refusal is being flushed. Shells check
+  `input_paused?/1` after every step, in addition to `active?/1`.
   """
 
   alias GravitonMQ.AMQP10.{Frame, SASL, Value}
@@ -71,6 +86,15 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
   @spec active?(t()) :: boolean()
   def active?(%__MODULE__{phase: phase}), do: phase not in [:done, :closed]
 
+  @doc """
+  True while the shell must not hand further input to any layer: a pipelined
+  AMQP header is held during authentication, or a final refusal is being
+  flushed. See "Input pausing" in the module documentation.
+  """
+  @spec input_paused?(t()) :: boolean()
+  def input_paused?(%__MODULE__{phase: phase, early_header: header, closing: closing}),
+    do: phase not in [:done, :closed] and (header != nil or closing != nil)
+
   @doc "Timer key used for the negotiation deadline in wake effects."
   @spec deadline_key() :: :sasl_negotiation
   def deadline_key, do: @deadline
@@ -89,6 +113,7 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
       not common_valid?(state) -> {:error, :invalid_options}
       state.mode not in [:optional, :required, :disabled] -> {:error, :invalid_options}
       not is_boolean(state.authenticate) -> {:error, :invalid_options}
+      state.authenticate and state.mode != :required -> {:error, :invalid_options}
       state.mode != :disabled and not mechanisms_valid?(state) -> {:error, :invalid_options}
       true -> {:ok, state}
     end
@@ -142,6 +167,13 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
   # Common fences.
   defp dispatch(%{phase: phase} = state, _event) when phase in [:done, :closed], do: {state, []}
   defp dispatch(state, {:transport_down, reason}), do: close(state, reason)
+
+  # A decided refusal keeps its reason if the deadline fires during the flush.
+  defp dispatch(
+         %{deadline: {token, _at}, closing: {_id, reason}} = state,
+         {:timeout, @deadline, token}
+       ),
+       do: close(%{state | deadline: nil}, reason)
 
   defp dispatch(%{deadline: {token, _at}} = state, {:timeout, @deadline, token}),
     do: close(%{state | deadline: nil}, :sasl_timeout)
@@ -215,6 +247,12 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
        )
        when code in @failure_codes,
        do: outcome_failure(%{state | auth: nil}, code)
+
+  defp dispatch(
+         %{role: :server, phase: :authenticating, auth: ref} = state,
+         {:auth_result, ref, _unrecognised}
+       ),
+       do: outcome_failure(%{state | auth: nil}, :sys)
 
   defp dispatch(
          %{role: :server, phase: :authenticating, early_header: nil} = state,

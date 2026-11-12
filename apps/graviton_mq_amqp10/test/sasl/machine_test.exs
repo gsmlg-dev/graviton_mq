@@ -2,9 +2,11 @@ defmodule GravitonMQ.AMQP10.SASL.MachineTest do
   use ExUnit.Case, async: true
 
   alias GravitonMQ.AMQP10.{Frame, Value}
-  alias GravitonMQ.AMQP10.Codec.{Error, Limits, ProtocolHeader}
+  alias GravitonMQ.AMQP10.Codec
+  alias GravitonMQ.AMQP10.Codec.{Error, Limits, Performative, ProtocolHeader}
   alias GravitonMQ.AMQP10.Codec.Frame, as: FrameCodec
   alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
+  alias GravitonMQ.AMQP10.Performative.Open
   alias GravitonMQ.AMQP10.SASL.{Init, Machine, Mechanisms, Outcome, Plain, Response}
 
   @sasl <<"AMQP", 3, 1, 0, 0>>
@@ -241,6 +243,139 @@ defmodule GravitonMQ.AMQP10.SASL.MachineTest do
                Machine.step(plain, %{generation: 0, now_ms: -1, event: {:auth_result, ref, :ok}})
     end
 
+    test "a callback policy requires SASL, so a no-SASL header never reaches the Endpoint" do
+      machine = server!(mechanisms: ["PLAIN"], authenticate: true)
+      {machine, [{:send_bytes, 0, id, @sasl}]} = step(machine, {:header, header(0)})
+      {_machine, effects} = step(machine, {:write_result, id, :ok})
+      assert List.last(effects) == {:close, :sasl_required}
+      refute Enum.any?(effects, &match?({:start_endpoint, _}, &1))
+    end
+
+    test "input is paused while a pipelined AMQP header is held" do
+      machine = sasl_ready!(server!(mechanisms: ["PLAIN"], authenticate: true))
+      refute Machine.input_paused?(machine)
+
+      {machine, [_, {:authenticate, ref, _}]} =
+        step(machine, {:frame, sasl_frame(plain_init("u", "p"))})
+
+      refute Machine.input_paused?(machine)
+      {machine, []} = step(machine, {:header, header(0)})
+      assert Machine.input_paused?(machine)
+      {machine, _effects} = step(machine, {:auth_result, ref, :ok})
+      refute Machine.input_paused?(machine)
+    end
+
+    test "header and Open pipelined under a callback reach the Endpoint after success" do
+      input = sasl_header_and_init("u", "p") <> @amqp <> open_frame()
+      {machine, stream, rest, effects} = drive(sasl_ready_stream(), input)
+
+      assert [{:expect_header, [0]}, {:authenticate, ref, %{username: "u"}}] = effects
+      assert Machine.input_paused?(machine)
+      # The held header was consumed; the Open is still unread input.
+      assert rest == open_frame()
+
+      {machine, effects} = step(machine, {:auth_result, ref, :ok})
+      assert {:start_endpoint, %ProtocolHeader{protocol_id: 0}} = List.last(effects)
+      refute Machine.active?(machine)
+
+      # The shell resumes and hands the remaining bytes to the AMQP layer.
+      assert {:ok, {:frame, %Frame{type: :amqp, body: body}}, _stream, <<>>} =
+               Codec.Stream.next(stream, rest)
+
+      assert {:ok, %Open{container_id: %Value{value: "pipelined"}}, <<>>} =
+               Performative.decode(body)
+    end
+
+    test "header and Open pipelined under a callback are discarded after a failure" do
+      input = sasl_header_and_init("u", "p") <> @amqp <> open_frame()
+      {machine, _stream, rest, [_, {:authenticate, ref, _}]} = drive(sasl_ready_stream(), input)
+      assert rest == open_frame()
+
+      {machine, [{:outcome, :auth}, {:send_bytes, 0, id, outcome}]} =
+        step(machine, {:auth_result, ref, {:error, :auth}})
+
+      assert %Outcome{code: %Value{value: 1}} = decode_sasl(outcome)
+      assert Machine.input_paused?(machine)
+      {machine, effects} = step(machine, {:write_result, id, :ok})
+      assert List.last(effects) == {:close, {:sasl, :auth}}
+      refute Enum.any?(effects, &match?({:start_endpoint, _}, &1))
+      refute Machine.active?(machine)
+    end
+
+    test "an unrecognised result for the current callback fails closed with sys" do
+      machine = sasl_ready!(server!(mechanisms: ["PLAIN"], authenticate: true))
+
+      {machine, [_, {:authenticate, ref, _}]} =
+        step(machine, {:frame, sasl_frame(plain_init("u", "p"))})
+
+      for result <- [:maybe, {:ok, :principal}, {:error, :teapot}, {:error, "auth"}] do
+        {failed, [{:outcome, :sys}, {:send_bytes, 0, id, outcome}]} =
+          step(machine, {:auth_result, ref, result})
+
+        assert %Outcome{code: %Value{value: 2}} = decode_sasl(outcome)
+        {_failed, effects} = step(failed, {:write_result, id, :ok})
+        assert List.last(effects) == {:close, {:sasl, :sys}}
+      end
+    end
+
+    test "a deadline during a failure flush keeps the decided close reason" do
+      machine = sasl_ready!(server!(mechanisms: ["PLAIN"], authenticate: true))
+
+      {machine, [_, {:authenticate, ref, _}]} =
+        step(machine, {:frame, sasl_frame(plain_init("u", "p"))})
+
+      {machine, _effects} = step(machine, {:auth_result, ref, {:error, :sys_temp}})
+
+      assert {_, [{:close, {:sasl, :sys_temp}}]} =
+               step(machine, {:timeout, :sasl_negotiation, 0})
+
+      {machine, _effects} = step(server!(mode: :required), {:header, header(0)})
+      assert {_, [{:close, :sasl_required}]} = step(machine, {:timeout, :sasl_negotiation, 0})
+    end
+
+    test "remaining server transitions" do
+      # :await_amqp_header refuses anything but an AMQP header with the AMQP header.
+      waiting = elem(step(sasl_ready!(server!()), {:frame, sasl_frame(anonymous_init(nil))}), 0)
+      assert waiting.phase == :await_amqp_header
+      error = Error.new(:protocol_header, :malformed, :invalid_protocol_magic)
+
+      for event <- [
+            {:decode_error, error},
+            {:frame, sasl_frame(%Response{response: Value.binary("x")})},
+            {:header, header(3)}
+          ] do
+        {machine, [{:send_bytes, 0, id, @amqp}]} = step(waiting, event)
+        {_machine, effects} = step(machine, {:write_result, id, :ok})
+        assert List.last(effects) == {:close, :unsupported_protocol_header}
+      end
+
+      plain = sasl_ready!(server!(mechanisms: ["PLAIN"], authenticate: true))
+
+      {plain, [_, {:authenticate, ref, _}]} =
+        step(plain, {:frame, sasl_frame(plain_init("u", "p"))})
+
+      # A second early header while authenticating is a protocol error.
+      {held, []} = step(plain, {:header, header(0)})
+
+      assert {_,
+              [
+                {:cancel_authentication, ^ref},
+                {:cancel_wake, _, _, _},
+                {:close, :sasl_protocol_error}
+              ]} =
+               step(held, {:header, header(0)})
+
+      # A failed earlier write while authenticating cancels the callback.
+      assert {_, [{:cancel_authentication, ^ref}, {:cancel_wake, _, _, _}, {:close, :closed}]} =
+               step(plain, {:write_result, {:sasl, 0}, {:error, :closed}})
+
+      # An AMQP frame where sasl-init is expected is a protocol error.
+      amqp = %{sasl_frame(anonymous_init(nil)) | type: :amqp}
+
+      assert {_, [{:cancel_wake, _, _, _}, {:close, :sasl_protocol_error}]} =
+               step(sasl_ready!(server!()), {:frame, amqp})
+    end
+
     test "invalid server options are refused" do
       for options <- [
             [role: :server, timeout_ms: 0],
@@ -249,6 +384,16 @@ defmodule GravitonMQ.AMQP10.SASL.MachineTest do
             [role: :server, timeout_ms: 10, mechanisms: ["PLAIN"]],
             [role: :server, timeout_ms: 10, mechanisms: ["CRAM-MD5"], authenticate: true],
             [role: :server, timeout_ms: 10, mechanisms: ["PLAIN", "PLAIN"], authenticate: true],
+            # A callback policy must not let a no-SASL peer bypass authentication.
+            [role: :server, timeout_ms: 10, mechanisms: ["PLAIN"], authenticate: true],
+            [
+              role: :server,
+              timeout_ms: 10,
+              mechanisms: ["PLAIN"],
+              authenticate: true,
+              mode: :optional
+            ],
+            [role: :server, timeout_ms: 10, authenticate: true, mode: :disabled],
             [role: :observer, timeout_ms: 10],
             :not_a_keyword
           ] do
@@ -363,6 +508,11 @@ defmodule GravitonMQ.AMQP10.SASL.MachineTest do
                  {:frame, sasl_frame(%Mechanisms{server_mechanisms: Value.symbol("PLAIN")})}
                )
 
+      {machine, []} = step(client!(credentials: :anonymous), {:header, header(3)})
+
+      assert {_, [_, {:close, :sasl_protocol_error}]} =
+               step(machine, {:frame, sasl_frame(%Outcome{code: Value.ubyte(0)})})
+
       challenge = %GravitonMQ.AMQP10.SASL.Challenge{challenge: Value.binary(<<>>)}
 
       assert {_, [_, {:close, :sasl_protocol_error}]} =
@@ -408,6 +558,52 @@ defmodule GravitonMQ.AMQP10.SASL.MachineTest do
     machine
   end
 
+  # A minimal shell drain: feed stream items to the machine while it is active
+  # and input is not paused; apply `{:expect_header, accept}` to the stream.
+  defp drive({machine, stream}, input, effects \\ []) do
+    if Machine.active?(machine) and not Machine.input_paused?(machine) do
+      case Codec.Stream.next(stream, input) do
+        {:ok, {kind, item}, stream, rest} ->
+          event = if kind == :protocol_header, do: {:header, item}, else: {:frame, item}
+          {machine, new} = step(machine, event)
+
+          stream =
+            Enum.reduce(new, stream, fn
+              {:expect_header, accept}, stream ->
+                {:ok, stream} = Codec.Stream.expect_header(stream, accept)
+                stream
+
+              _effect, stream ->
+                stream
+            end)
+
+          drive({machine, stream}, rest, effects ++ new)
+
+        {:more, stream} ->
+          {machine, stream, <<>>, effects}
+      end
+    else
+      {machine, stream, input, effects}
+    end
+  end
+
+  defp sasl_ready_stream do
+    machine = server!(mechanisms: ["PLAIN"], authenticate: true)
+    {:ok, stream} = Codec.Stream.new(Limits.default(), accept: [0, 3])
+    {machine, stream, <<>>, [_mechanisms]} = drive({machine, stream}, @sasl)
+    {machine, stream}
+  end
+
+  defp sasl_header_and_init(username, password) do
+    {:ok, frame} = SASLCodec.encode_frame(plain_init(username, password))
+    frame
+  end
+
+  defp open_frame do
+    {:ok, body} = Performative.encode(%Open{container_id: Value.string("pipelined")})
+    <<8 + byte_size(body)::32, 2, 0, 0::16, body::binary>>
+  end
+
   # The whole machine term, including what `inspect/1` would hide, holds none of
   # the secrets.
   defp refute_retained(machine, secrets) do
@@ -427,10 +623,16 @@ defmodule GravitonMQ.AMQP10.SASL.MachineTest do
 
   defp server!(options \\ []) do
     {:ok, machine} =
-      Machine.new(Keyword.merge([role: :server, timeout_ms: 1_000], options))
+      Machine.new(Keyword.merge(server_defaults(options), options))
 
     {machine, [{:wake_at, 0, :sasl_negotiation, 0, 1_000}]} = step(machine, :start)
     machine
+  end
+
+  # A callback policy is valid only with mandatory SASL.
+  defp server_defaults(options) do
+    mode = if Keyword.get(options, :authenticate, false), do: :required, else: :optional
+    [role: :server, timeout_ms: 1_000, mode: mode]
   end
 
   defp sasl_ready!(machine) do
