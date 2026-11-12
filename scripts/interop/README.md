@@ -52,6 +52,12 @@ with independent Proton peers and reject an unrelated CA and wrong hostname.
 Only public certificates are retained as evidence; private keys are deleted
 with the temporary instance.
 
+Artemis runs with `security-enabled=true`. `--allow-anonymous` maps peers
+without SASL or with SASL ANONYMOUS to the generated guest role; SASL PLAIN is
+checked against the temporary `graviton-test` user, so wrong passwords are
+refused (`amqp10_artemis_sasl_test.exs` A3). The startup probe sends the SASL
+header `AMQP 3 1 0 0`, which Artemis answers in either security mode.
+
 `prepare.py --provided` validates explicitly supplied `GRAVITON_MOSQUITTO_BIN`,
 `GRAVITON_PAHO_PYTHON`, `GRAVITON_PROTON_PYTHON`, `GRAVITON_ARTEMIS_HOME` and
 `JAVA_HOME` paths. It still checks versions and Proton TLS support. Nix hosts

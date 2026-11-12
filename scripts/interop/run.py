@@ -11,7 +11,9 @@ import subprocess
 import tempfile
 import time
 
-HEADER = b"AMQP\x00\x01\x00\x00"
+# Artemis always offers SASL; probing with the SASL header stays valid when
+# security is enabled.
+HEADER = b"AMQP\x03\x01\x00\x00"
 
 
 def tls_material(directory, log):
@@ -53,7 +55,7 @@ def probe(port, context=None):
                     raise RuntimeError("Artemis closed AMQP negotiation")
                 response.extend(part)
             if response != HEADER:
-                raise ValueError("Artemis AMQP version mismatch")
+                raise ValueError("Artemis SASL header mismatch")
         finally:
             if context:
                 peer.close()
@@ -124,7 +126,7 @@ def main():
         contents, count = re.subn(r"<acceptors>.*?</acceptors>", lambda _: acceptors, config.read_text(), flags=re.S)
         if count != 1:
             raise ValueError("Artemis acceptor template changed")
-        contents = contents.replace("<persistence-enabled>false</persistence-enabled>", "<persistence-enabled>false</persistence-enabled>\n<security-enabled>false</security-enabled>\n<jmx-management-enabled>false</jmx-management-enabled>")
+        contents = contents.replace("<persistence-enabled>false</persistence-enabled>", "<persistence-enabled>false</persistence-enabled>\n<security-enabled>true</security-enabled>\n<jmx-management-enabled>false</jmx-management-enabled>")
         config.write_text(contents)
         (args.logs / "artemis-config.xml").write_text(contents)
         with (args.logs / "artemis.log").open("w") as log:
@@ -171,7 +173,7 @@ def main():
                             raise TimeoutError("Mosquitto listener did not start")
                         time.sleep(0.05)
                 env["GRAVITON_MQTT_TEST_PORT"] = str(mqtt_port)
-                evidence.update(amqp_port=port, amqp_tls_port=tls_port, mqtt_port=mqtt_port, amqp_pid=amqp.pid, mqtt_pid=mqtt.pid,
+                evidence.update(artemis_security_enabled=True, amqp_port=port, amqp_tls_port=tls_port, mqtt_port=mqtt_port, amqp_pid=amqp.pid, mqtt_pid=mqtt.pid,
                                 amqp_tls_verified=True)
                 print(json.dumps(evidence, sort_keys=True), flush=True)
                 if command:
