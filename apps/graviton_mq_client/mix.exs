@@ -19,13 +19,14 @@ defmodule GravitonMQClient.MixProject do
     ]
   end
 
-  def application, do: [extra_applications: [:ssl]]
+  def application, do: [extra_applications: [:public_key]]
 
   defp deps do
     [
       {:graviton_mq_core, in_umbrella: true},
       {:graviton_mq_amqp10, in_umbrella: true},
-      {:graviton_mq_mqtt, in_umbrella: true}
+      {:graviton_mq_mqtt, in_umbrella: true},
+      {:ex_ssl, "== 1.0.0-rc.13"}
     ]
   end
 end

@@ -18,19 +18,35 @@ defmodule GravitonMQ.DependencyGraphTest do
     graviton_mq: [:graviton_mq_runtime]
   }
 
+  # ADR 0009: the owner authorized exactly these third-party network packages.
+  # Any new third-party dependency must be added here deliberately.
+  @expected_external_dependencies %{
+    graviton_mq_core: [],
+    graviton_mq_storage: [],
+    graviton_mq_amqp10: [],
+    graviton_mq_mqtt: [],
+    graviton_mq_client: [{:ex_ssl, "== 1.0.0-rc.13"}],
+    graviton_mq_runtime: [{:hell, "== 1.0.0-rc.13"}],
+    graviton_mq: []
+  }
+
   test "child Mix projects declare exactly the required internal dependency graph" do
     expected_apps = @expected_dependencies |> Map.keys() |> Enum.map(&Atom.to_string/1)
     actual_apps = child_apps()
 
     assert MapSet.new(expected_apps) == MapSet.new(actual_apps)
 
-    actual_dependencies =
+    declared =
       Map.new(actual_apps, fn app_name ->
         app = String.to_existing_atom(app_name)
         {app, declared_dependencies(app)}
       end)
 
-    assert @expected_dependencies == actual_dependencies
+    assert @expected_dependencies ==
+             Map.new(declared, fn {app, {internal, _}} -> {app, internal} end)
+
+    assert @expected_external_dependencies ==
+             Map.new(declared, fn {app, {_, external}} -> {app, external} end)
   end
 
   test "umbrella and public child Mix project modules do not conflict" do
@@ -91,9 +107,16 @@ defmodule GravitonMQ.DependencyGraphTest do
     assert dependencies_ast != nil
     {dependencies, []} = Code.eval_quoted(dependencies_ast)
 
-    Enum.map(dependencies, fn
-      {dependency, [in_umbrella: true]} -> dependency
-      unexpected -> flunk("unexpected dependency declaration: #{inspect(unexpected)}")
+    Enum.reduce(dependencies, {[], []}, fn
+      {dependency, [in_umbrella: true]}, {internal, external} ->
+        {internal ++ [dependency], external}
+
+      {dependency, requirement}, {internal, external}
+      when is_atom(dependency) and is_binary(requirement) ->
+        {internal, external ++ [{dependency, requirement}]}
+
+      unexpected, _accumulator ->
+        flunk("unexpected dependency declaration: #{inspect(unexpected)}")
     end)
   end
 

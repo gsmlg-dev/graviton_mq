@@ -39,9 +39,17 @@ defmodule GravitonMQ.StageHex do
           end
 
           deps =
-            Enum.map(config[:deps], fn {dependency, [in_umbrella: true]} ->
-              true = dependency in @apps
-              {dependency, "== #{version}"}
+            Enum.map(config[:deps], fn
+              {dependency, [in_umbrella: true]} ->
+                true = dependency in @apps
+                {dependency, "== #{version}"}
+
+              {dependency, requirement} when is_atom(dependency) and is_binary(requirement) ->
+                false = dependency in @apps
+                {dependency, requirement}
+
+              other ->
+                raise ArgumentError, "#{app} has an unsupported Hex dependency: #{inspect(other)}"
             end)
 
           config =

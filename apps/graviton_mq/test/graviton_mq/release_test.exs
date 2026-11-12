@@ -18,6 +18,12 @@ defmodule GravitonMQ.ReleaseTest do
     graviton_mq: [:graviton_mq_runtime]
   }
 
+  # ADR 0009: owner-authorized third-party packages, in mix.exs declaration order.
+  @external_dependencies %{
+    graviton_mq_client: [{:ex_ssl, "== 1.0.0-rc.13"}],
+    graviton_mq_runtime: [{:hell, "== 1.0.0-rc.13"}]
+  }
+
   test "version updates accept prereleases and reject malformed input before writing", %{
     tmp_dir: root
   } do
@@ -66,7 +72,10 @@ defmodule GravitonMQ.ReleaseTest do
       assert config[:version] == version
       assert config[:elixir] == "~> 1.18.4"
       assert config[:package][:licenses] == ["MIT"]
-      assert config[:deps] == Enum.map(dependencies, &{&1, "== #{version}"})
+
+      assert config[:deps] ==
+               Enum.map(dependencies, &{&1, "== #{version}"}) ++
+                 Map.get(@external_dependencies, app, [])
 
       refute Enum.any?(
                [:build_path, :config_path, :deps_path, :lockfile],
@@ -82,7 +91,7 @@ defmodule GravitonMQ.ReleaseTest do
       expected_application =
         case app do
           :graviton_mq -> [mod: {GravitonMQ.Application, []}]
-          :graviton_mq_client -> [extra_applications: [:ssl]]
+          :graviton_mq_client -> [extra_applications: [:public_key]]
           :graviton_mq_runtime -> [extra_applications: [:ssl]]
           _ -> []
         end
