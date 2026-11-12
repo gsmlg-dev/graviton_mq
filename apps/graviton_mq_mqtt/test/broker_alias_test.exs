@@ -482,4 +482,20 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
                Packet.decode(message.encoded, :v5)
     end
   end
+
+  # Unreachable from the wire (the stored topic was validated when it was
+  # received); a corrupted table must still close one connection, not crash.
+  test "an unexpected re-encode failure disconnects with 0x83 instead of crashing" do
+    {state, _} = attach(new(), :pub)
+    conn = state.connections[:pub]
+    aliases = %{conn.aliases | inbound: %{1 => "bad/#"}}
+    state = %{state | connections: %{state.connections | pub: %{conn | aliases: aliases}}}
+
+    {state, effects} =
+      packet(state, :pub, %Publish{topic: "", payload: "x", properties: [topic_alias: 1]})
+
+    assert disconnected?(effects, :pub, 0x83)
+    assert {:close, :pub, 1, :resolved_packet_invalid} in effects
+    refute Map.has_key?(state.connections, :pub)
+  end
 end
