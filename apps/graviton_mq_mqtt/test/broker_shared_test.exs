@@ -498,4 +498,80 @@ defmodule GravitonMQ.MQTT.BrokerSharedTest do
 
     assert [same, same] = counts
   end
+
+  # Review minor: a binding to a connected member is live only if the copy
+  # still fits that member's current Maximum Packet Size (D2 full topic).
+  test "a member that resumes with a smaller Maximum Packet Size during authorization loses the binding" do
+    large = String.duplicate("p", 100)
+    publication = %Publish{topic: "t", payload: large, qos: 1, packet_id: 1}
+    state = race_group(60)
+
+    {state, [{:authorize, op, request, _}]} =
+      Broker.transition(state, {:packet, :pub, 1, publication, <<1, 2>>, 1})
+
+    assert {:authorize, :m1, :deliver, "t"} in request
+
+    {state, []} = Broker.transition(state, {:connection_open, :m1_again, 1, 2})
+
+    connect = %Connect{
+      version: :v5,
+      client_id: "m1",
+      clean_start: false,
+      properties: [session_expiry_interval: 60, maximum_packet_size: 64]
+    }
+
+    {state, effects} = Broker.transition(state, {:packet, :m1_again, 1, connect, <<16, 0>>, 2})
+    {state, _} = allowed(state, effects, 2)
+    assert state.sessions["m1"].connection == {:m1_again, 1}
+
+    {state, effects} = complete(state, op, request)
+    assert [%Puback{reason_code: 0}] = pubacks(effects)
+    assert holders(state, large) == ["m2"]
+    assert [%Publish{payload: ^large}] = publishes(effects, :m2)
+    assert state.shared_discarded == 0
+  end
+
+  test "a resumed member's never-sent copy that no longer fits moves to a fitting member" do
+    large = String.duplicate("p", 100)
+    state = race_group(60)
+    {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+    {state, _} = Broker.transition(state, {:connection_down, :m2, 1, :abnormal, 2})
+    # Both members offline: the copy is bound to m1's session, never sent.
+    {state, _} =
+      packet(state, :pub, %Publish{topic: "t", payload: large, qos: 1, packet_id: 1}, 3)
+
+    assert holders(state, large) == ["m1"]
+
+    {state, []} = Broker.transition(state, {:connection_open, :m2_again, 1, 4})
+
+    connect_m2 = %Connect{
+      version: :v5,
+      client_id: "m2",
+      clean_start: false,
+      properties: [session_expiry_interval: 60]
+    }
+
+    {state, effects} =
+      Broker.transition(state, {:packet, :m2_again, 1, connect_m2, <<16, 0>>, 4})
+
+    {state, _} = allowed(state, effects, 4)
+
+    {state, []} = Broker.transition(state, {:connection_open, :m1_again, 1, 5})
+
+    connect_m1 = %Connect{
+      version: :v5,
+      client_id: "m1",
+      clean_start: false,
+      properties: [session_expiry_interval: 60, maximum_packet_size: 64]
+    }
+
+    {state, effects} =
+      Broker.transition(state, {:packet, :m1_again, 1, connect_m1, <<16, 0>>, 5})
+
+    {state, _} = allowed(state, effects, 5)
+    {state, effects} = Broker.transition(state, {:tick, 6})
+    {state, _} = allowed(state, effects, 6)
+    assert holders(state, large) == ["m2"]
+    assert state.shared_discarded == 0
+  end
 end

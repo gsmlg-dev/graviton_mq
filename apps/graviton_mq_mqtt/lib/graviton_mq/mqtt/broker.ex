@@ -1267,10 +1267,12 @@ defmodule GravitonMQ.MQTT.Broker do
 
         {%{shared: filter} = target, :ok}, {state, ctx, targets, discarded}
         when filter != nil ->
-          if binding_live?(state, target) do
+          ctx = ctx || selection(state, nil)
+          {live, ctx} = binding_live(state, ctx, target, now)
+
+          if live do
             {state, ctx, targets ++ [refresh_target(state, target)], discarded}
           else
-            ctx = ctx || selection(state, nil)
             members = group_members(state, filter, nil)
 
             case bind(state, ctx, filter, members, op.message, now, :all) do
@@ -1288,10 +1290,26 @@ defmodule GravitonMQ.MQTT.Broker do
     {state, targets, discarded}
   end
 
-  defp binding_live?(state, target),
-    do:
-      target_current?(state, target) and
-        (not target.bound or member_connection(state, target.recipient) != nil)
+  # A binding stays live while its incarnation is current and, if it was
+  # bound to a connected member, that member is still connected and the copy
+  # still fits its current Maximum Packet Size (D2, full topic): a member may
+  # resume during authorization with a smaller limit.
+  defp binding_live(state, ctx, target, now) do
+    cond do
+      not target_current?(state, target) ->
+        {false, ctx}
+
+      not target.bound ->
+        {true, ctx}
+
+      conn = member_connection(state, target.recipient) ->
+        sub = state.sessions[target.recipient].subscriptions[target.shared]
+        member_fits(state, ctx, conn, sub, target.message, now)
+
+      true ->
+        {false, ctx}
+    end
+  end
 
   defp shared_target(state, filter, client_id, sub, message) do
     session = state.sessions[client_id]
@@ -1311,28 +1329,31 @@ defmodule GravitonMQ.MQTT.Broker do
   end
 
   # Selection context for one publication or one redistribution pass:
-  # offline totals are computed once (excluding a session that is ending)
-  # and kept current as entries are bound offline; encoded sizes are cached
-  # per distinct recipient packet shape of one message.
-  defp selection(state, except) do
+  # offline totals are computed lazily, at most once, the first time an
+  # offline member is considered (excluding a session that is ending), and
+  # kept current as entries are bound offline. An entry is bound offline
+  # only after that first computation, so later state changes made by the
+  # same pass are never counted twice. Encoded sizes are cached per distinct
+  # recipient packet shape of one message.
+  defp selection(_state, except), do: %{except: except, offline: nil, sizes: %{}}
+
+  defp offline_totals(state, %{offline: nil} = ctx) do
     offline =
       Enum.flat_map(state.sessions, fn {client_id, session} ->
-        if session.connection == nil and client_id != except,
+        if session.connection == nil and client_id != ctx.except,
           do: session.deliveries,
           else: []
       end)
 
-    %{offline_count: length(offline), offline_bytes: pending_bytes(offline), sizes: %{}}
+    %{ctx | offline: {length(offline), pending_bytes(offline)}}
   end
+
+  defp offline_totals(_state, ctx), do: ctx
 
   defp offline_added(ctx, true, _message), do: ctx
 
-  defp offline_added(ctx, false, message),
-    do: %{
-      ctx
-      | offline_count: ctx.offline_count + 1,
-        offline_bytes: ctx.offline_bytes + message_bytes(message)
-    }
+  defp offline_added(%{offline: {count, bytes}} = ctx, false, message),
+    do: %{ctx | offline: {count + 1, bytes + message_bytes(message)}}
 
   # Tiers (spec §4.4), walked lazily in cursor order: the first connected
   # member that fits and can send now; else the first connected member that
@@ -1382,9 +1403,11 @@ defmodule GravitonMQ.MQTT.Broker do
         {:ok, connected, ctx}
 
       offline not in [nil, false] ->
+        %{offline: {count, bytes}} = ctx = offline_totals(state, ctx)
+
         fits =
-          ctx.offline_count + 1 <= state.limits.max_offline_deliveries and
-            ctx.offline_bytes + message_bytes(message) <= state.limits.max_offline_bytes
+          count + 1 <= state.limits.max_offline_deliveries and
+            bytes + message_bytes(message) <= state.limits.max_offline_bytes
 
         {if(fits, do: :ok, else: :full), offline, ctx}
 
@@ -2806,8 +2829,21 @@ defmodule GravitonMQ.MQTT.Broker do
           end
         else
           # MQTT-3.1.2-25 completes an oversized Application Message locally.
-          # It must not disconnect an otherwise healthy recipient.
+          # It must not disconnect an otherwise healthy recipient. A never-sent
+          # shared copy (e.g. kept by a session that resumed with a smaller
+          # Maximum Packet Size) is first offered to the other group members,
+          # as at publication time; it is deleted and counted if none fits.
           state = remove_delivery(state, :network, op.recipient, entry.id)
+
+          state =
+            if entry.shared != nil and not entry.ever_sent,
+              do:
+                elem(
+                  reroute(state, selection(state, nil), entry, op.recipient, :oversized, now),
+                  0
+                ),
+              else: state
+
           pump_recipient(state, op, now)
         end
     end
