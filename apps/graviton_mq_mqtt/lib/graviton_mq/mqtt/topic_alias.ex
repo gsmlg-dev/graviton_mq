@@ -10,6 +10,10 @@ defmodule GravitonMQ.MQTT.TopicAlias do
   replaced. An empty topic is never aliased. `assign/2` returns the updated
   table immediately; the caller must keep it only when it actually emits the
   returned packet and otherwise retain the previous table.
+
+  Stored topics are copied with `:binary.copy/1`: a decoded topic is a
+  sub-binary of the whole received packet, and a table that kept it would keep
+  that packet (and its payload) alive for the life of the connection.
   """
 
   alias GravitonMQ.MQTT.Packet.Publish
@@ -49,7 +53,7 @@ defmodule GravitonMQ.MQTT.TopicAlias do
             end
 
           topic ->
-            {:ok, %{table | inbound: Map.put(table.inbound, value, topic)},
+            {:ok, %{table | inbound: Map.put(table.inbound, value, :binary.copy(topic))},
              %{packet | properties: properties}}
         end
     end
@@ -68,7 +72,7 @@ defmodule GravitonMQ.MQTT.TopicAlias do
       map_size(table.outbound) < table.outbound_max ->
         value = map_size(table.outbound) + 1
 
-        {%{table | outbound: Map.put(table.outbound, topic, value)},
+        {%{table | outbound: Map.put(table.outbound, :binary.copy(topic), value)},
          %{packet | properties: properties ++ [topic_alias: value]}}
 
       true ->

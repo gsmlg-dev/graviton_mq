@@ -1,6 +1,7 @@
 defmodule GravitonMQ.MQTT.TopicAliasTest do
   use ExUnit.Case, async: true
 
+  alias GravitonMQ.MQTT.Codec.Packet
   alias GravitonMQ.MQTT.Packet.Publish
   alias GravitonMQ.MQTT.TopicAlias
 
@@ -84,5 +85,33 @@ defmodule GravitonMQ.MQTT.TopicAliasTest do
     table = TopicAlias.new(0, 5)
     packet = publish("")
     assert {^table, ^packet} = TopicAlias.assign(table, packet)
+  end
+
+  # A decoded topic is a sub-binary of the whole received packet; a table that
+  # kept it would keep every aliased packet's payload alive for the connection.
+  # OTP copies sub-binaries of at most 64 bytes, so the topics are longer.
+  test "inbound mappings never reference the received packet bytes" do
+    {:ok, bytes} =
+      Packet.encode(%Publish{
+        topic: String.duplicate("t", 100),
+        payload: :binary.copy("p", 65_536),
+        properties: [topic_alias: 1]
+      })
+
+    {:ok, decoded, <<>>} = Packet.decode(bytes, :v5)
+    assert :binary.referenced_byte_size(decoded.topic) > byte_size(decoded.topic)
+    assert {:ok, table, _} = TopicAlias.resolve(TopicAlias.new(10, 0), decoded)
+
+    for {_alias, topic} <- table.inbound,
+        do: assert(:binary.referenced_byte_size(topic) == byte_size(topic))
+  end
+
+  test "outbound mappings never reference the publication bytes" do
+    <<_::binary-size(1), topic::binary-size(100), _::binary>> = :binary.copy("x", 65_536)
+    assert :binary.referenced_byte_size(topic) > byte_size(topic)
+    {table, _} = TopicAlias.assign(TopicAlias.new(0, 5), publish(topic))
+
+    for {topic, _alias} <- table.outbound,
+        do: assert(:binary.referenced_byte_size(topic) == byte_size(topic))
   end
 end
