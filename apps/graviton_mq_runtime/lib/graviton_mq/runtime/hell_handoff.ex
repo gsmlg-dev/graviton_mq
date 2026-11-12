@@ -149,9 +149,14 @@ defmodule GravitonMQ.Runtime.HellHandoff do
   end
 
   # A TLS connection costs a handler and an ex_ssl server process from accept,
-  # so the protocol's max_connections also bounds in-progress handshakes. TCP
-  # keeps Hell's default (S1a).
-  defp connection_limit(:tls, settings), do: [num_connections: settings.max_connections]
+  # so the protocol's max_connections also bounds in-progress handshakes.
+  # Hell's num_connections is per acceptor: each takes an even share, rounded
+  # up, so the listener-wide bound is at most max_connections + 3 (exact when
+  # divisible). Established Connections stay capped by the DynamicSupervisor.
+  # TCP keeps Hell's default (S1a).
+  defp connection_limit(:tls, settings),
+    do: [num_connections: div(settings.max_connections + @num_acceptors - 1, @num_acceptors)]
+
   defp connection_limit(:tcp, _settings), do: []
 
   # Called by the listener that started `server`. Before publication,

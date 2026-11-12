@@ -378,18 +378,16 @@ defmodule GravitonMQ.Runtime.HellHandoffTest do
       assert IO.iodata_to_binary(chunks) == payload
     end
 
-    # T4: num_connections = max_connections bounds handshakes too. Hell's
-    # num_connections is per acceptor, so the listener-wide bound on
-    # concurrent TLS connections (handshakes included) is HellHandoff's 4
-    # acceptors x max_connections. Waiting acceptors take turns (FIFO), so
-    # each of the 4 holds exactly one.
-    test "max_connections bounds concurrent TLS connections per acceptor, including handshakes",
+    # T4: max_connections bounds handshakes too. Hell's num_connections is
+    # per acceptor, so HellHandoff gives each of its 4 acceptors
+    # ceil(max_connections / 4): 8 -> 2 each, 8 listener-wide (not 4 x 8).
+    test "max_connections bounds concurrent TLS connections listener-wide, including handshakes",
          context do
-      %{server: server, port: port} = server(context, max_connections: 1)
-      clients = for _ <- 1..4, do: connect(context, port)
+      %{server: server, port: port} = server(context, max_connections: 8)
+      clients = for _ <- 1..8, do: connect(context, port)
       probes = for _ <- clients, do: receive_probe()
       assert {:ok, handlers} = Hell.connection_pids(server)
-      assert length(handlers) == 4
+      assert length(handlers) == 8
 
       assert {:error, _reason} = TLS.connect(port, context.certificates, [], 500)
       refute_received {{:accepted, _raw}, _probe}

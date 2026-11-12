@@ -320,6 +320,13 @@ keys; AMQP moves from a denylist to the allowlist (§6).
   and a TLS server process each). At the limit Hell's acceptor retries (5 × 1 s) instead of
   accepting, leaving excess clients in the backlog. TCP listeners keep the
   S1a value.
+  *Amendment (Task 5, 2026-11-12):* Hell applies `num_connections` per
+  acceptor (listener-wide maximum = `num_acceptors × num_connections`).
+  HellHandoff therefore gives each of its 4 acceptors
+  `ceil(max_connections / 4)`, bounding concurrent TLS connections,
+  handshakes included, at `max_connections + 3` (exact when divisible by 4).
+  Established Connections remain capped at `max_connections` by the
+  `:connections` DynamicSupervisor.
 - `read_timeout: :infinity` and `shutdown_timeout` stay as in S1a.
 
 ### 4.9 Listener failure, rebind and shutdown
