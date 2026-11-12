@@ -16,7 +16,9 @@ defmodule GravitonMQ.AMQP10.Codec.Error do
     :value_decode,
     :value_encode,
     :performative_decode,
-    :performative_encode
+    :performative_encode,
+    :sasl_decode,
+    :sasl_encode
   ]
   @classes [:malformed, :unsupported, :limit_exceeded, :invalid_value]
 
@@ -28,6 +30,8 @@ defmodule GravitonMQ.AMQP10.Codec.Error do
           | :value_encode
           | :performative_decode
           | :performative_encode
+          | :sasl_decode
+          | :sasl_encode
   @type class :: :malformed | :unsupported | :limit_exceeded | :invalid_value
   @type t :: %__MODULE__{
           operation: operation(),
