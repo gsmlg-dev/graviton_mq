@@ -23,6 +23,14 @@ defmodule GravitonMQ.MQTTClient do
   stops when its observer dies. Session state survives transport reconnects
   while this owner lives.
 
+  Topic Aliases are off by default. `:topic_alias_maximum` (inbound) and
+  `:max_outbound_topic_aliases` enable them; inbound aliases resolve to the
+  full topic before delivery, and outbound aliases are assigned by the client
+  per connection within the peer's CONNACK maximum. A caller-supplied
+  `topic_alias` property is rejected. `subscribe/3` accepts
+  `subscription_identifier: 1..268_435_455`; received identifiers arrive in the
+  delivery packet's properties.
+
   Opt in to local Linux durability with `persistence: [directory: absolute_path,
   max_bytes: 8_388_608]` and a nonempty stable `:client_id`. The parent directory
   must exist. One client or broker owner holds the shared directory inode lock;

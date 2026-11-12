@@ -88,6 +88,32 @@ passed for `696dca0` on a local NixOS Linux host on 2026-11-08. The bounded
 passed its integrated gates and installed recovery consumers. Subsequent
 selected-profile G5/G7 acceptance is recorded in the matrix and G7 record.
 
+Upgrade note (S4): the broker writes snapshot version 2 (Subscription
+Identifiers, shared memberships and shared delivery entries) under the same WAL
+record type. Version 1 data is upgraded in memory on recovery and the next
+commit writes version 2; no offline migration is needed and there is no
+downgrade. A release before S4 cannot read version 2 and fails closed (the
+bounded term reader rejects it with `:invalid_checkpoint_term`); keep a copy
+of the data directory if a rollback may be needed. Restarting with
+`shared_subscriptions: false` or `subscription_identifiers: false` while the
+snapshot holds that state stops startup with `:checkpoint_capability_mismatch`
+instead of dropping it. `GravitonMQ.start_link/1` returns the owner's reason
+nested in the supervisors' standard start chain (ExUnit's `start_supervised/2`
+wraps it once more as `{reason, child_info}`):
+
+```elixir
+{:error,
+ {:shutdown,
+  {:failed_to_start_child, GravitonMQ.Runtime.Supervisor,
+   {:shutdown,
+    {:failed_to_start_child, GravitonMQ.Runtime.MQTT.Supervisor,
+     {:shutdown,
+      {:failed_to_start_child, GravitonMQ.Runtime.MQTT.Broker,
+       :checkpoint_capability_mismatch}}}}}}}
+```
+
+The refused start leaves durable state intact; re-enable the feature to start.
+
 ## Start and embed
 
 Both lifecycles use `GravitonMQ.start_link/1` and `child_spec/1`. A standalone
@@ -206,14 +232,110 @@ also terminates a callback that traps ordinary exit signals. Authentication
 precedes Client-ID takeover; a different principal cannot resume or erase a
 retained session by guessing its Client ID.
 
+## Topic Alias, Subscription Identifiers and shared subscriptions
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `topic_alias_maximum` | `10` | CONNACK Topic Alias Maximum (0..65,535); every alias 1..N is accepted |
+| `max_outbound_topic_aliases` | `0` (off) | Broker cap for aliases it sends, bounded by the client's CONNECT Topic Alias Maximum |
+| `max_alias_bytes` | derived | Static bound `max_connections x (topic_alias_maximum + max_outbound_topic_aliases) x min(65_535, max_packet_size)`; an explicit smaller value fails startup |
+| `subscription_identifiers` | `true` | Subscription Identifier Available; `false` restores DISCONNECT 0xA1 |
+| `shared_subscriptions` | `true` | Shared Subscription Available; `false` restores DISCONNECT 0x9E |
+
+Alias tables belong to one Network Connection and are never persisted. Aliases
+resolve before every other PUBLISH check; an alias of 0 or above the maximum
+gets DISCONNECT 0x94, an empty topic with an unknown alias 0x82. Subscribers
+receive full topics. Outbound aliases are off by default; when enabled they use
+the first N distinct topics per connection and never replace them. A
+publication is delivered only if its full-topic form fits the client's Maximum
+Packet Size; the aliased form is sent only if it also fits, otherwise the full
+topic is sent and no alias is recorded.
+
+Maximum Packet Size limits the wire packet only (MQTT 5.0 §3.1.2.11.4). An
+aliased PUBLISH is resolved and stored under the protocol maximum
+(268,435,460 bytes), not the broker's receive limit, and each subscriber
+receives it only if it fits that subscriber's own limit (otherwise MQTT-3.1.2-25
+applies). Only a resolved packet beyond the protocol maximum gets DISCONNECT
+0x95. The runtime owner likewise encodes outbound packets under the protocol
+maximum, because the pure machine already bounds every outbound packet by the
+recipient's Maximum Packet Size.
+
+`max_alias_bytes` is a static bound checked at start, not an allocation, and an
+alias is never refused because of it (MQTT-3.3.2-12). When omitted it is
+derived from the other limits (128 x 10 x 65,535 = 83,884,800 bytes with the
+defaults), so configurations written before Topic Alias support still start.
+An explicit value below that worst case fails startup with
+`:alias_bytes_exceeded`. Upgrade note: the derived value always equals the
+worst case, so the bound only guards memory when you set it explicitly.
+
+One SUBSCRIBE Subscription Identifier applies to every filter in it; a
+re-SUBSCRIBE replaces it. A forwarded copy carries the identifiers of all
+matching subscriptions (repeated identifiers stay repeated); a shared copy
+carries only the receiving member's identifier. Retained messages sent on
+subscribe carry that subscription's identifier. Retransmissions keep the
+identifiers captured when the message was queued.
+
+`$share/{group}/{filter}` groups are broker-wide and derived from session
+memberships; persistent sessions keep their memberships across restarts.
+Each matching message goes to one member per group, bound at publication:
+deterministic, quota-aware round-robin over Client Identifiers after a
+transient cursor, preferring connected members that fit and have send quota,
+then connected members that fit, then (QoS>0) offline persistent members
+within the offline limits. A QoS0 copy that no connected member can take is
+discarded. When the only candidates are offline members whose offline limits
+are full, the publication is refused with 0x97, as for an ordinary
+subscription. Authorization runs asynchronously, so at commit time a binding
+that has gone stale (session ended, member left or re-subscribed, Clean
+Start, connected member gone offline or now too small) is re-selected among
+the current members rather than dropped after PUBACK. At dispatch, a
+never-sent copy that no longer fits its member's Maximum Packet Size (for
+example after a resume with a smaller limit) is offered to the other members
+and dropped only if none fits.
+
+Redistribution follows MQTT 5.0 §4.8.2. On connection loss, the member's
+never-sent entries move to a connected member; entries no connected member
+can take stay with the member, and already-sent entries stay to resume with
+it. On session end, QoS1 entries and never-sent QoS2 entries move (to an
+offline member too, within the offline limits); already-sent QoS2 entries are
+discarded (MQTT-4.8.2-5). On UNSUBSCRIBE of the shared filter, that filter's
+never-sent entries move. A moved entry is appended to its new member's queue,
+is authorized for that member at dispatch, and is sent after the member's
+earlier entries; moved entries keep their relative order. Each member
+receives its own entries in publication order; there is no ordering across
+members (MQTT-4.6.0-6 covers non-shared subscriptions only). Moves triggered by
+UNSUBSCRIBE dispatch immediately; those triggered by connection loss or
+session end are dispatched by the next pump, at the latest on the next tick.
+
+Shared subscriptions never receive retained messages. Authorization sees the
+full `$share/...` filter on subscribe and the chosen member's concrete topic on
+delivery; a `:deliver` denial drops that group copy without fallback. No Local
+on a shared filter gets DISCONNECT 0x82. The host API (`GravitonMQ.subscribe/3`)
+does not join shared groups and has no Subscription Identifiers.
+
+`GravitonMQ.status/1` adds:
+
+- `shared_groups`: distinct shared filters with at least one member session;
+- `shared_discarded`: shared copies dropped because no member could take them
+  (at publication, at commit-time re-selection, on redistribution, or when a
+  never-sent oversized copy fits no other member). It does not count
+  `:deliver` denials, expired messages, an already-sent oversized copy
+  completed under MQTT-3.1.2-25, or sent QoS2 entries discarded at session end;
+- `shared_qos2_discarded`: already-sent QoS2 shared entries discarded at
+  session end (MQTT-4.8.2-5);
+- `topic_aliases: %{inbound: n, outbound: n}`: alias entries currently held
+  across live connections.
+
+The two discard counters are transient since the owner started; they are not
+checkpointed.
+
 ## Negotiation, limits and failure
 
 CONNACK supports QoS2 by omitting Maximum QoS, whose MQTT5 default is 2.
 `:maximum_qos` can select 0 or 1 explicitly; the historical G2 QoS1 profile is
-still tested. Retain/wildcards are available, shared subscriptions and
-Subscription Identifiers unavailable, and inbound Topic Alias Maximum=0.
-Publications/Wills above the configured QoS, enhanced authentication, shared
-subscriptions and unsupported property use follow explicit rejection paths.
+still tested. Retain, wildcards, shared subscriptions and Subscription
+Identifiers are available and inbound Topic Alias Maximum is 10 by default.
+Publications/Wills above the configured QoS, enhanced authentication and
+unsupported property use follow explicit rejection paths.
 Subscriptions receive the supported grant. MQTT3.1.1 remains CONNECT/CONNACK codec-only;
 this runtime requires MQTT5.
 

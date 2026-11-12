@@ -94,10 +94,15 @@ end
 
 PUBACK for inbound QoS1 follows the observer's acknowledgement. An unacknowledged
 duplicate does not create another local delivery. Pending/outstanding deliveries
-are finite; the client advertises Receive Maximum and Topic Alias Maximum=0.
+are finite; the client advertises Receive Maximum and its `:topic_alias_maximum`
+(default 0).
 Inbound QoS2 sends PUBREC only after host ACK and retains protocol ownership
-until PUBREL/PUBCOMP, suppressing duplicate local delivery. It rejects aliases
-because Topic Alias Maximum is zero. Received properties remain typed and ordered. Queued message
+until PUBREL/PUBCOMP, suppressing duplicate local delivery. Inbound aliases
+above the advertised maximum terminate with 0x94 and unknown aliases with 0x82;
+deliveries carry the resolved topic without the `topic_alias` property. Maximum
+Packet Size limits the wire packet only: a resolved aliased publication may
+exceed the client's receive limit and is still delivered; only one beyond the
+protocol maximum terminates with 0x95. Received properties remain typed and ordered. Queued message
 expiry uses supplied elapsed-time facts; expired queued publications do not
 become host deliveries. Observer death cleans up owned sockets and timers.
 
@@ -135,14 +140,27 @@ deliveries, 1,024 subscription filters, and a 1 MiB packet. Options
 accepts supported CONNECT properties; configure the size/receive/alias bounds
 through dedicated options rather than overriding their wire properties.
 
+`:topic_alias_maximum` (inbound, default 0) and `:max_outbound_topic_aliases`
+(default 0) enable Topic Aliases; both are off by default. Outbound aliases are
+bounded by the peer's CONNACK Topic Alias Maximum, assigned by the client to the
+first N distinct topics per connection and reset on every reconnect; a
+publication is sent with an alias only if the aliased form fits the peer's
+Maximum Packet Size. A caller-supplied `topic_alias` property stays rejected
+locally (`:topic_aliases_unsupported`). `subscribe/3` accepts
+`subscription_identifier: 1..268_435_455` when the peer advertises
+Subscription Identifiers (otherwise it is rejected locally with
+`:subscription_identifiers_not_available`); received identifiers
+arrive in the delivery properties as `subscription_identifier` entries.
+
 ## Local persistence and recovery ownership
 
-Shared subscriptions are outside the local persistence profile. When
-persistence is enabled, `subscribe/3` rejects a `$share/` filter locally with
-`{:error, :shared_subscription_persistence_unsupported}`, before allocating
-an operation reference or sending SUBSCRIBE. Ordinary subscriptions remain
-available; a client using the memory profile follows the peer's advertised
-shared-subscription capability.
+Shared subscriptions follow the peer's advertised capability in both the
+memory and the persistent profile. A persistent client checkpoints a granted
+`$share/...` filter like any other filter; after a restart with Session
+Present 0 it is reported in `{:subscriptions_lost, grants}`. The checkpoint
+version stays 1; a client release before S4 rejects such a checkpoint with
+`:invalid_checkpoint_schema`. Checkpointed publications never carry a
+`topic_alias` property.
 
 Configure a nonempty stable `:client_id` and
 `persistence: [directory: "/var/lib/my-app/mqtt-client", max_bytes: 8_388_608]`.
