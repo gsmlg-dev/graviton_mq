@@ -17,7 +17,7 @@ from proton.reactor import AtLeastOnce
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["send", "receive", "release", "modified", "reject", "receive-hold"])
+    parser.add_argument("operation", choices=["send", "receive", "release", "modified", "reject", "receive-hold", "drain"])
     parser.add_argument("url")
     parser.add_argument("address")
     parser.add_argument("path")
@@ -37,7 +37,20 @@ def main():
     connection = BlockingConnection(arguments.url, timeout=10, sasl_enabled=False,
                                     ssl_domain=ssl_domain)
     try:
-        if arguments.operation == "send":
+        if arguments.operation == "drain":
+            receiver = connection.create_receiver(arguments.address, credit=1, options=AtLeastOnce())
+            digests = []
+            while True:
+                try:
+                    message = receiver.receive(timeout=3)
+                except Exception as error:  # proton.utils raises Timeout
+                    if type(error).__name__ != "Timeout":
+                        raise
+                    break
+                digests.append(hashlib.sha256(bytes(message.body)).hexdigest())
+                receiver.accept()
+            print(json.dumps({"drained": len(digests), "sha256": digests}), flush=True)
+        elif arguments.operation == "send":
             body = Path(arguments.path).read_bytes()
             sender = connection.create_sender(arguments.address, options=AtLeastOnce())
             annotations = {symbol("x-opt-keep"): 3, symbol("x-opt-replace"): "old"} if arguments.annotated else None
