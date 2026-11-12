@@ -384,15 +384,40 @@ defmodule GravitonMQ.MQTT.Broker do
     end
   end
 
+  # §3.3.4: resolve the Topic Alias first, so DUP comparison, authorization,
+  # routing, retained storage and checkpoints only see the full topic. The
+  # stored encoding is the resolved packet; no alias value reaches durable state.
   defp incoming_publish(state, id, packet, bytes, now) do
+    conn = state.connections[id]
+
+    case TopicAlias.resolve(conn.aliases, packet) do
+      {:error, :topic_alias_invalid} ->
+        disconnect(state, id, :topic_alias_invalid, 0x94, now)
+
+      {:error, :topic_alias_unknown} ->
+        disconnect(state, id, :topic_alias_unknown, 0x82, now)
+
+      {:ok, aliases, ^packet} ->
+        state
+        |> put_conn(id, %{conn | aliases: aliases})
+        |> resolved_publish(id, packet, bytes, now)
+
+      {:ok, aliases, resolved} ->
+        state = put_conn(state, id, %{conn | aliases: aliases})
+
+        case Packet.encode(resolved, state.codec) do
+          {:ok, encoded} -> resolved_publish(state, id, resolved, encoded, now)
+          {:error, _} -> disconnect(state, id, :resolved_packet_too_large, 0x95, now)
+        end
+    end
+  end
+
+  defp resolved_publish(state, id, packet, bytes, now) do
     conn = state.connections[id]
     session = state.sessions[conn.client_id]
     previous = Map.get(conn.incoming, packet.packet_id)
 
     cond do
-      Keyword.has_key?(packet.properties, :topic_alias) ->
-        disconnect(state, id, :topic_alias_invalid, 0x94, now)
-
       Keyword.has_key?(packet.properties, :subscription_identifier) ->
         disconnect(state, id, :invalid_property_direction, 0x82, now)
 
