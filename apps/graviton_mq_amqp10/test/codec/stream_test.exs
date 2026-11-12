@@ -103,4 +103,58 @@ defmodule GravitonMQ.AMQP10.Codec.StreamTest do
 
     assert {:error, %Error{class: :invalid_value}} = Stream.next(stream, :invalid)
   end
+
+  # sasl-outcome(code: ubyte 0) as a SASL frame: described list8 [0x50 0x00].
+  @sasl_header <<"AMQP", 3, 1, 0, 0>>
+  @outcome_frame <<16::32, 2, 1, 0::16, 0x00, 0x53, 0x44, 0xC0, 0x03, 0x01, 0x50, 0x00>>
+
+  test "a SASL-accepting stream reads the SASL layer and re-enters the AMQP header phase" do
+    {:ok, stream} = Stream.new(Limits.default(), accept: [0, 3])
+
+    assert {:ok, {:protocol_header, %ProtocolHeader{protocol_id: 3}}, stream, rest} =
+             Stream.next(stream, @sasl_header <> @outcome_frame <> @header <> @heartbeat)
+
+    assert stream.frame_type == :sasl
+    assert {:ok, {:frame, %Frame{type: :sasl}}, stream, rest} = Stream.next(stream, rest)
+    # Pipelined bytes after the outcome stay in the caller's input.
+    assert rest == @header <> @heartbeat
+    assert {:ok, stream} = Stream.expect_header(stream, [0])
+
+    assert {:ok, {:protocol_header, %ProtocolHeader{protocol_id: 0}}, stream, @heartbeat} =
+             Stream.next(stream, rest)
+
+    assert stream.frame_type == :amqp
+    assert {:ok, {:frame, %Frame{type: :amqp}}, _stream, <<>>} = Stream.next(stream, @heartbeat)
+  end
+
+  test "SASL frames are bounded at 512 octets and header re-entry refuses a partial frame" do
+    {:ok, stream} = Stream.new(Limits.default(), accept: [0, 3])
+    {:ok, _, stream, <<>>} = Stream.next(stream, @sasl_header)
+
+    assert {:error, %Error{class: :limit_exceeded, reason: :frame_size_limit}} =
+             Stream.next(stream, <<513::32, 2, 1, 0::16>>)
+
+    assert {:more, partial} = Stream.next(stream, <<16::32, 2, 1>>)
+    assert {:error, %Error{reason: :invalid_stream}} = Stream.expect_header(partial, [0])
+    assert {:error, %Error{reason: :invalid_stream}} = Stream.expect_header(stream, [1])
+    assert {:error, %Error{reason: :invalid_stream}} = Stream.new(Limits.default(), accept: [1])
+    {:ok, fresh} = Stream.new()
+    assert {:error, %Error{reason: :invalid_stream}} = Stream.expect_header(fresh, [0])
+  end
+
+  test "octet-at-a-time SASL negotiation input yields the same items" do
+    {:ok, stream} = Stream.new(Limits.default(), accept: [0, 3])
+
+    {_stream, items} =
+      for <<octet <- @sasl_header <> @outcome_frame>>, reduce: {stream, []} do
+        {state, items} ->
+          case Stream.next(state, <<octet>>) do
+            {:more, next} -> {next, items}
+            {:ok, item, next, <<>>} -> {next, items ++ [item]}
+          end
+      end
+
+    assert [{:protocol_header, %ProtocolHeader{protocol_id: 3}}, {:frame, %Frame{type: :sasl}}] =
+             items
+  end
 end
