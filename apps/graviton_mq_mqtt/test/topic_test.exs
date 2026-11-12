@@ -136,4 +136,40 @@ defmodule GravitonMQ.MQTT.TopicTest do
       refute Topic.matches?(filter, topic), inspect({filter, topic})
     end
   end
+
+  test "subscription filters parse shared and ordinary forms through one grammar" do
+    assert Topic.parse_filter("a/+") == {:ordinary, "a/+"}
+    assert Topic.parse_filter("$share") == {:ordinary, "$share"}
+    assert Topic.parse_filter("$share/g/a") == {:shared, "g", "a"}
+    assert Topic.parse_filter("$share/g/#") == {:shared, "g", "#"}
+    assert Topic.parse_filter("$share/g/a/+/c") == {:shared, "g", "a/+/c"}
+    assert Topic.parse_filter("$share/温度/x") == {:shared, "温度", "x"}
+
+    for filter <- [
+          "$share//a",
+          "$share/g",
+          "$share/g/",
+          "$share/g+/a",
+          "$share/g#/a",
+          "$share/g/a#",
+          "",
+          nil,
+          42,
+          <<255>>
+        ] do
+      assert Topic.parse_filter(filter) == :error, inspect(filter)
+      refute Topic.valid_subscription_filter?(filter), inspect(filter)
+    end
+
+    assert Topic.valid_subscription_filter?("$share/g/a")
+    assert Topic.valid_subscription_filter?("a/#")
+    refute Topic.valid_filter?("$share/g/a")
+  end
+
+  test "shared matching applies the inner filter, including MQTT-4.7.2-1" do
+    {:shared, "g", inner} = Topic.parse_filter("$share/g/#")
+    assert Topic.matches?(inner, "a/b")
+    refute Topic.matches?(inner, "$SYS/x")
+    refute Topic.matches?("$share/g/#", "a/b")
+  end
 end

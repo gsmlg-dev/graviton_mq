@@ -1,14 +1,20 @@
 defmodule GravitonMQ.MQTT.Topic do
   @moduledoc """
-  Pure MQTT 5.0 topic validation and ordinary subscription matching.
+  Pure MQTT 5.0 topic validation, subscription filter parsing and ordinary
+  subscription matching.
 
   Names and filters are nonempty UTF-8 strings of at most 65,535 encoded
   bytes, without NUL. Topic levels, including empty levels, are compared
-  exactly without Unicode normalization. Shared subscriptions are outside
-  this matching profile and are explicitly rejected.
+  exactly without Unicode normalization. `parse_filter/1` separates a Shared
+  Subscription `$share/{ShareName}/{filter}` (MQTT-4.8.2-1/2) from an ordinary
+  filter using the codec's single filter grammar. `valid_filter?/1` and
+  `matches?/2` accept ordinary filters only; shared matching applies
+  `matches?/2` to the parsed inner filter.
   """
 
   alias GravitonMQ.MQTT.Codec.{Operational, Wire}
+
+  @type parsed :: {:ordinary, String.t()} | {:shared, String.t(), String.t()} | :error
 
   @spec valid_name?(term()) :: boolean()
   def valid_name?(name) when is_binary(name) and byte_size(name) in 1..65_535,
@@ -16,13 +22,30 @@ defmodule GravitonMQ.MQTT.Topic do
 
   def valid_name?(_name), do: false
 
+  @spec parse_filter(term()) :: parsed()
+  def parse_filter(filter) when is_binary(filter) and byte_size(filter) in 1..65_535 do
+    cond do
+      not Operational.topic_filter?(filter) ->
+        :error
+
+      String.starts_with?(filter, "$share/") ->
+        [name, inner] =
+          filter |> binary_part(7, byte_size(filter) - 7) |> String.split("/", parts: 2)
+
+        {:shared, name, inner}
+
+      true ->
+        {:ordinary, filter}
+    end
+  end
+
+  def parse_filter(_filter), do: :error
+
+  @spec valid_subscription_filter?(term()) :: boolean()
+  def valid_subscription_filter?(filter), do: parse_filter(filter) != :error
+
   @spec valid_filter?(term()) :: boolean()
-  def valid_filter?(<<"$share/", _::binary>>), do: false
-
-  def valid_filter?(filter) when is_binary(filter) and byte_size(filter) in 1..65_535,
-    do: Operational.topic_filter?(filter)
-
-  def valid_filter?(_filter), do: false
+  def valid_filter?(filter), do: match?({:ordinary, _}, parse_filter(filter))
 
   @spec matches?(term(), term()) :: boolean()
   def matches?(filter, topic) do
