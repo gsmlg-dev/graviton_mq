@@ -1674,3 +1674,14 @@ Expected: one commit and a successful push.
 
 ## Execution log
 
+
+### 2026-11-13 — Tasks 0–3 (implementer)
+
+- **Task 0.** Clean `main` at `f7636b1`; the spec's last commit is `70e0a5e`. `mix deps.get` was skipped on the coordinator's instruction (deps were already present). `mix compile --warnings-as-errors` exited 0, and the isolated build lists the ten expected apps. All six host tools are present, and `/tmp/gmq-s5a-tmp` is on `/dev/mapper/root_vg-root ext4`. The host `elixir` is 1.18.5 (OTP 28), while `.tool-versions` declares 1.18.4.
+- **Task 1** (`a0117fe`). Red: `Code.LoadError … scripts/bench/stats.exs … enoent`, exit 1. Green: `10 tests, 0 failures`, no warnings. `mix format` changed nothing.
+- **Task 2** (`4b0d3b2`). `mqtt memory` printed `READY <pid> 35559 0` and `STATUS {"profile":"memory","prepared":0,"storage":"ready","connections":0,"sessions":0,"pending_deliveries":0}`. `amqp durable` printed `READY <pid> 0 40067` and `STATUS {"profile":"local_durable","queue":{"messages":0,"ready":0,"inflight":0},"connections":0}`. Both exited 0, and both data directories were removed.
+- **Task 3** (`e8aa305`). `--profile bogus` printed the `RuntimeError`, exit 1, with no warnings.
+  - First smoke run, with a slow disk (200 dsync writes took 16.8 s, about 84 ms each, load about 8): 9 passed and 1 failed, `FAIL mqtt_qos1_durable n=8: {:publisher, 3} … {:error, :unknown_outcome}`. This is the documented host-contention case. The disk probe stayed at 14–17 s for about 5 minutes and then dropped to 0.03 s.
+  - Smoke rerun with a fast disk (probe 0.03–0.04 s): `10 passed, 0 failed`, exit 0. The data directory was empty, and no broker VM was left. p99 figures: `mqtt_qos0_mem` 1/8 e2e 706/3272 µs; `mqtt_qos1_mem` 1/8 accept 913/26870 µs; `mqtt_qos1_durable` 1/8 accept 5936/218273 µs; `amqp_mem` 1/8 accept 44151/43938 µs; `amqp_durable` 1/8 accept 44094/44024 µs. The prototype observations were reproduced: AMQP acceptance takes about 42 ms (Nagle), and with N = 8 the single consumer lags (`mqtt_qos1_mem` 466 msg/s accepted vs 116.7 msg/s consumed).
+  - Step 4 kill check: `FAIL mqtt_qos1_mem n=1: broker VM exited with status 137`, then every later scenario ran. Result: `8 passed, 2 failed` and `exit=1`. The second failure was a disk-contention `mqtt_qos1_durable n=8 :unknown_outcome`. The data directory was empty, and no broker VM was left.
+  - Deviation in Step 4: as written, `pkill -KILL -f "broker_vm.exs mqtt memory"` also matched the `bash -c`/zsh wrapper, whose command line contains that string. That killed the check shell before it could record `exit=`. The broker VM was still killed, and the orphaned generator finished with the same FAIL line and no leftovers. The check was rerun with the pattern `broker_vm[.]exs mqtt memory`, which cannot match itself. Only the check command changed; `scripts/bench/` was not changed.
