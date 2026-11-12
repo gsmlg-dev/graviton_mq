@@ -310,6 +310,14 @@ defmodule GravitonMQ.MQTT.BrokerSharedRedistributionTest do
     assert payloads(state, "m2") == ["x2", "x4"]
   end
 
+  test "a Clean Start takeover of a member with session expiry still redistributes its unsent entries" do
+    state = two_members(60)
+    {state, _} = attach_as(state, :m1_again, "m1", [session_expiry_interval: 60], true, 3)
+    assert state.sessions["m1"].deliveries == []
+    assert payloads(state, "m2") == ["x1", "x2", "x3", "x4"]
+    assert state.shared_discarded == 0
+  end
+
   test "a session-end move that exceeds the offline limits is deleted and counted" do
     {:ok, state} = Broker.new(max_offline_deliveries: 1)
     {state, _} = attach_as(state, :pub, "pub", [])
