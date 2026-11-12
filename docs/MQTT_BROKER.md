@@ -92,8 +92,11 @@ Upgrade note (S4): the broker writes snapshot version 2 (Subscription
 Identifiers, shared memberships and shared delivery entries) under the same WAL
 record type. Version 1 data is upgraded in memory on recovery and the next
 commit writes version 2; no offline migration is needed and there is no
-downgrade. A release before S4 cannot read version 2 and fails closed (the
-bounded term reader rejects it with `:invalid_checkpoint_term`); keep a copy
+downgrade. A release before S4 cannot read version 2 and fails closed: its
+version check returns `:invalid_broker_checkpoint`, or its bounded term reader
+returns `:invalid_checkpoint_term` when the snapshot carries atoms that release
+does not know (for example queued deliveries with Subscription Identifiers);
+keep a copy
 of the data directory if a rollback may be needed. Restarting with
 `shared_subscriptions: false` or `subscription_identifiers: false` while the
 snapshot holds that state stops startup with `:checkpoint_capability_mismatch`
@@ -243,8 +246,10 @@ retained session by guessing its Client ID.
 | `shared_subscriptions` | `true` | Shared Subscription Available; `false` restores DISCONNECT 0x9E |
 
 Alias tables belong to one Network Connection and are never persisted. Aliases
-resolve before every other PUBLISH check; an alias of 0 or above the maximum
-gets DISCONNECT 0x94, an empty topic with an unknown alias 0x82. Subscribers
+resolve after the packet passes the malformed-packet and size checks and before
+every PUBLISH-semantic check. An alias above the advertised maximum gets
+DISCONNECT 0x94 and an empty topic with an unknown alias 0x82; an alias of 0 is
+already rejected by the codec as a malformed packet (DISCONNECT 0x81). Subscribers
 receive full topics. Outbound aliases are off by default; when enabled they use
 the first N distinct topics per connection and never replace them. A
 publication is delivered only if its full-topic form fits the client's Maximum
