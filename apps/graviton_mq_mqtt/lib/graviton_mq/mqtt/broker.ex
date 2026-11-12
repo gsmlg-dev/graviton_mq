@@ -68,7 +68,10 @@ defmodule GravitonMQ.MQTT.Broker do
     # Transient: the Shared Subscription round-robin cursor and the count of
     # shared entries no member could take. Never captured.
     share_cursor: %{},
-    shared_discarded: 0
+    shared_discarded: 0,
+    # Transient: sent QoS2 shared entries discarded at session end, as
+    # MQTT-4.8.2-5 requires. Counted apart from `shared_discarded`.
+    shared_qos2_discarded: 0
   ]
 
   @spec new(keyword() | map()) :: {:ok, %__MODULE__{}} | {:error, atom()}
@@ -872,14 +875,7 @@ defmodule GravitonMQ.MQTT.Broker do
         publication_failed(state, op, :denied, now)
 
       {:ok, [:ok | deliveries]} ->
-        targets =
-          Enum.zip(op.targets, deliveries)
-          |> Enum.filter(fn {target, decision} ->
-            decision == :ok and target_current?(state, target)
-          end)
-          |> Enum.map(&elem(&1, 0))
-
-        targets = Enum.map(targets, &refresh_target(state, &1))
+        {state, targets, rebind_discarded} = commit_targets(state, op, deliveries, now)
 
         targets =
           Enum.reject(
@@ -888,11 +884,20 @@ defmodule GravitonMQ.MQTT.Broker do
                 &1.qos == 0)
           )
 
-        targets = if expired_message?(op.message, now), do: [], else: targets
+        {targets, discarded} =
+          if expired_message?(op.message, now),
+            do: {[], 0},
+            else: {targets, op.unbound + rebind_discarded}
+
         retained = retained_after(state.retained, op.message, now)
 
         if capacity?(state, targets, retained) do
-          state = %{state | retained: retained}
+          state = %{
+            state
+            | retained: retained,
+              shared_discarded: state.shared_discarded + discarded
+          }
+
           state = install_targets(state, targets)
           state = finish_will(state, op)
           {state, accepted} = publication_accepted(state, op, now)
@@ -948,7 +953,16 @@ defmodule GravitonMQ.MQTT.Broker do
         {state, close_effects} =
           case existing do
             %{connection: {old_id, _}} when old_id != id ->
-              disconnect(state, old_id, :session_taken_over, 0x8E, now)
+              # A resuming takeover keeps the member's entries: it is
+              # reconnecting now, so no connection-loss redistribution.
+              disconnect(
+                state,
+                old_id,
+                :session_taken_over,
+                0x8E,
+                now,
+                if(packet.clean_start, do: :abnormal, else: :takeover)
+              )
 
             _ ->
               {state, []}
@@ -1071,7 +1085,7 @@ defmodule GravitonMQ.MQTT.Broker do
     }
 
   defp publication(state, source, generation, principal, message, reply, now) do
-    {state, targets} = route(state, message, now)
+    {state, targets, unbound} = route(state, message, now)
 
     requests =
       [{:authorize, principal, :publish, message.topic}] ++
@@ -1085,6 +1099,7 @@ defmodule GravitonMQ.MQTT.Broker do
         generation: generation,
         message: message,
         targets: targets,
+        unbound: unbound,
         reply: reply,
         encoded: message.encoded
       },
@@ -1173,36 +1188,110 @@ defmodule GravitonMQ.MQTT.Broker do
         end
       end)
 
-    {state, shared} = shared_targets(state, message, now)
-    {state, Enum.sort_by(network ++ shared ++ host, &{&1.kind, &1.recipient})}
+    {state, shared, unbound} = shared_targets(state, message, now)
+    {state, Enum.sort_by(network ++ shared ++ host, &{&1.kind, &1.recipient}), unbound}
   end
 
   # MQTT 5 §4.8.2: one copy per matching Shared Subscription group, bound to a
   # member at publication time (Q5). Members are ordered by Client Identifier
   # after a transient round-robin cursor (Q4); the cursor is fairness state,
-  # not responsibility, and is never captured.
+  # not responsibility, and is never captured. Groups without an eligible
+  # member are returned as `unbound` and counted in `shared_discarded` when
+  # the publication is accepted.
   defp shared_targets(state, message, now) do
+    groups =
+      state.sessions
+      |> Enum.flat_map(fn {client_id, session} ->
+        for {filter, %{shared: {_name, inner}} = sub} <- session.subscriptions,
+            Topic.matches?(inner, message.topic),
+            do: {filter, {client_id, sub}}
+      end)
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.sort_by(&elem(&1, 0))
+
+    {state, _ctx, targets, unbound} =
+      Enum.reduce(groups, {state, selection(state, nil), [], 0}, fn {filter, members},
+                                                                    {state, ctx, targets, unbound} ->
+        members = Enum.sort_by(members, &elem(&1, 0))
+
+        case bind(state, ctx, filter, members, message, now, :all) do
+          {state, ctx, nil} -> {state, ctx, targets, unbound + 1}
+          {state, ctx, target} -> {state, ctx, targets ++ [target], unbound}
+        end
+      end)
+
+    {state, targets, unbound}
+  end
+
+  # Selects a member and builds its target, advancing the cursor. When the
+  # only candidates are offline members refused by the offline limits, the
+  # target is still returned so that `capacity?/3` refuses the publication
+  # with 0x97, exactly as for an ordinary subscription.
+  defp bind(state, ctx, filter, members, message, now, tiers) do
+    case select_member(state, ctx, filter, members, message, now, tiers) do
+      {:none, ctx} ->
+        {state, ctx, nil}
+
+      {_kind, {client_id, sub}, ctx} ->
+        state = %{state | share_cursor: Map.put(state.share_cursor, filter, client_id)}
+        connected = member_connection(state, client_id) != nil
+        target = Map.put(shared_target(state, filter, client_id, sub, message), :bound, connected)
+        {state, offline_added(ctx, connected, message), target}
+    end
+  end
+
+  defp group_members(state, filter, except) do
     state.sessions
     |> Enum.flat_map(fn {client_id, session} ->
-      for {filter, %{shared: {_name, inner}} = sub} <- session.subscriptions,
-          Topic.matches?(inner, message.topic),
-          do: {filter, {client_id, sub}}
-    end)
-    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.reduce({state, []}, fn {filter, members}, {state, targets} ->
-      members = Enum.sort_by(members, &elem(&1, 0))
-
-      case select_member(state, filter, members, message, now, :all) do
-        nil ->
-          {state, targets}
-
-        {client_id, sub} ->
-          state = %{state | share_cursor: Map.put(state.share_cursor, filter, client_id)}
-          {state, targets ++ [shared_target(state, filter, client_id, sub, message)]}
+      case Map.get(session.subscriptions, filter) do
+        %{shared: {_, _}} = sub when client_id != except -> [{client_id, sub}]
+        _ -> []
       end
     end)
+    |> Enum.sort_by(&elem(&1, 0))
   end
+
+  # Publication commit (review Important 1, minor 4): authorization ran
+  # asynchronously, so a shared binding may be stale (session ended, member
+  # left or re-subscribed, Clean Start) or its connected member may have gone
+  # offline. Such a copy is re-bound among the current members instead of
+  # being dropped after PUBACK; the new member's `:deliver` permission is
+  # checked at dispatch (`request_dispatch/6`). A `:deliver` denial for the
+  # bound member still drops the copy without fallback (Q12).
+  defp commit_targets(state, op, deliveries, now) do
+    {state, _ctx, targets, discarded} =
+      Enum.zip(op.targets, deliveries)
+      |> Enum.reduce({state, nil, [], 0}, fn
+        {_target, decision}, acc when decision != :ok ->
+          acc
+
+        {%{shared: filter} = target, :ok}, {state, ctx, targets, discarded}
+        when filter != nil ->
+          if binding_live?(state, target) do
+            {state, ctx, targets ++ [refresh_target(state, target)], discarded}
+          else
+            ctx = ctx || selection(state, nil)
+            members = group_members(state, filter, nil)
+
+            case bind(state, ctx, filter, members, op.message, now, :all) do
+              {state, ctx, nil} -> {state, ctx, targets, discarded + 1}
+              {state, ctx, target} -> {state, ctx, targets ++ [target], discarded}
+            end
+          end
+
+        {target, :ok}, {state, ctx, targets, discarded} ->
+          if target_current?(state, target),
+            do: {state, ctx, targets ++ [refresh_target(state, target)], discarded},
+            else: {state, ctx, targets, discarded}
+      end)
+
+    {state, targets, discarded}
+  end
+
+  defp binding_live?(state, target),
+    do:
+      target_current?(state, target) and
+        (not target.bound or member_connection(state, target.recipient) != nil)
 
   defp shared_target(state, filter, client_id, sub, message) do
     session = state.sessions[client_id]
@@ -1221,10 +1310,35 @@ defmodule GravitonMQ.MQTT.Broker do
     }
   end
 
-  # Tiers (spec §4.4): connected members that fit and can send now; other
-  # connected members that fit; for QoS > 0 and tiers == :all, offline
-  # persistent members within the offline limits (Q7).
-  defp select_member(state, filter, members, message, now, tiers) do
+  # Selection context for one publication or one redistribution pass:
+  # offline totals are computed once (excluding a session that is ending)
+  # and kept current as entries are bound offline; encoded sizes are cached
+  # per distinct recipient packet shape of one message.
+  defp selection(state, except) do
+    offline =
+      Enum.flat_map(state.sessions, fn {client_id, session} ->
+        if session.connection == nil and client_id != except,
+          do: session.deliveries,
+          else: []
+      end)
+
+    %{offline_count: length(offline), offline_bytes: pending_bytes(offline), sizes: %{}}
+  end
+
+  defp offline_added(ctx, true, _message), do: ctx
+
+  defp offline_added(ctx, false, message),
+    do: %{
+      ctx
+      | offline_count: ctx.offline_count + 1,
+        offline_bytes: ctx.offline_bytes + message_bytes(message)
+    }
+
+  # Tiers (spec §4.4), walked lazily in cursor order: the first connected
+  # member that fits and can send now; else the first connected member that
+  # fits; for QoS > 0 and tiers == :all, the first offline persistent member,
+  # `:ok` within the offline limits (Q7) or `:full` beyond them.
+  defp select_member(state, ctx, filter, members, message, now, tiers) do
     cursor = Map.get(state.share_cursor, filter)
 
     {later, earlier} =
@@ -1232,26 +1346,51 @@ defmodule GravitonMQ.MQTT.Broker do
 
     ordered = later ++ earlier
 
-    connected =
-      Enum.filter(ordered, fn {client_id, sub} ->
-        member_fits?(state, client_id, sub, message, now)
-      end)
+    {ready, connected, ctx} =
+      Enum.reduce_while(ordered, {nil, nil, ctx}, fn {client_id, sub} = member,
+                                                     {nil, connected, ctx} ->
+        case member_connection(state, client_id) do
+          nil ->
+            {:cont, {nil, connected, ctx}}
 
-    ready =
-      Enum.filter(connected, fn {client_id, sub} ->
-        min(message.qos, sub.options.qos) == 0 or
-          member_connection(state, client_id).send_quota > 0
+          conn ->
+            {fits, ctx} = member_fits(state, ctx, conn, sub, message, now)
+
+            cond do
+              not fits -> {:cont, {nil, connected, ctx}}
+              min(message.qos, sub.options.qos) == 0 -> {:halt, {member, connected, ctx}}
+              conn.send_quota > 0 -> {:halt, {member, connected, ctx}}
+              true -> {:cont, {nil, connected || member, ctx}}
+            end
+        end
       end)
 
     offline =
-      if tiers == :all,
-        do:
-          Enum.filter(ordered, fn {client_id, sub} ->
-            min(message.qos, sub.options.qos) > 0 and offline_member?(state, client_id, message)
-          end),
-        else: []
+      tiers == :all and ready == nil and connected == nil and
+        Enum.find(ordered, fn {client_id, sub} ->
+          session = state.sessions[client_id]
 
-    List.first(ready) || List.first(connected) || List.first(offline)
+          min(message.qos, sub.options.qos) > 0 and session.connection == nil and
+            session.expiry > 0
+        end)
+
+    cond do
+      ready != nil ->
+        {:ok, ready, ctx}
+
+      connected != nil ->
+        {:ok, connected, ctx}
+
+      offline not in [nil, false] ->
+        fits =
+          ctx.offline_count + 1 <= state.limits.max_offline_deliveries and
+            ctx.offline_bytes + message_bytes(message) <= state.limits.max_offline_bytes
+
+        {if(fits, do: :ok, else: :full), offline, ctx}
+
+      true ->
+        {:none, ctx}
+    end
   end
 
   defp member_connection(state, client_id) do
@@ -1263,37 +1402,42 @@ defmodule GravitonMQ.MQTT.Broker do
     end
   end
 
-  defp member_fits?(state, client_id, sub, message, now) do
-    case member_connection(state, client_id) do
-      nil ->
-        false
+  # Equivalent to `outbound_fits?/3` on the recipient packet: the encoded
+  # size depends only on the delivered QoS, Retain and Subscription
+  # Identifiers, so it is computed once per distinct shape and compared with
+  # each peer's Maximum Packet Size.
+  defp member_fits(state, ctx, conn, sub, message, now) do
+    qos = min(message.qos, sub.options.qos)
+    retain = message.retain and sub.options.retain_as_published
+    ids = List.wrap(sub.subscription_identifier)
+    key = {qos, retain, ids}
 
-      conn ->
-        qos = min(message.qos, sub.options.qos)
+    {size, ctx} =
+      case Map.fetch(ctx.sizes, key) do
+        {:ok, size} ->
+          {size, ctx}
 
-        entry = %{
-          message: message,
-          qos: qos,
-          retain: message.retain and sub.options.retain_as_published,
-          ever_sent: false,
-          subscription_identifiers: List.wrap(sub.subscription_identifier)
-        }
+        :error ->
+          entry = %{
+            message: message,
+            qos: qos,
+            retain: retain,
+            ever_sent: false,
+            subscription_identifiers: ids
+          }
 
-        outbound_fits?(state, conn, recipient_packet(entry, if(qos > 0, do: 1, else: nil), now))
-    end
-  end
+          packet = recipient_packet(entry, if(qos > 0, do: 1, else: nil), now)
 
-  defp offline_member?(state, client_id, message) do
-    session = state.sessions[client_id]
+          size =
+            case Packet.encode(packet, %Limits{state.codec | max_packet_size: 268_435_460}) do
+              {:ok, bytes} -> byte_size(bytes)
+              _ -> nil
+            end
 
-    offline =
-      Enum.flat_map(state.sessions, fn {_id, session} ->
-        if session.connection == nil, do: session.deliveries, else: []
-      end)
+          {size, %{ctx | sizes: Map.put(ctx.sizes, key, size)}}
+      end
 
-    session.connection == nil and session.expiry > 0 and
-      length(offline) + 1 <= state.limits.max_offline_deliveries and
-      pending_bytes(offline) + message_bytes(message) <= state.limits.max_offline_bytes
+    {size != nil and size <= conn.peer_maximum, ctx}
   end
 
   defp shared_of(filter) do
@@ -1680,7 +1824,7 @@ defmodule GravitonMQ.MQTT.Broker do
     end
   end
 
-  defp disconnect(state, id, reason, code, now) do
+  defp disconnect(state, id, reason, code, now, down_reason \\ :abnormal) do
     case Map.get(state.connections, id) do
       nil ->
         {state, []}
@@ -1702,7 +1846,7 @@ defmodule GravitonMQ.MQTT.Broker do
               []
           end
 
-        {state, effects} = down(%{state | next_id: state.next_id + 1}, id, :abnormal, now)
+        {state, effects} = down(%{state | next_id: state.next_id + 1}, id, down_reason, now)
         {state, sends ++ [{:close, id, conn.generation, reason}] ++ effects}
     end
   end
@@ -1776,7 +1920,7 @@ defmodule GravitonMQ.MQTT.Broker do
 
         if session.expiry == 0,
           do: end_session(state, conn.client_id, now),
-          else: {redistribute(state, conn.client_id, :connection_loss, now), []}
+          else: {redistribute_unless_resumed(state, conn.client_id, reason, now), []}
 
       _ ->
         {state, []}
@@ -1886,13 +2030,20 @@ defmodule GravitonMQ.MQTT.Broker do
     end
   end
 
+  defp redistribute_unless_resumed(state, _client_id, :takeover, _now), do: state
+
+  defp redistribute_unless_resumed(state, client_id, _reason, now),
+    do: redistribute(state, client_id, :connection_loss, now)
+
   # MQTT 5 §4.8.2 responsibility for shared entries of a member whose session
   # ends, whose connection is lost (spec MAY, Q6) or which leaves the group.
   # Pure state change; moved entries are dispatched by the next pump (D5).
   # A moved entry is appended to the receiving member's queue with a fresh
   # entry identifier, so it is sent after that member's earlier entries and
   # moved entries keep their relative order. Shared copies have no ordering
-  # obligation across members (MQTT-4.6.0-6 covers non-shared only).
+  # obligation across members (MQTT-4.6.0-6 covers non-shared only). A moved
+  # entry is authorized for its new member at dispatch; a denial there drops
+  # it with no further fallback (Q12).
   defp redistribute(state, client_id, trigger, now) do
     case Map.get(state.sessions, client_id) do
       nil ->
@@ -1901,7 +2052,23 @@ defmodule GravitonMQ.MQTT.Broker do
       session ->
         {moving, staying} = Enum.split_with(session.deliveries, &movable?(&1, trigger))
         state = put_session(state, client_id, %{session | deliveries: staying})
-        Enum.reduce(moving, state, &reroute(&2, &1, client_id, trigger, now))
+
+        state =
+          if trigger == :session_end,
+            do: %{
+              state
+              | shared_qos2_discarded:
+                  state.shared_qos2_discarded +
+                    Enum.count(staying, &(&1.shared != nil and &1.qos == 2 and &1.ever_sent))
+            },
+            else: state
+
+        {state, _ctx} =
+          Enum.reduce(moving, {state, selection(state, client_id)}, fn entry, {state, ctx} ->
+            reroute(state, ctx, entry, client_id, trigger, now)
+          end)
+
+        state
     end
   end
 
@@ -1914,21 +2081,13 @@ defmodule GravitonMQ.MQTT.Broker do
   defp movable?(entry, {:unsubscribe, filters}),
     do: entry.shared in filters and not entry.ever_sent
 
-  defp reroute(state, entry, from, trigger, now) do
-    members =
-      state.sessions
-      |> Enum.flat_map(fn {client_id, session} ->
-        case Map.get(session.subscriptions, entry.shared) do
-          %{shared: {_, _}} = sub when client_id != from -> [{client_id, sub}]
-          _ -> []
-        end
-      end)
-      |> Enum.sort_by(&elem(&1, 0))
-
+  defp reroute(state, ctx, entry, from, trigger, now) do
+    members = group_members(state, entry.shared, from)
     tiers = if trigger == :connection_loss, do: :connected, else: :all
+    ctx = %{ctx | sizes: %{}}
 
-    case select_member(state, entry.shared, members, entry.message, now, tiers) do
-      {client_id, sub} ->
+    case select_member(state, ctx, entry.shared, members, entry.message, now, tiers) do
+      {:ok, {client_id, sub}, ctx} ->
         moved = %{
           entry
           | id: state.next_id,
@@ -1952,15 +2111,26 @@ defmodule GravitonMQ.MQTT.Broker do
             share_cursor: Map.put(state.share_cursor, entry.shared, client_id)
         }
 
-        put_session(state, client_id, %{session | deliveries: session.deliveries ++ [moved]})
+        connected = member_connection(state, client_id) != nil
 
-      nil when trigger == :connection_loss ->
-        session = state.sessions[from]
-        put_session(state, from, %{session | deliveries: session.deliveries ++ [entry]})
+        {put_session(state, client_id, %{session | deliveries: session.deliveries ++ [moved]}),
+         offline_added(ctx, connected, entry.message)}
 
-      nil ->
-        %{state | shared_discarded: state.shared_discarded + 1}
+      # Connection loss keeps an entry no connected member can take. Otherwise
+      # the group ended, or moving to an offline member would exceed the
+      # offline limits (spec §4.4): the entry is deleted and counted.
+      result ->
+        ctx = elem(result, tuple_size(result) - 1)
+
+        if trigger == :connection_loss,
+          do: {keep(state, from, entry), ctx},
+          else: {%{state | shared_discarded: state.shared_discarded + 1}, ctx}
     end
+  end
+
+  defp keep(state, from, entry) do
+    session = state.sessions[from]
+    put_session(state, from, %{session | deliveries: session.deliveries ++ [entry]})
   end
 
   defp finish_will(state, %{source: {:will, id}}),

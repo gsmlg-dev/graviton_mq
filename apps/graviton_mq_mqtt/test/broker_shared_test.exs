@@ -296,4 +296,206 @@ defmodule GravitonMQ.MQTT.BrokerSharedTest do
     assert {:error, :invalid_broker_checkpoint} =
              Checkpoint.restore(new(), forged, 1_000, 100_100)
   end
+
+  # Review fixes: commit-time rebinding, offline-limit parity, discards, cost.
+
+  defp race_group(m1_expiry) do
+    {state, _} = attach(new(), :pub)
+    {state, _} = attach(state, :m1, properties: [session_expiry_interval: m1_expiry])
+    {state, _} = attach(state, :m2, properties: [session_expiry_interval: 60])
+    {state, _} = subscribe(state, :m1, [{"$share/g/t", 1}])
+    {state, _} = subscribe(state, :m2, [{"$share/g/t", 1}])
+    state
+  end
+
+  # A QoS1 publication bound to m1 (cursor empty) and awaiting authorization.
+  defp pending_publication(state) do
+    publication = %Publish{topic: "t", payload: "x", qos: 1, packet_id: 1}
+
+    {state, [{:authorize, op, request, _}]} =
+      Broker.transition(state, {:packet, :pub, 1, publication, <<1, 2>>, 1})
+
+    assert {:authorize, :m1, :deliver, "t"} in request
+    {state, op, request}
+  end
+
+  defp complete(state, op, request, now \\ 3) do
+    {state, effects} =
+      Broker.transition(
+        state,
+        {:auth_result, op, state.operations[op].generation, Enum.map(request, fn _ -> :ok end),
+         now}
+      )
+
+    allowed(state, effects, now)
+  end
+
+  defp holders(state, payload),
+    do:
+      for(
+        {client_id, session} <- state.sessions,
+        entry <- session.deliveries,
+        entry.message.payload == payload,
+        do: client_id
+      )
+
+  defp pubacks(effects), do: for({:send, :pub, _, _, %Puback{} = p} <- effects, do: p)
+
+  for {name, race} <- [
+        {"an expiry-0 member's session ends", :expiry_zero_loss},
+        {"the member re-SUBSCRIBEs to the same shared filter", :resubscribe},
+        {"the member UNSUBSCRIBEs", :unsubscribe},
+        {"the member reconnects with Clean Start", :clean_start},
+        {"the member's connection is lost (session kept)", :connection_loss}
+      ] do
+    @race race
+    test "a stale binding is re-selected at commit when #{name} during authorization" do
+      {state, op, request} =
+        pending_publication(race_group(if @race == :expiry_zero_loss, do: 0, else: 60))
+
+      state = race(state, @race)
+      {state, effects} = complete(state, op, request)
+      assert [%Puback{reason_code: 0}] = pubacks(effects)
+      assert holders(state, "x") == ["m2"]
+      assert [%Publish{payload: "x"}] = publishes(effects, :m2)
+      assert state.shared_discarded == 0
+    end
+  end
+
+  defp race(state, :expiry_zero_loss) do
+    {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+    refute Map.has_key?(state.sessions, "m1")
+    state
+  end
+
+  defp race(state, :resubscribe) do
+    {state, _} =
+      packet(state, :m1, %Subscribe{packet_id: 5, subscriptions: [{"$share/g/t", 1}]}, 2)
+
+    state
+  end
+
+  defp race(state, :unsubscribe) do
+    {state, _} = packet(state, :m1, %Unsubscribe{packet_id: 5, filters: ["$share/g/t"]}, 2)
+    state
+  end
+
+  defp race(state, :clean_start) do
+    {state, []} = Broker.transition(state, {:connection_open, :m1_again, 1, 2})
+    connect = %Connect{version: :v5, client_id: "m1", clean_start: true}
+    {state, effects} = Broker.transition(state, {:packet, :m1_again, 1, connect, <<16, 0>>, 2})
+    {state, _} = allowed(state, effects, 2)
+    assert state.sessions["m1"].subscriptions == %{}
+    state
+  end
+
+  defp race(state, :connection_loss) do
+    {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+    state
+  end
+
+  test "a commit-time binding with no member left is counted, never silent" do
+    {state, _} = attach(new(), :pub)
+    {state, _} = attach(state, :m1, properties: [session_expiry_interval: 0])
+    {state, _} = subscribe(state, :m1, [{"$share/g/t", 1}])
+    {state, op, request} = pending_publication(state)
+    {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+    {state, effects} = complete(state, op, request)
+    assert [%Puback{reason_code: 0}] = pubacks(effects)
+    assert state.shared_discarded == 1
+  end
+
+  test "a publication-time group without an eligible member is counted" do
+    large = String.duplicate("p", 100)
+    {state, _} = attach(new(), :pub)
+    {state, _} = attach(state, :m1, properties: [maximum_packet_size: 64])
+    {state, _} = subscribe(state, :m1, [{"$share/g/t", 0}])
+    {state, _} = publish_all(state, [large])
+    assert state.shared_discarded == 1
+
+    # QoS0 while the only member is offline: no member can take it.
+    {state, _} = attach(new(), :pub)
+    {state, _} = attach(state, :m1, properties: [session_expiry_interval: 60])
+    {state, _} = subscribe(state, :m1, [{"$share/g/t", 0}])
+    {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+    {state, _} = publish_all(state, ["nobody"])
+    assert state.sessions["m1"].deliveries == []
+    assert state.shared_discarded == 1
+  end
+
+  test "full offline limits refuse a shared publication with 0x97, like an ordinary one" do
+    acks =
+      for filter <- ["$share/g/t", "t"] do
+        {state, _} = attach(new(max_offline_deliveries: 1), :pub)
+        {state, _} = attach(state, :m1, properties: [session_expiry_interval: 60])
+        {state, _} = subscribe(state, :m1, [{filter, 1}])
+        {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+        {state, effects} = publish_all(state, ["a", "b"], 1)
+        assert Enum.map(state.sessions["m1"].deliveries, & &1.message.payload) == ["a"]
+        assert state.shared_discarded == 0
+        for p <- pubacks(effects), do: {p.packet_id, p.reason_code}
+      end
+
+    assert acks == [[{1, 0}, {2, 0x97}], [{1, 0}, {2, 0x97}]]
+  end
+
+  # Structural cost check: the number of Packet.encode calls for one
+  # publication must not grow with the number of group members.
+  defp encodes(fun) do
+    mfa = {GravitonMQ.MQTT.Codec.Packet, :encode, :_}
+    parent = self()
+
+    # A process cannot be its own call tracer: count in a separate one.
+    tracer =
+      spawn_link(fn ->
+        count = fn count, n ->
+          receive do
+            {:trace, ^parent, :call, _} -> count.(count, n + 1)
+            {:count, ref} -> send(parent, {ref, n})
+          end
+        end
+
+        count.(count, 0)
+      end)
+
+    :erlang.trace_pattern(mfa, true, [:local])
+    :erlang.trace(parent, true, [:call, {:tracer, tracer}])
+
+    try do
+      fun.()
+    after
+      :erlang.trace(parent, false, [:call])
+      :erlang.trace_pattern(mfa, false, [:local])
+    end
+
+    delivered = :erlang.trace_delivered(parent)
+    receive do: ({:trace_delivered, ^parent, ^delivered} -> :ok)
+    ref = make_ref()
+    send(tracer, {:count, ref})
+    receive do: ({^ref, n} -> n)
+  end
+
+  defp wide_group(members) do
+    {state, _} = attach(new(max_connections: 128), :pub)
+
+    Enum.reduce(1..members, state, fn index, state ->
+      id = String.to_atom("w#{index}")
+      {state, _} = attach(state, id, properties: [receive_maximum: 1])
+      {state, _} = subscribe(state, id, [{"$share/g/t", 1}])
+      state
+    end)
+  end
+
+  test "member selection does not encode the publication once per member" do
+    counts =
+      for members <- [2, 40] do
+        # Every member is at its Receive Maximum, so selection scans them all.
+        state = wide_group(members)
+        {state, _} = publish_all(state, Enum.map(1..members, &"fill#{&1}"), 1)
+        publication = %Publish{topic: "t", payload: "probe", qos: 1, packet_id: 999}
+        encodes(fn -> packet(state, :pub, publication) end)
+      end
+
+    assert [same, same] = counts
+  end
 end

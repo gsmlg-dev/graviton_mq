@@ -302,4 +302,35 @@ defmodule GravitonMQ.MQTT.BrokerSharedRedistributionTest do
     assert Enum.all?(recovered.sessions["m2"].deliveries, &(&1.shared == "$share/g/t"))
     assert recovered.shared_discarded == 0
   end
+
+  test "a takeover that resumes the session does not redistribute (the member is reconnecting)" do
+    state = two_members(60)
+    {state, _} = attach_as(state, :m1_again, "m1", [session_expiry_interval: 60], false, 3)
+    assert payloads(state, "m1") == ["x1", "x3"]
+    assert payloads(state, "m2") == ["x2", "x4"]
+  end
+
+  test "a session-end move that exceeds the offline limits is deleted and counted" do
+    {:ok, state} = Broker.new(max_offline_deliveries: 1)
+    {state, _} = attach_as(state, :pub, "pub", [])
+    {state, _} = attach_as(state, :m1, "m1", receive_maximum: 1, session_expiry_interval: 0)
+    {state, _} = attach_as(state, :m2, "m2", session_expiry_interval: 60)
+
+    {state, _} = packet(state, :m1, %Subscribe{packet_id: 1, subscriptions: [{"$share/g/t", 1}]})
+    {state, _} = packet(state, :m2, %Subscribe{packet_id: 1, subscriptions: [{"$share/g/t", 1}]})
+    {state, _} = Broker.transition(state, {:connection_down, :m2, 1, :abnormal, 2})
+    {state, _} = packet(state, :pub, %Publish{topic: "t", payload: "a", qos: 1, packet_id: 1}, 3)
+    {state, _} = packet(state, :pub, %Publish{topic: "t", payload: "b", qos: 1, packet_id: 2}, 3)
+    assert payloads(state, "m1") == ["a", "b"]
+    {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 4})
+    assert payloads(state, "m2") == ["a"]
+    assert state.shared_discarded == 1
+  end
+
+  test "the mandated discard of sent QoS2 entries at session end is counted separately" do
+    state = two_members(0, [2, 2, 1, 2])
+    {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+    assert state.shared_qos2_discarded == 1
+    assert state.shared_discarded == 0
+  end
 end
