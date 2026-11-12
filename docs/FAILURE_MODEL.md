@@ -83,7 +83,7 @@ Runtime.Supervisor
 |-- InfrastructureSupervisor
 |-- StorageSupervisor
 |-- NodeSupervisor
-|-- ListenerSupervisor
+|-- ListenerSupervisor   (implemented per protocol; see 2026-11-12 note)
 `-- ConnectionSupervisor
     `-- ConnectionTree
         |-- Connection
@@ -97,6 +97,15 @@ narrowest AMQP-defined scope. A failed connection tree must not take down peer
 connections or queue ownership. A failed queue must not be restarted as a
 child of a client connection. Listener failure and storage failure require
 policies distinct from ordinary connection churn.
+
+2026-11-12 (S1a, unreleased): listeners do not sit directly under
+`Runtime.Supervisor`. Each protocol supervisor (`MQTT.Supervisor`,
+`AMQP10.Supervisor`, both rest_for_one) ends, only when listeners are
+configured, with a one_for_one `ListenerSupervisor` (child `:listeners`)
+holding one `{Listener, id}` per listener; each plain-TCP listener links its
+own Hell server. A TCP listener failure closes that listener's connections;
+the owner and sibling listeners survive. See
+[ADR 0009](adr/0009-owned-network-stack.md).
 
 No restart strategy in Milestone 0 pretends that these future children exist.
 Strategies will be chosen when child start order and recovery invariants can be

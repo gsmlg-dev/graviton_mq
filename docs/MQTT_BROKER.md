@@ -260,7 +260,10 @@ CONNECT timeout is 3 seconds, and socket send timeout is 1 second.
 
 Each instance has a supervised owner for the protocol aggregate, independent
 logical session records, temporary connection readers and bounded writers.
-Connection/listener failure preserves the owner. In the default memory profile,
+Connection/listener failure preserves the owner. Since 2026-11-12
+([ADR 0009](adr/0009-owned-network-stack.md), unreleased) a plain-TCP
+listener failure closes that listener's connections; other listeners and
+their connections are unaffected. In the default memory profile,
 owner/VM failure loses memory
 sessions, retained data and inflight responsibility; supervised restart closes
 old readers/writers before the replacement serves traffic. This is tested

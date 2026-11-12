@@ -71,7 +71,11 @@ and the pure protocol libraries; no broker application depends on the client.
 references. It combines compiler xref manifests with parsed Elixir syntax so
 typespec-only references are checked as well. The checker also rejects child
 application cycles and transport/socket references from the pure AMQP
-application. Within the codec namespace it additionally rejects OTP and BEAM
+application. Owned network packages are allowed only where ADR 0009 places
+them: `Hell` in runtime, ex_ssl `SSL` in runtime and client; protocol
+applications reject both as transport modules, core, storage and the public
+composition cannot reference them, and the client may not reference OTP
+`:ssl`. Within the codec namespace it additionally rejects OTP and BEAM
 process modules plus direct `spawn`, `spawn_link`, `spawn_monitor`, `send`, and
 `receive` forms. This supplements, rather than replaces, the declared
 dependency tests and Mix's xref cycle check. All MQTT modules reject process,
@@ -403,7 +407,9 @@ lifetimes. One transition commits retained mutation and all recipient memory
 obligations after authorization. This serial owner bounds throughput and loses
 all state on owner/VM failure. `:rest_for_one` teardown fences old connections,
 writers and authorization operations before a replacement owner serves traffic.
-Listener and individual connection failures preserve the owner. This MQTT
+Listener and individual connection failures preserve the owner. Since
+2026-11-12 (ADR 0009) a plain-TCP listener failure also closes that
+listener's connections; sibling listeners are isolated. This MQTT
 topology specializes the original design; AMQP Session-owned Link and separate
 channel/handle allocation rules remain intact.
 
@@ -421,7 +427,7 @@ GravitonMQ.Runtime.Supervisor
 |-- InfrastructureSupervisor
 |-- StorageSupervisor
 |-- NodeSupervisor
-|-- ListenerSupervisor
+|-- ListenerSupervisor   (implemented per protocol; see 2026-11-12 note)
 `-- ConnectionSupervisor
     `-- ConnectionTree
         |-- Connection
@@ -436,6 +442,15 @@ Session will have one process. Queue processes will live under a node-oriented
 boundary, not beneath a connection. These are documented future ownership
 rules, not functioning processes at this milestone.
 
+2026-11-12 (S1a, unreleased): listeners do not sit directly under
+`Runtime.Supervisor`. Each protocol supervisor (`MQTT.Supervisor`,
+`AMQP10.Supervisor`, both rest_for_one) ends, only when listeners are
+configured, with a one_for_one `ListenerSupervisor` (child `:listeners`)
+holding one `{Listener, id}` per listener; each plain-TCP listener links its
+own Hell server. A TCP listener failure closes that listener's connections;
+the owner and sibling listeners survive. See
+[ADR 0009](adr/0009-owned-network-stack.md).
+
 ## G4 AMQP memory ownership specialization — 2026-10-30
 
 The initial AMQP broker now has functioning queue, connection and effect owners:
@@ -448,7 +463,8 @@ Runtime.Supervisor
     |-- Broker Manager (routes, authorization, delivery leases)
     |-- connections DynamicSupervisor
     |   `-- Connection + bounded Writer
-    `-- opt-in TCP/TLS listeners
+    `-- :listeners ListenerSupervisor (one_for_one, only if configured)
+        `-- {Listener, id}: opt-in TCP (linked Hell server) or TLS listener
 ```
 
 The preceding Session-process diagram describes later ownership, not the G4

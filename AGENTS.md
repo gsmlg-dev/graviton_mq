@@ -14,8 +14,10 @@ These instructions apply to the entire repository.
   independent lifecycles and a shared pure protocol layer. Implement MQTT
   behavior from the specification; do not wrap another MQTT implementation
   or substitute an external service for our broker. Standard Elixir/OTP networking
-  and TLS primitives are infrastructure; independent MQTT peers are allowed
-  for interoperability tests. The active G0–G7 Goal advances beyond historical M0.
+  and TLS primitives, and the owner-authorized `hell` and `ex_ssl` packages
+  ([ADR 0009](docs/adr/0009-owned-network-stack.md)), are infrastructure;
+  independent MQTT peers are allowed for interoperability tests. The active
+  G0–G7 Goal advances beyond historical M0.
 - RabbitMQ is an architectural reference only, for process ownership,
   supervision, connection and session boundaries, queue-type abstraction,
   state machines and effects, storage boundaries, and fault isolation.
@@ -49,6 +51,9 @@ graviton_mq_client  -> graviton_mq_mqtt
   it must not reference broker runtime, storage, or public composition.
   It owns `GravitonMQ.Client`, `GravitonMQ.MQTTClient`, and
   `GravitonMQ.AMQP10Client`, with no Application callback or implicit broker.
+- These rules cover GravitonMQ applications. The only third-party
+  dependencies are `hell` (runtime, bringing `ex_ssl` and `telemetry`) and
+  `ex_ssl` (client), owner-authorized in ADR 0009.
 - Do not introduce dependency cycles. Only `graviton_mq` owns the top-level
   `Application` callback.
 
@@ -64,7 +69,9 @@ The source-level rules are stricter than declarations in `mix.exs`:
 - all AMQP protocol modules, including endpoint/session transitions, remain
   pure: no process, clock/timer, runtime, storage, socket, or transport
   dependencies. Running owners interpret their explicit effects in the client
-  or broker runtime applications; and
+  or broker runtime applications;
+- `Hell` only in runtime; ex_ssl `SSL` only in runtime and client; the client
+  must not reference OTP `:ssl`; and
 - the application graph must remain acyclic.
 
 Keep `mix graviton_mq.check_architecture` based on compiler xref manifests and
@@ -205,10 +212,11 @@ performative schemas, message sections, protocol/SASL negotiation,
 Connection/Session/Link behavior, scheduling, delivery, filesystem
 WAL/segments/fsync/recovery, Raft, clustering, management APIs/UI, or AMQP
 0-9-1. Do not add Phoenix, Ra, Khepri, Ranch, Bandit, or speculative runtime
-dependencies. Do not claim a working MQTT client, broker, or full protocol
-compatibility. Future client and broker stages require independent-peer
-interoperability evidence in both directions; self-to-self tests alone do
-not qualify either role.
+dependencies, except the owner-authorized network packages in ADR 0009. Do
+not claim a working MQTT client, broker, or full protocol compatibility.
+Future client and broker stages require independent-peer interoperability
+evidence in both directions; self-to-self tests alone do not qualify either
+role.
 
 ## Required verification
 

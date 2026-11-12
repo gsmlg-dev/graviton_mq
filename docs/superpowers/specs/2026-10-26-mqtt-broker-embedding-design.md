@@ -246,6 +246,12 @@ Host supervisor or GravitonMQ.Application
                           `-- Writer
 ```
 
+2026-11-12 note: the implemented topology differs. Listeners sit under each
+protocol supervisor as the last, one_for_one `ListenerSupervisor` child
+(`:listeners`, holding `{Listener, id}`; each plain-TCP listener links a Hell
+server), not directly under `Runtime.Supervisor`. See
+[ADR 0009](../../adr/0009-owned-network-stack.md).
+
 Keep the existing exact `:name` and `:runtime_supervisor_name` options. Any
 additional registered infrastructure name must be explicit and instance
 scoped; callers provide literal names or supported OTP naming mechanisms.

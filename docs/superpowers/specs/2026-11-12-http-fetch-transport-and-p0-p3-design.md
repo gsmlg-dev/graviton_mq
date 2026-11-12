@@ -1,8 +1,11 @@
 # P0–P3 programme and S1 owned-transport migration design
 
 Date: 2026-11-12. Status: design approved by the owner (approach A); the
-written spec awaits owner review. Implementation is not started. Commit, push,
-version bump, release and publication are **not** authorized by this design.
+written spec awaits owner review. **S1a: implemented locally, uncommitted,
+peer interop pending CI** (amended 2026-11-12, see §3.3 and §3.5.1; recorded in
+[ADR 0009](../../adr/0009-owned-network-stack.md)). S1b is blocked on
+gsmlg-dev/http_fetch#161. Commit, push, version bump, release and publication
+are **not** authorized by this design.
 
 ## 1. Owner decisions recorded here
 
@@ -12,7 +15,9 @@ version bump, release and publication are **not** authorized by this design.
 | Network stack | Use the owner's `gsmlg-dev/http_fetch` packages: `hell` (TCP/TLS server), `ex_ssl` (TLS) |
 | WebSocket server | Provided by `gsmlg-dev/gaoxy` (`gaoxy_http` WebSock upgrade); client by `http_web_socket` |
 | S1 approach | A: broker TCP/TLS on native `Hell.Handler`; client TLS on `SSL.connect`; client plain TCP stays on `:gen_tcp` |
-| TLS versions | TLS 1.3 only on the broker (ex_ssl has no TLS 1.2 server); breaking change, documented |
+| TLS versions | TLS 1.3 only on the broker (ex_ssl has no TLS 1.2 server); breaking change, documented. Takes effect with S1b |
+| Client TLS versions (2026-11-12) | Client offers `[:"tlsv1.3", :"tlsv1.2"]` by default (pre-ex_ssl compatibility); a caller `versions` wins |
+| Broker listener layout (2026-11-12) | Hell owns plain-TCP accept only and hands the socket to the existing Connection (§3.3); a listener failure closes its own connections |
 | UDP / QUIC | Out of scope; the MQTT QUIC TODO stays deferred |
 
 These decisions amend AGENTS.md's "no speculative runtime dependencies" rule
@@ -68,7 +73,29 @@ than the TLS 1.3 restriction.
 
 ### 3.3 Design
 
-**Broker listeners.** Each configured MQTT/AMQP listener becomes one
+**Broker listeners — accepted layout (2026-11-12, S1a).** Each configured
+plain-TCP MQTT/AMQP listener starts one `Hell` server (`Hell.Transports.TCP`)
+linked to its `Listener` process. Hell owns accept only. The runtime handler
+`GravitonMQ.Runtime.HellHandoff` starts the protocol Connection under the
+existing `:connections` DynamicSupervisor, transfers socket ownership, sends
+it `{:accepted, raw}` and monitors it, living exactly as long as it. The
+Connection arms `active: :once` and keeps its Writer, backpressure and close
+handling unchanged. Because no input is read in a Hell handler, the
+drain-pause workaround for gsmlg-dev/http_fetch#162 is not needed for this
+layout. TLS listeners stay on OTP `:ssl` until S1b.
+
+Listener failure (owner decision): Hell closes handler sockets when it exits
+and a stopping handler stops its Connection, so a TCP listener failure closes
+that listener's live connections; the owner, queues and retained messages
+survive. Listeners sit under a generic one_for_one
+`GravitonMQ.Runtime.ListenerSupervisor` (child `:listeners`, only when
+listeners are configured, last child of each protocol's rest_for_one
+supervisor), so a sibling listener and its connections are unaffected; more
+than 3 listener crashes in 5 s restart all of that protocol's listeners, never
+the owner. Budgets and known limits are in ADR 0009.
+
+**Broker listeners — original proposal (superseded by the layout above).**
+Each configured MQTT/AMQP listener becomes one
 `Hell` server started by the existing per-instance runtime supervisor, using
 `Hell.Transports.TCP` or `Hell.Transports.SSL`. The Hell handler module is a
 thin runtime-owned adapter per protocol that:
@@ -87,7 +114,8 @@ separate process is decided by the S1 plan after the §3.5 spike; the
 constraint is that Connection/Writer state machines, limits and
 backpressure tests remain unchanged.
 
-**Transport adapter.** Runtime and client each get one small module exposing
+**Transport adapter** (not introduced in S1a; see §3.5.1 decision 2).
+Runtime and client each get one small module exposing
 `send/2`, `close/1`, `peername/1`, `peercert/1` and (client only) `connect/1`
 and `active_once/1` over `{:tcp, socket}` / `{:tls, socket}`. Connection and
 Writer code calls only the adapter. No adapter function returns success for an
@@ -97,7 +125,8 @@ operation it did not perform.
 from ex_ssl (TLS 1.3 and its bounded TLS 1.2). Plain TCP stays on `:gen_tcp`.
 Hostname and CA verification remain mandatory where configured today.
 
-**Configuration.** Broker TLS options are validated against the ex_ssl server
+**Configuration** (S1b; broker TLS listeners are unchanged in S1a). Broker
+TLS options are validated against the ex_ssl server
 subset before any socket opens: `certfile`/`keyfile`, `cert`/`key`,
 `certs_keys`, `password`, `cacerts`/`cacertfile`, `verify`,
 `fail_if_no_peer_cert`, `depth`, `ciphers`, `alpn_preferred_protocols`,
@@ -154,20 +183,28 @@ Upstream routing (policy `upstream-issue-routing`):
   (the owner chose ex_ssl-only TLS).
 - [gsmlg-dev/http_fetch#162](https://github.com/gsmlg-dev/http_fetch/issues/162)
   — Feature, **needed**: Hell handler result to pause input without automatic
-  re-arm. Drain-pause is the temporary workaround, marked
-  `WORKAROUND(upstream): gsmlg-dev/http_fetch#162`.
+  re-arm. Drain-pause was the planned temporary workaround for the byte-pump
+  layout; the accepted accept-only layout (decision 1) does not need it, so
+  no `WORKAROUND(upstream)` code exists.
 
 Decisions for S1:
 
-1. **Process layout:** keep the separate Connection owner and single Writer;
-   the Hell handler is a byte pump (forwards input, performs drain-pause on the
-   owner's request, never sends). Reasons: only one sender is allowed; a
-   blocked write must not freeze protocol state, timers or keepalive.
+1. **Process layout:** keep the separate Connection owner and single Writer.
+   Reasons: only one sender is allowed; a blocked write must not freeze
+   protocol state, timers or keepalive. *Amended 2026-11-12:* the Hell handler
+   is not a byte pump. It owns accept only and hands the socket to the
+   Connection (§3.3), so the #162 drain-pause workaround is not needed for this
+   layout; #162 stays open for any future in-handler input. A listener failure
+   closes that listener's connections; siblings are isolated.
 2. **Split:** S1a migrates broker plain-TCP listeners to `Hell.Transports.TCP`,
-   introduces the transport adapters, client TLS on `SSL.connect` (after
+   introduces the transport adapters (not needed in the accepted layout:
+   Connections keep the raw `:gen_tcp` socket, and the client keeps its
+   existing `Client.Transport`), client TLS on `SSL.connect` (after
    verifying the client-side duplex-read behaviour, `ssl/connection.ex:1003-1022`,
    under the same non-reading-peer test), architecture rules, ADR 0009 and the
-   AGENTS.md amendment. **S1b** (broker TLS on `Hell.Transports.SSL`) is
+   AGENTS.md amendment. *Status 2026-11-12: implemented locally, uncommitted;
+   full `mix test` 0 failures; independent-peer interop pending CI; local packaging (seven archives, three installed consumers) PASS on a rerun; the first local run failed once in the embedding consumer's durable recovery script ("installed recovered MQTT subscription did not complete", 5 s timeout) while synchronous disk writes took 57-86 ms; the committed baseline passed once.* The client offers TLS 1.3 and 1.2 by default; unsupported caller
+   TLS options fail at connect with an explicit error. **S1b** (broker TLS on `Hell.Transports.SSL`) is
    **blocked on #161**: resume only after a published release fixes it, the
    pin is updated and the reproduction plus TLS interop suites pass. Until then
    broker TLS listeners keep their current implementation unchanged.
