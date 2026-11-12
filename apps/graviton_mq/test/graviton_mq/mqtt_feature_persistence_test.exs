@@ -100,9 +100,9 @@ defmodule GravitonMQ.MQTTBroker.FeaturePersistenceTest do
                    10_000
   end
 
-  test "shared membership, Subscription Identifiers and bound deliveries survive an owner restart; a disabled feature refuses startup",
-       context do
-    {:ok, instance} = start(context)
+  # Offline persistent members: the shared copy is bound to the member's
+  # session at publication time and is part of durable state.
+  defp seed(instance) do
     {member, %Connack{reason_code: 0}} = connect(port(instance), "durable-member", true)
     subscribe(member, "$share/g/d", 5)
     {plain, %Connack{reason_code: 0}} = connect(port(instance), "durable-plain", true)
@@ -110,18 +110,14 @@ defmodule GravitonMQ.MQTTBroker.FeaturePersistenceTest do
     :ok = :gen_tcp.close(member)
     :ok = :gen_tcp.close(plain)
     wait(instance, &(&1.connections == 0))
-
-    # Offline persistent members: the shared copy is bound to the member's
-    # session at publication time and is part of durable state.
     publish(instance, "d", "kept")
     publish(instance, "p/x", "plain")
 
     assert %{pending_deliveries: 2, shared_groups: 1} =
              wait(instance, &(&1.pending_deliveries == 2))
+  end
 
-    :ok = stop_supervised(:broker)
-    {:ok, restarted} = start(context)
-
+  defp assert_recovered(restarted) do
     assert %{shared_groups: 1, sessions: 2, pending_deliveries: 2, shared_discarded: 0} =
              wait(restarted, &(&1.shared_groups == 1))
 
@@ -145,6 +141,31 @@ defmodule GravitonMQ.MQTTBroker.FeaturePersistenceTest do
     wait(restarted, &(&1.pending_deliveries == 0))
     :ok = :gen_tcp.close(member)
     :ok = :gen_tcp.close(plain)
+  end
+
+  # Spec §5 owner-kill evidence: the runtime MQTT owner is killed brutally
+  # (no terminate callback, no final checkpoint) and its supervisor restarts
+  # it from durable state alone.
+  test "shared membership, Subscription Identifiers and bound deliveries survive an owner kill",
+       context do
+    {:ok, instance} = start(context)
+    seed(instance)
+    {:ok, %{owner: original}} = GravitonMQ.status(instance)
+    monitor = Process.monitor(original)
+    Process.exit(original, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^original, :killed}, 2_000
+
+    wait(instance, fn status -> status.owner != original end)
+    assert_recovered(instance)
+  end
+
+  test "shared membership, Subscription Identifiers and bound deliveries survive an owner restart; a disabled feature refuses startup",
+       context do
+    {:ok, instance} = start(context)
+    seed(instance)
+    :ok = stop_supervised(:broker)
+    {:ok, restarted} = start(context)
+    assert_recovered(restarted)
     :ok = stop_supervised(:broker)
 
     # The checkpoint holds a shared membership and Subscription Identifiers:
