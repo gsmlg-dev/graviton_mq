@@ -17,8 +17,28 @@ defmodule GravitonMQ.AMQP10Client do
   `:sasl_protocol_error`, `:sasl_timeout` or `:invalid_sasl_credentials`.
   The profile uses non-dynamic volatile termini,
   format-zero messages, unsettled senders and receiver-first settlement.
-  TCP and verified TLS are available. Reconnect and session resumption are not
-  implemented: a new owner starts a new connection without implicit replay.
+  TCP and verified TLS are available.
+
+  `reconnect: [max_attempts: 0..100 (default 0), delay: 1..60_000 (250),
+  max_delay: delay..60_000 (5_000)]` opens a **new** Connection after a
+  transient loss (TCP close/error, receive idle or open timeout, SASL timeout
+  or `sys-temp`, an unrequested peer Close without error or with
+  `amqp:connection:forced`), waiting `min(max_delay, delay * 2^(n-1))` ms
+  before attempt n (no jitter). The budget resets when the peer's Open
+  arrives. Authentication, TLS-trust and protocol failures, host `close/1` and
+  an exhausted budget stop the owner (`status/1` `owner: :stopped`) without
+  exiting it. The observer receives `{:reconnecting, n}`,
+  `{:reconnect_exhausted, n}` (only if `max_attempts > 0`), and after every
+  reconnect `{:restored, {:session, sid} | {:link, sid, link}, result}` per
+  Session/Link the host had successfully declared, then
+  `{:restore_complete, %{restored: n, failed: m}}`. Between connections
+  commands return `{:error, :disconnected}`; commands on an item still being
+  restored return `{:error, :restoring}`. Nothing is resumed: in-flight
+  operations already completed with `{:unknown, _}` or `{:error, _}` at loss
+  and are never replayed; old delivery references return
+  `{:error, :stale_delivery}`; receiver credit must be granted again with
+  `request/5`. Resending an `{:unknown, _}` publication may duplicate it
+  (at-least-once).
 
   Commands return local admission `{:ok, reference}`. The caller then receives
   `{:graviton_mq, client, {:operation, reference, result}}`. Publication completes

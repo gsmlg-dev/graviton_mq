@@ -5,7 +5,8 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
   alias GravitonMQ.Client.AMQP10.{Config, Reconnect}
   alias GravitonMQ.AMQP10Client, as: Client
   alias GravitonMQ.AMQP10.Codec.{Frame, Performative}
-  alias GravitonMQ.AMQP10.Performative.{Close, Open}
+  alias GravitonMQ.AMQP10.Performative.{Attach, Begin, Close, Detach, Open}
+  alias GravitonMQ.AMQP10.Terminus.{Source, Target}
 
   @header <<"AMQP", 0, 1, 0, 0>>
 
@@ -291,6 +292,179 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
     end
   end
 
+  describe "restoration" do
+    test "declared Sessions and Links are restored in order and reported; in-flight ones are not" do
+      {listener, client} = client!(reconnect: [max_attempts: 2, delay: 20, max_delay: 20])
+      socket = handshake!(listener, client)
+      session!(client, socket, 2)
+      session!(client, socket, 1)
+      channel = 1
+      kept = sender!(client, socket, channel, "kept", 9)
+      refused = sender!(client, socket, channel, "refused-later", 10)
+
+      assert {:ok, inflight} =
+               Client.attach(client, 1, "in-flight", :sender, address: Value.string("q"))
+
+      assert {^channel, %Attach{}} = recv_frame!(socket)
+      assert %{intent: %{sessions: 2, links: 2}} = Client.status(client)
+      :ok = :gen_tcp.close(socket)
+      assert_receive {:graviton_mq, ^client, {:operation, ^inflight, {:unknown, :closed}}}, 1_000
+      assert_receive {:graviton_mq, ^client, {:reconnecting, 1}}, 1_000
+      socket = handshake!(listener, client)
+
+      # Ascending Session identity: Session 1 gets the first channel.
+      assert {0, %Begin{}} = recv_frame!(socket)
+      assert {1, %Begin{}} = recv_frame!(socket)
+      assert %{owner: :restoring, restoring: 4} = Client.status(client)
+      assert {:error, :restoring} = Client.send_message(client, 1, kept, <<0, 0x53, 0x77, 0x40>>)
+
+      assert {:error, :restoring} =
+               Client.attach(client, 1, "new", :sender, address: Value.string("q"))
+
+      :ok = :gen_tcp.send(socket, begin_frame(0) <> begin_frame(1))
+      assert_receive {:graviton_mq, ^client, {:restored, {:session, 1}, {:ok, 1}}}, 1_000
+      assert_receive {:graviton_mq, ^client, {:restored, {:session, 2}, {:ok, 2}}}, 1_000
+      assert {0, %Attach{name: %Value{value: "kept"}} = first} = recv_frame!(socket)
+      assert {0, %Attach{name: %Value{value: "refused-later"}} = second} = recv_frame!(socket)
+      :ok = :gen_tcp.send(socket, attach_reply(first, 0, 9) <> refusal(second, 0, 10))
+      assert_receive {:graviton_mq, ^client, {:restored, {:link, 1, ^kept}, {:ok, ^kept}}}, 1_000
+
+      assert_receive {:graviton_mq, ^client, {:restored, {:link, 1, ^refused}, {:error, _}}},
+                     1_000
+
+      assert_receive {:graviton_mq, ^client, {:restore_complete, %{restored: 3, failed: 1}}},
+                     1_000
+
+      assert %{owner: :active, restoring: 0, intent: %{sessions: 2, links: 1}} =
+               Client.status(client)
+
+      refute Enum.any?(
+               drain_frames(socket),
+               &match?({_, %Attach{name: %Value{value: "in-flight"}}}, &1)
+             )
+    end
+
+    test "host detach and End remove declarations at admission" do
+      {listener, client} = client!(reconnect: [max_attempts: 1, delay: 20, max_delay: 20])
+      socket = handshake!(listener, client)
+      session!(client, socket, 1)
+      session!(client, socket, 2)
+      link = sender!(client, socket, 0, "detached", 9)
+      assert {:ok, _} = Client.detach(client, 1, link)
+      assert {:ok, _} = Client.end_session(client, 2)
+      assert %{intent: %{sessions: 1, links: 0}} = Client.status(client)
+      :ok = :gen_tcp.close(socket)
+      assert_receive {:graviton_mq, ^client, {:reconnecting, 1}}, 1_000
+      socket = handshake!(listener, client)
+      assert {0, %Begin{}} = recv_frame!(socket)
+      :ok = :gen_tcp.send(socket, begin_frame(0))
+
+      assert_receive {:graviton_mq, ^client, {:restore_complete, %{restored: 1, failed: 0}}},
+                     1_000
+
+      assert drain_frames(socket) == []
+    end
+
+    test "an empty intent still reports completion after every reconnect, never on first connect" do
+      {listener, client} = client!(reconnect: [max_attempts: 1, delay: 20, max_delay: 20])
+      socket = handshake!(listener, client)
+      refute_received {:graviton_mq, ^client, {:restore_complete, _}}
+      :ok = :gen_tcp.close(socket)
+      handshake!(listener, client)
+
+      assert_receive {:graviton_mq, ^client, {:restore_complete, %{restored: 0, failed: 0}}},
+                     1_000
+    end
+  end
+
+  defp session!(client, socket, identity) do
+    assert {:ok, operation} = Client.open_session(client, identity)
+    assert {channel, %Begin{}} = recv_frame!(socket)
+    :ok = :gen_tcp.send(socket, begin_frame(channel))
+    assert_receive {:graviton_mq, ^client, {:operation, ^operation, {:ok, ^identity}}}, 1_000
+  end
+
+  defp sender!(client, socket, channel, name, handle) do
+    session = channel_session(client, channel)
+
+    assert {:ok, operation} =
+             Client.attach(client, session, name, :sender, address: Value.string("q"))
+
+    assert {^channel, %Attach{} = local} = recv_frame!(socket)
+    :ok = :gen_tcp.send(socket, attach_reply(local, channel, handle))
+    identity = {Value.string(name), :sender}
+    assert_receive {:graviton_mq, ^client, {:operation, ^operation, {:ok, ^identity}}}, 1_000
+    identity
+  end
+
+  # Sessions opened as 2 then 1 hold channels 0 and 1; tests pass the channel.
+  defp channel_session(_client, 0), do: 1
+  defp channel_session(_client, 1), do: 1
+
+  defp begin_frame(channel),
+    do:
+      frame(
+        %Begin{
+          remote_channel: Value.ushort(channel),
+          next_outgoing_id: Value.uint(0),
+          incoming_window: Value.uint(16),
+          outgoing_window: Value.uint(16)
+        },
+        channel
+      )
+
+  defp attach_reply(local, channel, handle),
+    do:
+      frame(
+        %{
+          local
+          | handle: Value.uint(handle),
+            role: Value.boolean(true),
+            source: %Source{address: Value.string("q")},
+            target: %Target{address: Value.string("q")},
+            initial_delivery_count: nil
+        },
+        channel
+      )
+
+  defp refusal(local, channel, handle),
+    do:
+      frame(
+        %{
+          local
+          | handle: Value.uint(handle),
+            role: Value.boolean(true),
+            source: %Source{address: Value.string("q")},
+            target: nil,
+            initial_delivery_count: nil
+        },
+        channel
+      ) <>
+        frame(
+          %Detach{
+            handle: Value.uint(handle),
+            closed: Value.boolean(true),
+            error: %Error{condition: Value.symbol("amqp:not-found")}
+          },
+          channel
+        )
+
+  defp drain_frames(socket, frames \\ []) do
+    case :gen_tcp.recv(socket, 4, 100) do
+      {:ok, <<size::32>>} ->
+        {:ok, rest} = :gen_tcp.recv(socket, size - 4, 1_000)
+        {:ok, frame, <<>>} = Frame.decode(<<size::32, rest::binary>>)
+
+        case Performative.decode(frame.body) do
+          {:ok, pdu, _} -> drain_frames(socket, [{frame.channel, pdu} | frames])
+          _heartbeat -> drain_frames(socket, frames)
+        end
+
+      {:error, :timeout} ->
+        Enum.reverse(frames)
+    end
+  end
+
   defp client!(options) do
     {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
     on_exit(fn -> :gen_tcp.close(listener) end)
@@ -325,7 +499,7 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
     pdu
   end
 
-  defp recv_frame!(socket, timeout) do
+  defp recv_frame!(socket, timeout \\ 1_000) do
     assert {:ok, <<size::32>>} = :gen_tcp.recv(socket, 4, timeout)
     assert {:ok, rest} = :gen_tcp.recv(socket, size - 4, timeout)
     assert {:ok, frame, <<>>} = Frame.decode(<<size::32, rest::binary>>)

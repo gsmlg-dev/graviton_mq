@@ -2,11 +2,13 @@ defmodule GravitonMQ.Client.AMQP10 do
   @moduledoc false
   use GenServer
 
+  @restore_window 8
+
   alias GravitonMQ.AMQP10.{Endpoint, Frame}
   alias GravitonMQ.AMQP10.Codec.{Error, Performative, Stream}
   alias GravitonMQ.AMQP10.Codec.Frame, as: FrameCodec
   alias GravitonMQ.AMQP10.SASL.{Machine, Plain}
-  alias GravitonMQ.Client.AMQP10.{Config, Reconnect}
+  alias GravitonMQ.Client.AMQP10.{Config, Intent, Reconnect}
   alias GravitonMQ.Client.Transport
 
   def start_link(options) do
@@ -46,6 +48,8 @@ defmodule GravitonMQ.Client.AMQP10 do
        close_cause: nil,
        host_closes: [],
        lost: nil,
+       intent: Intent.new(),
+       restore_pending: false,
        observer_monitor: Process.monitor(config.observer)
      }, {:continue, :connect}}
   end
@@ -69,14 +73,16 @@ defmodule GravitonMQ.Client.AMQP10 do
     {:reply,
      %{
        phase: state.endpoint.phase,
-       owner: state.owner,
+       owner: owner(state),
        generation: state.endpoint.generation,
        attempt: state.attempt,
        next_retry_ms: next_retry_ms(state),
        pending: map_size(state.operations),
        sessions: map_size(state.endpoint.connection.sessions_by_identity),
        writes: map_size(state.endpoint.writes),
-       buffered_bytes: byte_size(state.input) + byte_size(state.stream.buffer)
+       buffered_bytes: byte_size(state.input) + byte_size(state.stream.buffer),
+       intent: Intent.counts(state.intent),
+       restoring: restoring(state)
      }, state}
   end
 
@@ -112,9 +118,12 @@ defmodule GravitonMQ.Client.AMQP10 do
              host_closes: [{caller, reference} | state.host_closes]
          }}
 
+      restoring_target?(state, command) ->
+        {:reply, {:error, :restoring}, state}
+
       true ->
-        case admit(state, command, %{caller: caller}) do
-          {:ok, reference, state} -> {:reply, {:ok, reference}, state}
+        case admit(state, command, %{caller: caller, declare: declaration(command)}) do
+          {:ok, reference, state} -> {:reply, {:ok, reference}, retract(state, command)}
           {:error, reason, state} -> {:reply, {:error, reason}, state}
         end
     end
@@ -142,8 +151,55 @@ defmodule GravitonMQ.Client.AMQP10 do
 
   defp offline_command(state, _command, _caller), do: {:reply, {:error, :disconnected}, state}
 
+  defp restoring(%{intent: %{active: true} = intent}), do: Intent.restoring(intent)
+  defp restoring(_state), do: 0
+
+  defp owner(%{owner: :active} = state),
+    do: if(restoring(state) > 0, do: :restoring, else: :active)
+
+  defp owner(state), do: state.owner
+
+  # A command on a Session or Link still waiting for restoration (spec §3.4).
+  defp restoring_target?(%{intent: %{active: true} = intent}, command) do
+    case target(command) do
+      {sid, identity} -> Intent.pending?(intent, sid, identity)
+      nil -> false
+    end
+  end
+
+  defp restoring_target?(_state, _command), do: false
+
+  defp target({:open_session, sid, _options}), do: {sid, nil}
+  defp target({:end_session, sid}), do: {sid, nil}
+  defp target({:session, sid, command}), do: {sid, link_identity(command)}
+  defp target(_command), do: nil
+
+  defp link_identity({:attach, identity, _options}), do: identity
+  defp link_identity({:send, identity, _raw, _options}), do: identity
+  defp link_identity({:demand, identity, _slots, _bytes}), do: identity
+  defp link_identity({:detach, identity}), do: identity
+  defp link_identity(_command), do: nil
+
+  # Only a successful completion declares (spec §3.5); an admitted detach or
+  # End retracts at once, so it is never restored.
+  defp declaration({:open_session, sid, options}), do: {:session, sid, options}
+
+  defp declaration({:session, sid, {:attach, identity, options}}),
+    do: {:link, sid, identity, options}
+
+  defp declaration(_command), do: nil
+
+  defp retract(state, {:session, sid, {:detach, identity}}),
+    do: %{state | intent: Intent.drop_link(state.intent, sid, identity)}
+
+  defp retract(state, {:end_session, sid}),
+    do: %{state | intent: Intent.drop_session(state.intent, sid)}
+
+  defp retract(state, _command), do: state
+
   # Shared by host commands and restoration. `owner` is stored with the
-  # operation: `%{caller: pid}`.
+  # operation: `%{caller: pid, declare: declaration | nil}` for the host,
+  # `%{caller: :restore, item: key}` for restoration.
   defp admit(state, command, owner) do
     if map_size(state.operations) >= state.config.max_operations do
       {:error, :operation_limit, state}
@@ -248,6 +304,19 @@ defmodule GravitonMQ.Client.AMQP10 do
     }
 
     {:noreply, connect(state)}
+  end
+
+  # Fenced by generation: a stale wake from a lost connection is ignored and
+  # leaves the current connection's pending wake in place.
+  defp info(
+         {:restore, generation},
+         %{restore_pending: true, endpoint: %{generation: generation}} = state
+       ) do
+    state = %{state | restore_pending: false}
+
+    if state.endpoint.phase == :active,
+      do: {:noreply, restore_next(state)},
+      else: {:noreply, state}
   end
 
   defp info({:DOWN, monitor, :process, _pid, _reason}, %{observer_monitor: monitor} = state),
@@ -489,9 +558,20 @@ defmodule GravitonMQ.Client.AMQP10 do
       {nil, _operations} ->
         state
 
-      {%{caller: caller}, operations} ->
+      {%{caller: :restore, item: key}, operations} ->
+        state = %{state | operations: operations}
+
+        # A loss failed it: not reported, the entry stays declared (D13).
+        if state.endpoint.phase == :closed,
+          do: %{state | intent: Intent.interrupt(state.intent)},
+          else: restored(state, key, result)
+
+      {%{caller: caller} = owner, operations} ->
         send(caller, {:graviton_mq, self(), {:operation, reference, result}})
+
         %{state | operations: operations}
+        |> declare(Map.get(owner, :declare), result)
+        |> schedule_restore()
     end
   end
 
@@ -502,17 +582,17 @@ defmodule GravitonMQ.Client.AMQP10 do
 
   defp effect({:event, {:connected, _container} = event}, state) do
     notify(state, event)
-    %{state | owner: :active, attempt: 0}
+    start_restore(%{state | owner: :active, attempt: 0})
   end
 
   defp effect({:event, {:disconnected, reason} = event}, state) do
     notify(state, event)
-    %{state | lost: reason}
+    %{state | lost: reason, intent: Intent.stop(state.intent), restore_pending: false}
   end
 
   defp effect({:event, event}, state) do
     notify(state, event)
-    state
+    observe(state, event)
   end
 
   defp effect({:wake_at, generation, key, token, at}, state) do
@@ -630,6 +710,75 @@ defmodule GravitonMQ.Client.AMQP10 do
         )
     end
   end
+
+  # The first connection has nothing to restore and reports nothing (D13).
+  defp start_restore(%{endpoint: %{generation: 0}} = state), do: state
+
+  defp start_restore(state),
+    do: %{state | intent: Intent.start(state.intent)} |> schedule_restore() |> finish_restore()
+
+  defp schedule_restore(%{restore_pending: false} = state) do
+    if Intent.waiting?(state.intent) do
+      send(self(), {:restore, state.endpoint.generation})
+      %{state | restore_pending: true}
+    else
+      state
+    end
+  end
+
+  defp schedule_restore(state), do: state
+
+  # At most min(8, free operations) restoration operations are outstanding,
+  # so host commands are never starved (spec §3.5).
+  defp restore_next(state) do
+    free = state.config.max_operations - map_size(state.operations)
+    window = min(@restore_window - state.intent.outstanding, free)
+    {commands, intent} = Intent.take(state.intent, window)
+
+    Enum.reduce(commands, %{state | intent: intent}, fn {key, command}, state ->
+      case admit(state, command, %{caller: :restore, item: key}) do
+        {:ok, _reference, state} -> state
+        {:error, reason, state} -> restored(state, key, {:error, reason})
+      end
+    end)
+  end
+
+  defp restored(state, key, result) do
+    {intent, reports} = Intent.complete(state.intent, key, result)
+    Enum.each(reports, fn {key, result} -> notify(state, {:restored, key, result}) end)
+    %{state | intent: intent} |> schedule_restore() |> finish_restore()
+  end
+
+  defp finish_restore(state) do
+    if Intent.finished?(state.intent) do
+      {counts, intent} = Intent.finish(state.intent)
+      notify(state, {:restore_complete, counts})
+      %{state | intent: intent}
+    else
+      state
+    end
+  end
+
+  defp declare(state, {:session, sid, options}, {:ok, _}),
+    do: %{state | intent: Intent.put_session(state.intent, sid, options)}
+
+  defp declare(state, {:link, sid, identity, options}, {:ok, _}),
+    do: %{state | intent: Intent.put_link(state.intent, sid, identity, options)}
+
+  defp declare(state, _declaration, _result), do: state
+
+  # The peer ended or detached it: restoring it would resurrect it (D13).
+  defp observe(state, {:session, sid, {kind, identity, _reason}})
+       when kind in [:detached, :refused],
+       do: %{state | intent: Intent.drop_link(state.intent, sid, identity)}
+
+  defp observe(state, {:session_ended, sid, _error}),
+    do: %{state | intent: Intent.drop_session(state.intent, sid)}
+
+  defp observe(state, {:session_error, sid, _reason}),
+    do: %{state | intent: Intent.drop_session(state.intent, sid)}
+
+  defp observe(state, _event), do: state
 
   defp schedule_retry(state, delay) do
     token = make_ref()
