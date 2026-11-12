@@ -130,9 +130,18 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
       assert_receive {:graviton_mq, ^receiver, {:session, 0, {:detached, ^receive_link, _}}},
                      6_000
 
-      eventually!(fn ->
-        match?({:ok, %{queues: %{"orders" => :unavailable}}}, GravitonMQ.amqp10_status(instance))
-      end)
+      # The Manager stays blocked for the queue's 5 s call timeout before it
+      # fences the queue (documented limit); a status call made during that
+      # window can itself time out, so wait longer than that call timeout.
+      eventually!(
+        fn ->
+          match?(
+            {:ok, %{queues: %{"orders" => :unavailable}}},
+            GravitonMQ.amqp10_status(instance)
+          )
+        end,
+        7_000
+      )
     after
       resume(queue)
     end

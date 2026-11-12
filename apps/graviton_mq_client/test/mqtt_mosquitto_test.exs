@@ -266,8 +266,11 @@ defmodule GravitonMQ.MQTTClient.MosquittoTest do
     for {options, expected_reason} <- [
           {[cacertfile: certificates.untrusted, server_name_indication: ~c"localhost"],
            ~r/unknown_ca|selfsigned_peer/},
+          # ex_ssl reports a failed reference-identity check against a trusted
+          # chain as the certificate_unknown alert (OTP :ssl said
+          # hostname_check_failed); an untrusted chain stays unknown_ca.
           {[cacertfile: certificates.ca_certificate, server_name_indication: ~c"wrong.invalid"],
-           ~r/hostname_check_failed/}
+           ~r/certificate_unknown/}
         ] do
       rejected =
         client!(broker, transport: :tls, tls_options: options, reconnect: [max_attempts: 0])
@@ -287,7 +290,7 @@ defmodule GravitonMQ.MQTTClient.MosquittoTest do
       )
 
     assert_receive {:graviton_mq, ^rejected, {:disconnected, ip_reason}}, 5_000
-    assert inspect(ip_reason) =~ "hostname_check_failed"
+    assert inspect(ip_reason) =~ "certificate_unknown"
     assert Client.status(rejected).phase == :stopped
     refute_receive {:graviton_mq, ^rejected, {:connected, _}}, 50
   end

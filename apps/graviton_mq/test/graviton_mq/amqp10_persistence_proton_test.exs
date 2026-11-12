@@ -133,7 +133,11 @@ defmodule GravitonMQ.AMQP10.PersistenceProtonTest do
         :graviton_mq_amqp10,
         :graviton_mq_mqtt,
         :graviton_mq_runtime,
-        :graviton_mq
+        :graviton_mq,
+        # Third-party deps of the runtime (ADR 0009) must be on the child VM path.
+        :telemetry,
+        :ex_ssl,
+        :hell
       ]
       |> Enum.flat_map(fn app ->
         ["-pa", Path.join(List.to_string(:code.lib_dir(app)), "ebin")]

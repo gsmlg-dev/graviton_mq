@@ -1,5 +1,7 @@
 [directory] = System.argv()
 {:ok, _} = Application.ensure_all_started(:ssl)
+# Plain-TCP listeners accept through hell (ADR 0009); start it with ex_ssl and telemetry.
+{:ok, _} = Application.ensure_all_started(:hell)
 
 {:ok, instance} =
   GravitonMQ.start_link(

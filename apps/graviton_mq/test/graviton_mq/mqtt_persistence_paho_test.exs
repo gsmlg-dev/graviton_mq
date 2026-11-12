@@ -206,7 +206,11 @@ defmodule GravitonMQ.MQTTBroker.PersistencePahoTest do
         :graviton_mq_mqtt,
         :graviton_mq_storage,
         :graviton_mq_runtime,
-        :graviton_mq
+        :graviton_mq,
+        # Third-party deps of the runtime (ADR 0009) must be on the child VM path.
+        :telemetry,
+        :ex_ssl,
+        :hell
       ]
       |> Enum.flat_map(fn app ->
         ["-pa", :code.lib_dir(app) |> List.to_string() |> Path.join("ebin")]
