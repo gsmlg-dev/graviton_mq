@@ -73,8 +73,8 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
              Authenticator.start(authenticator, credentials, self(), make_ref(), deadline(20))
 
     assert_receive {:sleeping, ^task}, 1_000
-    monitor = Process.monitor(task)
-    assert_receive {:DOWN, ^monitor, :process, ^task, :killed}, 1_000
+    # The 20 ms deadline may kill the task before this monitor exists.
+    assert_killed(task, Process.monitor(task))
 
     # A fresh pool: the killed task's slot is released asynchronously.
     authenticator = authenticator!({Policy, []}, 1)
@@ -86,7 +86,7 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
     assert_receive {:sleeping, ^task}, 1_000
     monitor = Process.monitor(task)
     send(caller, :stop)
-    assert_receive {:DOWN, ^monitor, :process, ^task, :killed}, 1_000
+    assert_killed(task, monitor)
   end
 
   test "an anonymous policy or a missing authenticator never starts a callback" do
@@ -300,5 +300,14 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
 
     {:ok, authenticator} = Supervisor.start_child(parent, {Authenticator, {policy, parent}})
     authenticator
+  end
+
+  # A sensitive, sleeping callback task cannot answer a synchronous call, and
+  # it may be killed before its monitor exists: `:noproc` is accepted only
+  # for a task that is really gone.
+  defp assert_killed(task, monitor) do
+    assert_receive {:DOWN, ^monitor, :process, ^task, reason}, 1_000
+    assert reason in [:killed, :noproc]
+    refute Process.alive?(task)
   end
 end
