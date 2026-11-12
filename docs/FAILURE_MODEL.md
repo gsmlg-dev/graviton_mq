@@ -134,6 +134,10 @@ holding one `{Listener, id}` per listener; each plain-TCP listener links its
 own Hell server. A TCP listener failure closes that listener's connections;
 the owner and sibling listeners survive. See
 [ADR 0009](adr/0009-owned-network-stack.md).
+2026-11-12 (S1b, unreleased): TLS listeners use the same layout, each
+linking its own Hell server over ex_ssl, so a TLS listener failure now also
+closes that listener's connections (previously they survived it); siblings
+are unaffected.
 
 No restart strategy in Milestone 0 pretends that these future children exist.
 Strategies will be chosen when child start order and recovery invariants can be

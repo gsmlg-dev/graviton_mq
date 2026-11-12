@@ -4376,7 +4376,7 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
   upgrade note `docs/releases/UNRELEASED-s1b.md`, ACTIVE_SCOPE S1b row
   Complete and the release block's lifting condition recorded as met at run
   43223448120; a release still requires an explicit owner request.
-- **C5 (Agent Note):** not done in this documentation pass.
+- **C5 (Agent Note):** done by the coordinator: note `df942606` updated (rc.17 status, per-acceptor `num_connections`); new notes `0cb5c5d8` (Artemis bare address is MULTICAST) and `9cec1ae6` (sensitive processes cannot be traced; use `:sys.install`).
 - **C6:** none (the Amendment pinned rc.17 with #168/#169 fixed).
 - Verification: `release_test.exs` + `architecture_test.exs` and
   `mix format --check-formatted` (see the commit report).
