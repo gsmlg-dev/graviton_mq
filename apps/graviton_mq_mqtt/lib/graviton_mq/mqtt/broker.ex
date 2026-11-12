@@ -1371,7 +1371,7 @@ defmodule GravitonMQ.MQTT.Broker do
         {state, []}
 
       conn ->
-        case Packet.encode(packet, state.codec) do
+        case Packet.encode(packet, outbound_codec(state, conn)) do
           {:ok, bytes} when byte_size(bytes) <= conn.peer_maximum ->
             write_bytes = Enum.sum(Enum.map(state.writes, fn {_id, write} -> write.bytes end))
 
@@ -1532,7 +1532,7 @@ defmodule GravitonMQ.MQTT.Broker do
 
         wire =
           if code != nil and conn.phase == :connected,
-            do: Packet.encode(packet, state.codec),
+            do: Packet.encode(packet, outbound_codec(state, conn)),
             else: :none
 
         sends =
@@ -2431,8 +2431,15 @@ defmodule GravitonMQ.MQTT.Broker do
     end
   end
 
+  # `state.codec` bounds what the broker RECEIVES. Outbound packets are bounded
+  # by the peer's Maximum Packet Size instead (absent: the protocol maximum):
+  # Subscription Identifiers can make a copy larger than the accepted inbound
+  # packet, and that copy must still be delivered when the peer admits it.
+  defp outbound_codec(state, conn),
+    do: %Limits{state.codec | max_packet_size: min(268_435_460, conn.peer_maximum)}
+
   defp outbound_fits?(state, conn, packet) do
-    case Packet.encode(packet, state.codec) do
+    case Packet.encode(packet, outbound_codec(state, conn)) do
       {:ok, bytes} -> byte_size(bytes) <= conn.peer_maximum
       _ -> false
     end
