@@ -119,4 +119,16 @@ defmodule GravitonMQ.Runtime.MQTT.ConfigTest do
       refute Keyword.has_key?(config.machine_options, :max_alias_bytes)
     end
   end
+
+  test "feature switches are booleans mapped to machine availability flags" do
+    assert {:ok, config} = Config.build(auth: :anonymous, subscription_identifiers: false)
+    assert config.machine_options[:subscription_identifiers] == 0
+    assert {:ok, config} = Config.build(auth: :anonymous, subscription_identifiers: true)
+    assert config.machine_options[:subscription_identifiers] == 1
+    assert {:ok, config} = Config.build(auth: :anonymous)
+    refute Keyword.has_key?(config.machine_options, :subscription_identifiers)
+
+    assert {:error, :invalid_mqtt_options} =
+             Config.build(auth: :anonymous, subscription_identifiers: 1)
+  end
 end

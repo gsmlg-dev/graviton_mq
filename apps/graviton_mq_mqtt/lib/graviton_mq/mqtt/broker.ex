@@ -49,7 +49,8 @@ defmodule GravitonMQ.MQTT.Broker do
     # (MQTT-3.3.2-12). When omitted, `new/1` derives it as that worst case, so
     # configurations that predate Topic Alias support still start; an explicit
     # value below the worst case fails with `:alias_bytes_exceeded`.
-    max_alias_bytes: nil
+    max_alias_bytes: nil,
+    subscription_identifiers: 1
   }
 
   defstruct [
@@ -81,7 +82,8 @@ defmodule GravitonMQ.MQTT.Broker do
            limits.auth_timeout > 0 and
            limits.dispatch_retry_interval > 0 and
            limits.topic_alias_maximum in 0..65_535 and
-           limits.max_outbound_topic_aliases in 0..65_535 do
+           limits.max_outbound_topic_aliases in 0..65_535 and
+           limits.subscription_identifiers in 0..1 do
         alias_bytes =
           limits.max_connections *
             (limits.topic_alias_maximum + limits.max_outbound_topic_aliases) *
@@ -508,7 +510,8 @@ defmodule GravitonMQ.MQTT.Broker do
     conn = state.connections[id]
 
     cond do
-      Keyword.has_key?(packet.properties, :subscription_identifier) ->
+      state.limits.subscription_identifiers == 0 and
+          Keyword.has_key?(packet.properties, :subscription_identifier) ->
         disconnect(state, id, :subscription_identifiers_not_supported, 0xA1, now)
 
       Enum.any?(packet.subscriptions, &match?({<<"$share/", _::binary>>, _}, &1)) ->
@@ -543,6 +546,7 @@ defmodule GravitonMQ.MQTT.Broker do
             packet_id: packet.packet_id,
             subscriptions: subscriptions,
             retained: retained,
+            subscription_identifier: Keyword.get(packet.properties, :subscription_identifier),
             encoded: <<>>
           },
           requests,
@@ -986,7 +990,7 @@ defmodule GravitonMQ.MQTT.Broker do
             retain_available: 1,
             wildcard_subscription_available: 1,
             shared_subscription_available: 0,
-            subscription_identifier_available: 0,
+            subscription_identifier_available: state.limits.subscription_identifiers,
             topic_alias_maximum: state.limits.topic_alias_maximum,
             maximum_packet_size: state.limits.max_packet_size,
             receive_maximum: state.limits.receive_maximum
@@ -1107,6 +1111,7 @@ defmodule GravitonMQ.MQTT.Broker do
                 token: session.token,
                 principal: session.principal,
                 incarnations: Enum.map(matches, fn {filter, sub} -> {filter, sub.id} end),
+                subscription_identifiers: subscription_ids(Enum.map(matches, &elem(&1, 1))),
                 message: message,
                 qos: qos,
                 retain: retain
@@ -1169,7 +1174,8 @@ defmodule GravitonMQ.MQTT.Broker do
     %{
       target
       | qos: min(target.message.qos, Enum.max(Enum.map(surviving, & &1.options.qos))),
-        retain: target.message.retain and Enum.any?(surviving, & &1.options.retain_as_published)
+        retain: target.message.retain and Enum.any?(surviving, & &1.options.retain_as_published),
+        subscription_identifiers: subscription_ids(surviving)
     }
   end
 
@@ -1345,7 +1351,8 @@ defmodule GravitonMQ.MQTT.Broker do
       retain: entry.retain,
       packet_id: packet_id,
       dup: entry.qos > 0 and entry.ever_sent,
-      properties: properties
+      properties:
+        properties ++ Enum.map(entry.subscription_identifiers, &{:subscription_identifier, &1})
     }
   end
 
@@ -1846,6 +1853,11 @@ defmodule GravitonMQ.MQTT.Broker do
       %{packet | properties: Keyword.delete(packet.properties, :message_expiry_interval)}
   end
 
+  # MQTT-3.3.4-3/4: one copy carries the identifier of every matching
+  # subscription that has one, repeated when equal.
+  defp subscription_ids(subscriptions),
+    do: subscriptions |> Enum.map(& &1.subscription_identifier) |> Enum.reject(&is_nil/1)
+
   defp options(qos) when is_integer(qos), do: options(%{qos: qos})
 
   defp options(options),
@@ -1955,7 +1967,7 @@ defmodule GravitonMQ.MQTT.Broker do
               sub = %{
                 id: state.next_id,
                 options: %{opts | qos: code},
-                subscription_identifier: nil,
+                subscription_identifier: op.subscription_identifier,
                 shared: nil
               }
 
@@ -1981,6 +1993,8 @@ defmodule GravitonMQ.MQTT.Broker do
                   token: session.token,
                   principal: session.principal,
                   incarnations: Enum.map(filters, &{&1, subscriptions[&1].id}),
+                  subscription_identifiers:
+                    subscription_ids(Enum.map(filters, &subscriptions[&1])),
                   message: target.message,
                   qos: target.qos,
                   retain: true

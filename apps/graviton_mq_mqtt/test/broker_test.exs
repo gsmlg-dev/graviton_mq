@@ -83,7 +83,7 @@ defmodule GravitonMQ.MQTT.BrokerTest do
     assert [{:send, :one, 1, _, %Connack{reason_code: 0, properties: properties}}] = effects
     assert properties[:maximum_qos] == 1
     assert properties[:shared_subscription_available] == 0
-    assert properties[:subscription_identifier_available] == 0
+    assert properties[:subscription_identifier_available] == 1
     assert properties[:topic_alias_maximum] == 10
   end
 

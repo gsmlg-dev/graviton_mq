@@ -74,6 +74,7 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
       when is_integer(monotonic) and is_integer(wall) do
     with snapshot = upgrade(snapshot),
          :ok <- validate(snapshot, template),
+         :ok <- capabilities(snapshot.state, template.limits),
          true <- wall >= snapshot.at_wall do
       shift = monotonic - snapshot.at_monotonic - (wall - snapshot.at_wall)
 
@@ -292,6 +293,19 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
          Enum.sum(Enum.map(data.wills, fn {_, will} -> will.bytes end)) <= limits.max_will_bytes,
        do: :ok,
        else: {:error, :checkpoint_limits}
+  end
+
+  # Owner decision Q10: persisted responsibility for a disabled feature fails
+  # startup explicitly instead of being dropped.
+  defp capabilities(data, limits) do
+    subscriptions = for {_, session} <- data.sessions, {_, sub} <- session.subscriptions, do: sub
+    entries = for {_, session} <- data.sessions, entry <- session.deliveries, do: entry
+
+    if limits.subscription_identifiers == 0 and
+         (Enum.any?(subscriptions, &(&1.subscription_identifier != nil)) or
+            Enum.any?(entries, &(&1.subscription_identifiers != []))),
+       do: {:error, :checkpoint_capability_mismatch},
+       else: :ok
   end
 
   # Owner decision Q9: v1 is upgraded in memory at read time; the next commit

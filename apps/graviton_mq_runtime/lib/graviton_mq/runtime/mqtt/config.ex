@@ -10,7 +10,9 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
     max_host_subscriptions max_host_outstanding max_demand auth_timeout max_session_bytes
     max_subscription_bytes max_offline_deliveries max_offline_bytes max_writes max_write_bytes
     max_incoming_bytes dispatch_retry_interval topic_alias_maximum max_outbound_topic_aliases
-    max_alias_bytes)a
+    max_alias_bytes subscription_identifiers)a
+  # Boolean runtime switches mapped to the machine's 0/1 availability flags.
+  @flag_keys ~w(subscription_identifiers)a
   @keys @machine_keys ++ ~w(versions listeners auth host_principal auth_concurrency
     tick_interval connect_timeout send_timeout max_writer_packets max_writer_bytes persistence)a
   @persistence_keys ~w(directory stream_id max_snapshot_bytes max_log_bytes fault_injector)a
@@ -32,7 +34,10 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
         listeners: listeners,
         limits: %Limits{max_packet_size: Keyword.get(options, :max_packet_size, 1_048_576)},
         machine_options:
-          options |> Keyword.take(@machine_keys) |> Keyword.put_new(:auth_timeout, 1_000),
+          options
+          |> Keyword.take(@machine_keys)
+          |> Keyword.put_new(:auth_timeout, 1_000)
+          |> Enum.map(&machine_flag/1),
         auth_concurrency: Keyword.get(options, :auth_concurrency, 8),
         auth_timeout: Keyword.get(options, :auth_timeout, 1_000),
         tick_interval: Keyword.get(options, :tick_interval, 100),
@@ -88,6 +93,9 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
         {:ok, value} when key in [:max_inflight, :receive_maximum] ->
           is_integer(value) and value in 1..65_535
 
+        {:ok, value} when key in @flag_keys ->
+          is_boolean(value)
+
         {:ok, value} when key in [:topic_alias_maximum, :max_outbound_topic_aliases] ->
           is_integer(value) and value in 0..65_535
 
@@ -102,6 +110,9 @@ defmodule GravitonMQ.Runtime.MQTT.Config do
       end
     end)
   end
+
+  defp machine_flag({key, value}) when key in @flag_keys, do: {key, if(value, do: 1, else: 0)}
+  defp machine_flag(option), do: option
 
   defp persistence(nil), do: {:ok, nil}
 
