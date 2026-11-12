@@ -8,7 +8,7 @@ defmodule GravitonMQ.AMQP10Client.SASLTest do
   alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
   alias GravitonMQ.AMQP10.Frame, as: Envelope
   alias GravitonMQ.AMQP10.Performative.Open
-  alias GravitonMQ.AMQP10.SASL.{Challenge, Init, Mechanisms, Outcome, Plain}
+  alias GravitonMQ.AMQP10.SASL.{Challenge, Init, Machine, Mechanisms, Outcome, Plain}
   alias GravitonMQ.Client.AMQP10.Config
 
   @amqp <<"AMQP", 0, 1, 0, 0>>
@@ -155,6 +155,41 @@ defmodule GravitonMQ.AMQP10Client.SASLTest do
 
     refute_received {:graviton_mq, ^client, {:connected, _}}
     assert %{phase: :closed} = Client.status(client)
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
+  end
+
+  # Both failures arrive while the machine owns input: they must close the
+  # machine (cancelling its deadline), not only the unstarted Endpoint.
+  test "a socket re-arm failure during SASL is routed to the machine" do
+    {client, socket} = awaiting_outcome!()
+    outcome = sasl_frame(%Outcome{code: Value.ubyte(0)})
+
+    client_socket =
+      :sys.replace_state(client, fn state ->
+        :ok = :gen_tcp.close(state.socket)
+        state
+      end).socket
+
+    # A partial outcome leaves no unread input, so the owner re-arms the
+    # (now closed) socket.
+    send(client, {:tcp, client_socket, binary_part(outcome, 0, 2)})
+    assert_receive {:graviton_mq, ^client, {:disconnected, {:transport, :einval}}}, 1_000
+    refute_received {:graviton_mq, ^client, {:connected, _}}
+    assert_sasl_closed!(client)
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
+  end
+
+  test "over-limit input during SASL closes with the input-limit reason" do
+    {client, socket} = awaiting_outcome!()
+    client_socket = :sys.get_state(client).socket
+    # One octet over the default `max_input_bytes` (1 MiB).
+    send(client, {:tcp, client_socket, :binary.copy(<<0>>, 1_048_577)})
+
+    assert_receive {:graviton_mq, ^client, {:disconnected, {:decode_error, :input_buffer_limit}}},
+                   1_000
+
+    refute_received {:graviton_mq, ^client, {:connected, _}}
+    assert_sasl_closed!(client)
     assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
   end
 
@@ -360,6 +395,13 @@ defmodule GravitonMQ.AMQP10Client.SASLTest do
     refute :binary.match(:erlang.term_to_binary(state), secret) != :nomatch
     refute inspect(Client.status(client)) =~ secret
     refute inspect(:sys.get_status(client), limit: :infinity) =~ secret
+  end
+
+  defp assert_sasl_closed!(client) do
+    state = :sys.get_state(client)
+    refute Machine.active?(state.sasl)
+    assert state.timers == %{}
+    assert %{phase: :closed} = Client.status(client)
   end
 
   defp server! do

@@ -327,6 +327,68 @@ defmodule GravitonMQ.AMQP10SASLTest do
     assert_receive {:graviton_mq, ^client, {:operation, ^attach, {:ok, _identity}}}, 2_000
   end
 
+  @tag :tmp_dir
+  test "our PLAIN client reaches our broker over verified TLS without the insecure opt-in",
+       context do
+    test = self()
+    certificate = Path.join(context.tmp_dir, "server.pem")
+    key = Path.join(context.tmp_dir, "server.key")
+
+    {output, status} =
+      System.cmd(
+        "openssl",
+        ~w(req -x509 -newkey rsa:2048 -nodes -keyout #{key} -out #{certificate} -days 1
+           -subj /CN=localhost -addext subjectAltName=DNS:localhost),
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+
+    authorize = fn principal, action, address ->
+      send(test, {:authorized, principal, action, address})
+      :allow
+    end
+
+    # No `allow_insecure_plain` on either side: PLAIN is admitted only over TLS.
+    broker =
+      broker!(
+        auth: {Auth, [test: self()]},
+        authorize: authorize,
+        listeners: [
+          [
+            transport: :tls,
+            ip: {127, 0, 0, 1},
+            port: 0,
+            tls_options: [
+              certfile: String.to_charlist(certificate),
+              keyfile: String.to_charlist(key)
+            ]
+          ]
+        ]
+      )
+
+    assert {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.amqp10_status(broker)
+
+    client =
+      sasl_client!(port,
+        host: "localhost",
+        transport: :tls,
+        tls_options: [cacertfile: certificate],
+        sasl: {:plain, "graviton-user", "graviton-password"}
+      )
+
+    assert_receive {:authenticating, _task, %{mechanism: :plain, peer: %{transport: :tls}}}, 2_000
+    assert_receive {:graviton_mq, ^client, {:connected, _}}, 2_000
+    assert {:ok, operation} = Client.open_session(client, 0)
+    assert_receive {:graviton_mq, ^client, {:operation, ^operation, {:ok, 0}}}, 2_000
+
+    assert {:ok, attach} =
+             Client.attach(client, 0, "tls-sender", :sender, address: Value.string("orders"))
+
+    assert_receive {:authorized, {:user, "graviton-user"}, :send, "orders"}, 2_000
+    assert_receive {:graviton_mq, ^client, {:operation, ^attach, {:ok, _identity}}}, 2_000
+  end
+
   test "our client is refused with an auth outcome and our anonymous client uses the default" do
     broker = plain_broker!()
     assert {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.amqp10_status(broker)
