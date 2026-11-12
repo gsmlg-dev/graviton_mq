@@ -60,12 +60,23 @@ defmodule GravitonMQ.AMQP10.AvailabilityTest do
       assert System.monotonic_time(:millisecond) < deadline,
              "bystander work must complete before the 5 s request deadline"
 
+      # The Manager answers status at once; the stalled queue is reported as
+      # :unresponsive (not fenced yet) within the 1 s status deadline (Q6).
+      status = within!(1_000, fn -> GravitonMQ.amqp10_status(broker) end)
+      assert {:ok, %{queues: %{"orders" => :unresponsive, "other" => %{}}} = status_map} = status
+      assert status_map.queue_requests >= 1
+      assert status_map.queue_fences == 0
+
       assert child(supervisor, Broker) == manager
       refute_received {:graviton_mq, ^consumer, {:session, 0, {:detached, ^link, _}}}
 
       # The settle was not executed: the queue is fenced at its deadline.
       assert_receive {:graviton_mq, ^consumer, {:session, 0, {:detached, ^link, error}}}, 7_000
       assert {:peer_detach, %{condition: %Value{value: "amqp:internal-error"}}} = error
+
+      assert {:ok, %{queues: %{"orders" => :unavailable}, queue_fences: 1}} =
+               within!(1_000, fn -> GravitonMQ.amqp10_status(broker) end)
+
       assert child(supervisor, Broker) == manager
       assert DynamicSupervisor.count_children(connections).active == connection_count
 
@@ -164,11 +175,114 @@ defmodule GravitonMQ.AMQP10.AvailabilityTest do
     eventually!(fn -> match?(%{consumers: 0, inflight: 0}, Queue.status(orders)) end)
   end
 
-  defp broker! do
+  test "two stalled queues answer status within 1 s and fence independently (B2)" do
+    broker = broker!(["orders", "other", "third"])
+    supervisor = amqp_supervisor(broker)
+
+    stalled =
+      for address <- ["orders", "other"], do: {address, child(supervisor, {Queue, address})}
+
+    held =
+      for {address, queue} <- stalled do
+        enqueue!(queue, address, message(address))
+        client = client!(broker)
+        link = attach!(client, "#{address}-consumer", :receiver, address)
+        assert {:ok, 1} = operation(Client.request(client, 0, link, 1, 1_048_576), client)
+        assert_receive {:graviton_mq, ^client, {:delivery, delivery, 0, ^link, _, _}}, 2_000
+        {client, link, delivery}
+      end
+
+    bystander = client!(broker)
+    third = attach!(bystander, "third-publisher", :sender, "third")
+    Enum.each(stalled, fn {_, queue} -> :sys.suspend(queue) end)
+
+    try do
+      for {client, _link, delivery} <- held,
+          do:
+            assert(
+              {:ok, _} = operation(Client.settle(client, delivery, %Outcome.Accepted{}), client)
+            )
+
+      assert {:ok,
+              %{queues: %{"orders" => :unresponsive, "other" => :unresponsive, "third" => %{}}}} =
+               within!(1_000, fn -> GravitonMQ.amqp10_status(broker) end)
+
+      within!(500, fn ->
+        assert {:ok, %Outcome.Accepted{}} =
+                 operation(Client.send_message(bystander, 0, third, message("third")), bystander)
+      end)
+
+      for {client, link, _delivery} <- held do
+        assert_receive {:graviton_mq, ^client, {:session, 0, {:detached, ^link, _}}}, 7_000
+      end
+
+      assert {:ok,
+              %{queues: %{"orders" => :unavailable, "other" => :unavailable, "third" => %{}}} =
+                status} = within!(1_000, fn -> GravitonMQ.amqp10_status(broker) end)
+
+      assert status.queue_fences == 2
+    after
+      Enum.each(stalled, fn {_, queue} -> :sys.resume(queue) end)
+    end
+
+    for {_, queue} <- stalled do
+      eventually!(fn -> match?(%{ready: 1, inflight: 0, consumers: 0}, Queue.status(queue)) end)
+    end
+  end
+
+  test "an enqueue the queue never took is Released and leaves no copy (B5, owner Q5)" do
+    broker = broker!()
+    supervisor = amqp_supervisor(broker)
+    orders = child(supervisor, {Queue, "orders"})
+    publisher = client!(broker)
+    sender = attach!(publisher, "orders-publisher", :sender, "orders")
+    :sys.suspend(orders)
+
+    try do
+      assert {:ok, %Outcome.Released{}} =
+               operation(
+                 Client.send_message(publisher, 0, sender, message("not-executed")),
+                 publisher
+               )
+
+      assert Client.status(publisher).phase == :active
+      assert {:ok, %{queue_fences: 0}} = GravitonMQ.amqp10_status(broker)
+    after
+      :sys.resume(orders)
+    end
+
+    Process.sleep(200)
+    assert %{messages: 0, ready: 0} = Queue.status(orders)
+  end
+
+  test "a timed-out status call stays an exit and its late handler does not fail the Manager" do
+    broker = broker!()
+    manager = broker |> amqp_supervisor() |> child(Broker)
+    monitor = Process.monitor(manager)
+    assert {:error, :unsupported_command} = GenServer.call(manager, :sync)
+    tables = fn -> Enum.count(:ets.all(), &(:ets.info(&1, :owner) == manager)) end
+    owned = tables.()
+    :sys.suspend(manager)
+
+    try do
+      # The 5 s Manager call times out; that is an exit, never a result.
+      assert {:timeout, _} = catch_exit(Broker.status(manager))
+    after
+      :sys.resume(manager)
+    end
+
+    # The Manager then serves the stale call and deletes the handed-over table.
+    assert {:ok, %{queues: %{"orders" => %{}, "other" => %{}}}} = GravitonMQ.amqp10_status(broker)
+    eventually!(fn -> tables.() == owned end)
+    refute_received {:DOWN, ^monitor, :process, ^manager, _}
+    assert broker |> amqp_supervisor() |> child(Broker) == manager
+  end
+
+  defp broker!(queues \\ ["orders", "other"]) do
     config = [
       container_id: "broker-#{System.unique_integer([:positive])}",
       auth: :anonymous,
-      queues: ["orders", "other"],
+      queues: queues,
       endpoint_options: [max_frame_size: 512],
       listeners: [[transport: :tcp, ip: {127, 0, 0, 1}, port: 0]]
     ]

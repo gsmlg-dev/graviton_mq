@@ -19,23 +19,76 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   # former GenServer.call timeout) is classified by taking it back.
   @request_deadline 5_000
   @max_queue_requests 4_096
-  @uncertain [:unknown_outcome, :queue_call_failed, :closed]
 
   def start_link(configuration), do: GenServer.start_link(__MODULE__, configuration)
 
   def child_spec(configuration),
     do: %{id: __MODULE__, start: {__MODULE__, :start_link, [fn -> configuration end]}}
 
-  def status(owner) do
-    table = :ets.new(__MODULE__, [:set, :public])
+  # Under the 1 s status bound (D14) the caller waits at most this long for
+  # the queues.
+  @status_deadline 900
+
+  # The Manager answers from its own state. The caller then asks every
+  # unfenced queue concurrently under one deadline, so a stuck queue is
+  # reported as :unresponsive and delays neither the caller nor the Manager.
+  # Queue pids never leave this function.
+  def status(owner) when is_pid(owner) do
+    deadline = now() + @status_deadline
+    # The Manager writes into this exchange, so it must never be deleted
+    # before that write: should this caller die, the table passes to the
+    # Manager, which deletes it.
+    table = :ets.new(__MODULE__, [:set, :public, {:heir, owner, :amqp10_status}])
     token = make_ref()
+    :ok = call_status(owner, table, token)
 
     try do
-      :ok = GenServer.call(owner, {:status, table, token})
       [{^token, result}] = :ets.take(table, token)
-      result
+
+      requests =
+        for {address, {:queue, queue}} <- result.queues,
+            into: %{},
+            do: {address, Queue.send_request(queue, table, :status)}
+
+      queues =
+        Map.new(result.queues, fn
+          {address, :unavailable} ->
+            {address, :unavailable}
+
+          {address, {:queue, _}} ->
+            {address, queue_status(table, Map.fetch!(requests, address), deadline)}
+        end)
+
+      %{result | queues: queues}
     after
       :ets.delete(table)
+    end
+  end
+
+  # A failed call hands the exchange to the Manager instead of deleting it, so
+  # a late status handler finds it intact; the Manager deletes it when the
+  # ETS-TRANSFER arrives, after that handler. The exit is kept: a timed-out
+  # status is never a result.
+  defp call_status(owner, table, token) do
+    GenServer.call(owner, {:status, table, token}, 5_000)
+  catch
+    :exit, reason ->
+      hand_over(table, owner)
+      exit(reason)
+  end
+
+  defp hand_over(table, owner) do
+    :ets.give_away(table, owner, :amqp10_status)
+  rescue
+    # give_away/3 fails here only for a Manager that is no longer alive, which
+    # can no longer write the table.
+    ArgumentError -> :ets.delete(table)
+  end
+
+  defp queue_status(table, {request, token}, deadline) do
+    case Queue.response(table, token, :gen_server.receive_response(request, {:abs, deadline})) do
+      {:known, status} when is_map(status) -> status
+      _ -> :unresponsive
     end
   end
 
@@ -133,16 +186,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
           queue_fences: state.queue_fences,
           queues:
             Map.new(state.queues, fn {address, queue} ->
-              {address, if(fenced?(state, queue), do: :unavailable, else: Queue.status(queue))}
+              {address, if(fenced?(state, queue), do: :unavailable, else: {:queue, queue})}
             end)
         }
 
-        # A caller that timed out has deleted its table; nobody awaits the result.
-        try do
-          :ets.insert(table, {token, result})
-        rescue
-          ArgumentError -> :ok
-        end
+        # The owning caller deletes its table only after this reply; a caller
+        # whose call failed has given it to this process instead (status/1).
+        true = :ets.insert(table, {token, result})
       end
 
       {:reply, :ok, shell}
@@ -242,6 +292,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     state
   end
 
+  # A status exchange whose caller died or gave up (status/1). The status
+  # handler skips a table its caller no longer owns, so it never writes here.
+  defp info({:"ETS-TRANSFER", table, _caller, :amqp10_status}, state) do
+    :ets.delete(table)
+    state
+  end
+
   defp info({:amqp10_endpoint_overflow, connection}, state),
     do: close_connection(state, connection, :event_limit)
 
@@ -265,11 +322,21 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
 
   defp info({:amqp10_queue_changed, queue}, state) do
     cond do
-      queue not in Map.values(state.queues) -> state
+      queue not in Map.values(state.queues) ->
+        state
+
       # A fenced queue is acknowledged again when its probe restores it.
-      fenced?(state, queue) -> state
-      Queue.watch_ack(queue, self()) == :ok -> schedule(state)
-      true -> fence(state, queue)
+      fenced?(state, queue) ->
+        state
+
+      QueueRequests.pending?(state.requests, queue, :watch_ack) ->
+        state
+
+      true ->
+        case queue_request(state, queue, :watch_ack, {:watch_ack, self()}, nil, %{}) do
+          {:ok, state} -> state
+          {:error, :full, state} -> fence(state, queue)
+        end
     end
   end
 
@@ -484,21 +551,17 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     case Map.get(state.routes, key) do
       %{phase: :active, role: :receiver, queue_ref: nil} = route ->
         state = put_route(state, key, %{route | credit: false, receiving: true})
-        outcome = admit_message(route, raw, metadata, state.config)
 
-        case outcome do
-          # No disposition is invented for an unknown publication outcome.
-          # Enqueue holds no lease, so nothing diverges here; an unresponsive
-          # queue is fenced by its next lease or status command instead, and a
-          # queue whose storage failed stays observable as such.
-          :unknown ->
-            close_connection(state, connection, :queue_outcome_unknown)
-
-          {:reject_durable, outcome} ->
-            issue(state, key, {:settle, outcome.error}, {:settle, token, outcome})
+        case prepare_message(route, raw, metadata, state.config) do
+          {:enqueue, message} ->
+            case queue_request(state, route.queue, :enqueue, message, key, %{delivery: token}) do
+              {:ok, state} -> state
+              # Not executed: the sender may resend (owner Q5).
+              {:error, :full, state} -> settle_publication(state, key, token, %Outcome.Released{})
+            end
 
           outcome ->
-            issue(state, key, :settle, {:settle, token, outcome})
+            settle_publication(state, key, token, outcome)
         end
 
       _ ->
@@ -639,49 +702,61 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     end
   end
 
-  defp admit_message(route, raw, %{message_format: 0}, config) do
+  defp prepare_message(route, raw, %{message_format: 0}, config) do
     maximum = Keyword.get(config.queue_options, :max_message_bytes, 1_048_576)
 
     with {:ok, message, <<>>} <- Message.decode(raw, %Limits{max_value_bytes: maximum}),
-         {:ok, durable?} <- profile_message(message.sections, config.profile),
-         {:ok, acceptance} <-
-           Queue.enqueue(
-             route.queue,
-             raw,
-             %CoreMessage.Format{family: "amqp-1.0", identifier: 0},
-             %CoreMessage.Index{routing: %{"address" => route.address}},
-             durable?
-           ),
-         :ok <- accepted(acceptance, config.profile) do
-      %Outcome.Accepted{}
+         {:ok, durable?} <- profile_message(message.sections, config.profile) do
+      {:enqueue,
+       {:enqueue, raw, %CoreMessage.Format{family: "amqp-1.0", identifier: 0},
+        %CoreMessage.Index{routing: %{"address" => route.address}}, durable?}}
     else
-      {:error, reason} when reason in @uncertain ->
-        :unknown
-
-      {:error, :persistence_failed} ->
-        :unknown
-
-      {:error, :durability_unsupported} ->
-        {:reject_durable,
-         %Outcome.Rejected{
-           error: error("amqp:precondition-failed", "memory queue cannot accept durable messages")
-         }}
-
-      {:error, :expiry_unsupported} ->
-        %Outcome.Rejected{
-          error: error("amqp:precondition-failed", "message requires another profile")
-        }
-
-      {:error, reason} when reason in [:queue_full, :message_too_large, :byte_limit] ->
-        %Outcome.Rejected{error: error("amqp:resource-limit-exceeded", "queue capacity exceeded")}
-
-      _ ->
-        %Outcome.Rejected{error: error("amqp:decode-error", "message was not admitted")}
+      {:error, reason} -> refusal(reason)
+      _ -> refusal(:decode_error)
     end
   end
 
-  defp admit_message(_, _, _, _),
+  defp prepare_message(_, _, _, _),
     do: %Outcome.Rejected{error: error("amqp:not-implemented", "unsupported message format")}
+
+  # No disposition is invented for an unknown publication outcome. Enqueue
+  # holds no lease, so only the publishing Connection is closed.
+  defp settle_publication(state, key, _token, :unknown),
+    do: close_connection(state, elem(key, 0), :queue_outcome_unknown)
+
+  defp settle_publication(state, key, token, {:reject_durable, outcome}),
+    do: issue(state, key, {:settle, outcome.error}, {:settle, token, outcome})
+
+  defp settle_publication(state, key, token, outcome),
+    do: issue(state, key, :settle, {:settle, token, outcome})
+
+  defp publication(:not_executed, _profile), do: %Outcome.Released{}
+  defp publication(:uncertain, _profile), do: :unknown
+
+  defp publication({:known, {:ok, acceptance}}, profile),
+    do: if(accepted(acceptance, profile) == :ok, do: %Outcome.Accepted{}, else: :unknown)
+
+  defp publication({:known, {:error, reason}}, _profile), do: refusal(reason)
+
+  defp refusal(:persistence_failed), do: :unknown
+
+  defp refusal(:durability_unsupported),
+    do:
+      {:reject_durable,
+       %Outcome.Rejected{
+         error: error("amqp:precondition-failed", "memory queue cannot accept durable messages")
+       }}
+
+  defp refusal(:expiry_unsupported),
+    do: %Outcome.Rejected{
+      error: error("amqp:precondition-failed", "message requires another profile")
+    }
+
+  defp refusal(reason) when reason in [:queue_full, :message_too_large, :byte_limit],
+    do: %Outcome.Rejected{error: error("amqp:resource-limit-exceeded", "queue capacity exceeded")}
+
+  defp refusal(_reason),
+    do: %Outcome.Rejected{error: error("amqp:decode-error", "message was not admitted")}
 
   defp accepted(:accepted_in_memory, :memory), do: :ok
   defp accepted({:accepted_durable, %GravitonMQ.Core.CommitRef{}}, :local_durable), do: :ok
@@ -873,6 +948,45 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
         fence(state, entry.queue)
     end
   end
+
+  # Path 5. A gone Link or Connection means the publisher saw no disposition:
+  # the documented unknown-outcome case.
+  defp answered(state, %{kind: :enqueue} = entry, outcome) do
+    case take_route(state, entry) do
+      {nil, state} ->
+        state
+
+      {_route, state} ->
+        settle_publication(
+          state,
+          entry.key,
+          entry.data.delivery,
+          publication(outcome, state.config.profile)
+        )
+    end
+  end
+
+  # Path 3.
+  defp answered(state, %{kind: :watch_ack}, {:known, :ok}), do: schedule(state)
+  defp answered(state, %{kind: :watch_ack} = entry, _outcome), do: fence(state, entry.queue)
+
+  # Path 13: watch, then watch_ack, then a fresh anchor.
+  defp answered(state, %{kind: :restore_watch} = entry, {:known, :ok}) do
+    case queue_request(state, entry.queue, :restore_ack, {:watch_ack, self()}, nil, %{}) do
+      {:ok, state} -> state
+      {:error, :full, state} -> start_probe(state, entry.queue, @probe_delay)
+    end
+  end
+
+  defp answered(state, %{kind: :restore_ack} = entry, {:known, :ok}) do
+    if fenced?(state, entry.queue),
+      do: schedule(%{state | anchors: Map.put(state.anchors, entry.queue, anchor())}),
+      else: state
+  end
+
+  defp answered(state, %{kind: kind} = entry, _outcome)
+       when kind in [:restore_watch, :restore_ack],
+       do: start_probe(state, entry.queue, @probe_delay)
 
   defp pump(state) do
     {batch, remaining} = Enum.split(state.pump_remaining, state.config.max_pump_actions)
@@ -1284,6 +1398,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     end
   end
 
+  defp abandoned(state, %{kind: :enqueue} = entry, outcome), do: answered(state, entry, outcome)
   # Lease requests need nothing here: the killed anchor releases them.
   defp abandoned(state, _entry, _outcome), do: state
 
@@ -1297,11 +1412,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   end
 
   defp restore(state, queue, :available) do
-    if fenced?(state, queue) and Queue.watch(queue, self()) == :ok and
-         Queue.watch_ack(queue, self()) == :ok do
-      schedule(%{state | anchors: Map.put(state.anchors, queue, anchor())})
+    if fenced?(state, queue) do
+      case queue_request(state, queue, :restore_watch, {:watch, self()}, nil, %{}) do
+        {:ok, state} -> state
+        {:error, :full, state} -> start_probe(state, queue, @probe_delay)
+      end
     else
-      start_probe(state, queue, @probe_delay)
+      state
     end
   end
 

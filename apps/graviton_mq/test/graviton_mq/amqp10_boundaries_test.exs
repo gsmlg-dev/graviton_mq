@@ -130,13 +130,18 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
       assert_receive {:graviton_mq, ^receiver, {:session, 0, {:detached, ^receive_link, _}}},
                      6_000
 
-      # The Manager stays blocked for the queue's 5 s call timeout before it
-      # fences the queue (documented limit); a status call made during that
-      # window can itself time out, so wait longer than that call timeout.
+      # The Manager is not blocked: status answers within 1 s and reports the
+      # stalled, not yet fenced queue as :unresponsive.
+      started = System.monotonic_time(:millisecond)
+      assert {:ok, %{queues: %{"orders" => :unresponsive}}} = GravitonMQ.amqp10_status(instance)
+      assert System.monotonic_time(:millisecond) - started < 1_000
+
+      # The cleanup disconnect was never taken: the queue is fenced at the
+      # 5 s request deadline.
       eventually!(
         fn ->
           match?(
-            {:ok, %{queues: %{"orders" => :unavailable}}},
+            {:ok, %{queues: %{"orders" => :unavailable}, queue_fences: 1}},
             GravitonMQ.amqp10_status(instance)
           )
         end,
