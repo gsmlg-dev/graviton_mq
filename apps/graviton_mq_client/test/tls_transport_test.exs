@@ -9,6 +9,10 @@ defmodule GravitonMQ.Client.TLSTransportTest do
 
   alias GravitonMQ.Client.Test.Mosquitto
   alias GravitonMQ.Client.Transport
+  alias GravitonMQ.AMQP10Client, as: Client
+  alias GravitonMQ.AMQP10.Value
+  alias GravitonMQ.AMQP10.Codec.{Frame, Performative}
+  alias GravitonMQ.AMQP10.Performative.Open
 
   setup do
     openssl = System.find_executable("openssl")
@@ -168,5 +172,68 @@ defmodule GravitonMQ.Client.TLSTransportTest do
 
     assert {:error, {:tls_alert, {:protocol_version, _}}} = Transport.connect(config)
     assert {:error, {:tls_alert, {:protocol_version, _}}} = Task.await(server, 7_000)
+  end
+
+  test "every reconnect performs a verified handshake; an untrusted certificate is terminal",
+       context do
+    header = <<"AMQP", 0, 1, 0, 0>>
+
+    client =
+      start_supervised!(
+        {Client,
+         container_id: "tls-reconnect",
+         host: "localhost",
+         port: context.port,
+         transport: :tls,
+         tls_options: [cacertfile: context.certs.ca_certificate],
+         reconnect: [max_attempts: 5, delay: 20, max_delay: 20]}
+      )
+
+    for _attempt <- 1..2 do
+      {:ok, transport} = :ssl.transport_accept(context.listener, 5_000)
+      {:ok, socket} = :ssl.handshake(transport, 5_000)
+      assert {:ok, ^header} = :ssl.recv(socket, 8, 2_000)
+      assert %Open{} = ssl_pdu!(socket)
+
+      {:ok, open} =
+        Performative.encode(%Open{
+          container_id: Value.string("peer"),
+          max_frame_size: Value.uint(512)
+        })
+
+      :ok = :ssl.send(socket, header <> <<8 + byte_size(open)::32, 2, 0, 0::16, open::binary>>)
+      assert_receive {:graviton_mq, ^client, {:connected, "peer"}}, 2_000
+      :ok = :ssl.close(socket)
+      assert_receive {:graviton_mq, ^client, {:disconnected, _}}, 2_000
+      assert_receive {:graviton_mq, ^client, {:reconnecting, _}}, 2_000
+    end
+
+    # The server certificate changes to one the client does not trust.
+    {:ok, transport} = :ssl.transport_accept(context.listener, 5_000)
+    untrusted_key = Path.join(Path.dirname(context.certs.untrusted), "untrusted.key")
+
+    _ =
+      :ssl.handshake(
+        transport,
+        [
+          certfile: String.to_charlist(context.certs.untrusted),
+          keyfile: String.to_charlist(untrusted_key)
+        ],
+        5_000
+      )
+
+    assert_receive {:graviton_mq, ^client, {:disconnected, {:connect, {:tls_alert, _alert}}}},
+                   5_000
+
+    refute_receive {:graviton_mq, ^client, {:reconnecting, _}}, 200
+    assert %{owner: :stopped} = Client.status(client)
+  end
+
+  defp ssl_pdu!(socket) do
+    {:ok, <<size::32>>} = :ssl.recv(socket, 4, 2_000)
+    {:ok, rest} = :ssl.recv(socket, size - 4, 2_000)
+    {:ok, frame, <<>>} = Frame.decode(<<size::32, rest::binary>>)
+    {:ok, pdu, <<>>} = Performative.decode(frame.body)
+    pdu
   end
 end

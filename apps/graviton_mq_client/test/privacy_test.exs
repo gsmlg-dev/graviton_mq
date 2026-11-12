@@ -74,6 +74,60 @@ defmodule GravitonMQ.Client.PrivacyTest do
     end)
   end
 
+  test "reconnect status, events and crash reports never contain the password or host" do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+    {:ok, port} = :inet.port(listener)
+    :ok = :gen_tcp.close(listener)
+    password = "reconnect-password-#{System.unique_integer([:positive])}"
+    host = "127.0.0.1"
+
+    client =
+      start_supervised!(
+        Supervisor.child_spec(
+          {GravitonMQ.AMQP10Client,
+           container_id: "privacy-reconnect",
+           host: host,
+           port: port,
+           sasl: {:plain, "user", fn -> password end},
+           allow_insecure_plain: true,
+           reconnect: [max_attempts: 2, delay: 20, max_delay: 20]},
+          id: make_ref(),
+          restart: :temporary
+        )
+      )
+
+    assert_receive {:graviton_mq, ^client, {:reconnect_exhausted, 2}}, 2_000
+    events = collect_events(client, [])
+    assert Enum.any?(events, &match?({:reconnecting, 2}, &1))
+
+    for item <- [GravitonMQ.AMQP10Client.status(client), events, :sys.get_status(client)] do
+      printed = inspect(item, limit: :infinity, printable_limit: :infinity)
+      refute printed =~ password
+      refute printed =~ host
+    end
+
+    monitor = Process.monitor(client)
+    assert %{owner: :stopped} = GravitonMQ.AMQP10Client.status(client)
+
+    log =
+      capture_log(fn ->
+        :sys.terminate(client, {:crash_test, :reason})
+        assert_receive {:DOWN, ^monitor, :process, ^client, reason}, 1_000
+        refute inspect(reason) =~ password
+      end)
+
+    assert log =~ "State: :redacted"
+    refute log =~ password
+  end
+
+  defp collect_events(client, events) do
+    receive do
+      {:graviton_mq, ^client, event} -> collect_events(client, [event | events])
+    after
+      50 -> Enum.reverse(events)
+    end
+  end
+
   defp collect_logs(events) do
     receive do
       {:privacy_log, event} -> collect_logs([event | events])

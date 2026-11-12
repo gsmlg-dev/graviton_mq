@@ -7,8 +7,13 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
   alias GravitonMQ.AMQP10.Codec.{Frame, Performative}
   alias GravitonMQ.AMQP10.Performative.{Attach, Begin, Close, Detach, Open}
   alias GravitonMQ.AMQP10.Terminus.{Source, Target}
+  alias GravitonMQ.AMQP10.Codec.Limits
+  alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
+  alias GravitonMQ.AMQP10.Frame, as: Envelope
+  alias GravitonMQ.AMQP10.SASL.{Init, Mechanisms, Outcome, Plain}
 
   @header <<"AMQP", 0, 1, 0, 0>>
+  @sasl <<"AMQP", 3, 1, 0, 0>>
 
   describe "configuration" do
     test "reconnect mirrors the MQTT policy bounds and defaults to one connection" do
@@ -516,5 +521,79 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
       Process.sleep(5)
       until!(predicate, deadline)
     end
+  end
+
+  test "the password provider runs once per attempt and no password outlives sasl-init" do
+    test = self()
+    suffix = Integer.to_string(System.unique_integer([:positive]))
+    calls = :counters.new(1, [])
+
+    provider = fn ->
+      :counters.add(calls, 1, 1)
+      send(test, :provided)
+      "rotating-password-" <> suffix
+    end
+
+    {listener, client} =
+      client!(
+        sasl: {:plain, "user", provider},
+        allow_insecure_plain: true,
+        reconnect: [max_attempts: 1, delay: 20, max_delay: 20]
+      )
+
+    for attempt <- 1..2 do
+      {:ok, socket} = :gen_tcp.accept(listener, 2_000)
+      on_exit(fn -> :gen_tcp.close(socket) end)
+      assert {:ok, @sasl} = :gen_tcp.recv(socket, 8, 1_000)
+      assert_receive :provided, 1_000
+
+      :ok =
+        :gen_tcp.send(
+          socket,
+          @sasl <> sasl_frame(%Mechanisms{server_mechanisms: Value.symbol("PLAIN")})
+        )
+
+      assert %Init{initial_response: %Value{value: response}} = read_sasl!(socket)
+      assert {:ok, %Plain{password: "rotating-password-" <> ^suffix}} = Plain.parse(response)
+
+      :ok =
+        :gen_tcp.send(
+          socket,
+          sasl_frame(%Outcome{code: Value.ubyte(0)}) <> @header <> frame(open())
+        )
+
+      assert {:ok, @header} = :gen_tcp.recv(socket, 8, 1_000)
+      assert %Open{} = recv_pdu!(socket)
+      assert_receive {:graviton_mq, ^client, {:connected, "peer"}}, 1_000
+      assert :counters.get(calls, 1) == attempt
+      refute_retained!(client, "rotating-password-" <> suffix)
+      if attempt == 1, do: :gen_tcp.close(socket)
+    end
+
+    refute_received :provided
+  end
+
+  defp sasl_frame(body) do
+    {:ok, bytes} = SASLCodec.encode_frame(body)
+    bytes
+  end
+
+  defp read_sasl!(socket) do
+    {:ok, <<size::32, _::binary>> = header} = :gen_tcp.recv(socket, 8, 1_000)
+    {:ok, body} = :gen_tcp.recv(socket, size - 8, 1_000)
+
+    {:ok, %Envelope{type: :sasl} = frame, <<>>} =
+      Frame.decode(header <> body, Limits.default(), types: [:sasl])
+
+    {:ok, decoded} = SASLCodec.decode(frame.body)
+    decoded
+  end
+
+  defp refute_retained!(client, secret) do
+    state = :sys.get_state(client)
+    refute inspect(state, limit: :infinity, printable_limit: :infinity) =~ secret
+    refute :binary.match(:erlang.term_to_binary(state), secret) != :nomatch
+    refute inspect(Client.status(client)) =~ secret
+    refute inspect(:sys.get_status(client), limit: :infinity) =~ secret
   end
 end
