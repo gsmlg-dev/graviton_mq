@@ -79,6 +79,28 @@ defmodule GravitonMQ.Runtime.MQTT.Broker do
       host_subscriptions: map_size(state.machine.hosts),
       pending_deliveries: length(deliveries),
       prepared: map_size(state.machine.operations),
+      shared_groups:
+        state.machine.sessions
+        |> Enum.flat_map(fn {_, session} ->
+          for {filter, %{shared: {_, _}}} <- session.subscriptions, do: filter
+        end)
+        |> Enum.uniq()
+        |> length(),
+      # Transient counters since the owner started (not checkpointed).
+      shared_discarded: state.machine.shared_discarded,
+      shared_qos2_discarded: state.machine.shared_qos2_discarded,
+      topic_aliases: %{
+        inbound:
+          Enum.sum(
+            for {_, %{aliases: aliases}} <- state.machine.connections,
+                do: map_size(aliases.inbound)
+          ),
+        outbound:
+          Enum.sum(
+            for {_, %{aliases: aliases}} <- state.machine.connections,
+                do: map_size(aliases.outbound)
+          )
+      },
       limits: state.machine.limits
     }
 
