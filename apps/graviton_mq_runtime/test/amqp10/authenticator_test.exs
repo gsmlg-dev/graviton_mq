@@ -221,6 +221,56 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
     Supervisor.stop(runtime)
   end
 
+  test "an Authenticator crash restarts later owners but never the Broker" do
+    {:ok, runtime} =
+      GravitonMQ.Runtime.Supervisor.start_link(
+        name: nil,
+        amqp10: [
+          container_id: "b",
+          queues: ["q"],
+          auth: {Policy, []},
+          allow_insecure_plain: true,
+          listeners: [[transport: :tcp, port: 0]]
+        ]
+      )
+
+    on_exit(fn -> if Process.alive?(runtime), do: Supervisor.stop(runtime) end)
+    [amqp] = for {GravitonMQ.Runtime.AMQP10.Supervisor, pid, _} <- tree(runtime), do: pid
+
+    children = fn ->
+      Map.new(Supervisor.which_children(amqp), fn {id, pid, _, _} -> {id, pid} end)
+    end
+
+    before = children.()
+    monitor = Process.monitor(before[Authenticator])
+    Process.exit(before[Authenticator], :kill)
+    assert_receive {:DOWN, ^monitor, :process, _, :killed}, 1_000
+    after_crash = replaced(children, before[Authenticator], 100)
+
+    assert after_crash[GravitonMQ.Runtime.AMQP10.Broker] ==
+             before[GravitonMQ.Runtime.AMQP10.Broker]
+
+    assert after_crash[:sasl_tasks] == before[:sasl_tasks]
+    assert is_pid(after_crash[Authenticator])
+    assert after_crash[Authenticator] != before[Authenticator]
+    assert after_crash[:connections] != before[:connections]
+    Supervisor.stop(runtime)
+  end
+
+  defp replaced(children, old, 0),
+    do: flunk("#{inspect(old)} was never replaced: #{inspect(children.())}")
+
+  defp replaced(children, old, attempts) do
+    current = children.()
+
+    if is_pid(current[Authenticator]) and current[Authenticator] != old do
+      current
+    else
+      Process.sleep(10)
+      replaced(children, old, attempts - 1)
+    end
+  end
+
   defp tree(supervisor) do
     supervisor
     |> Supervisor.which_children()

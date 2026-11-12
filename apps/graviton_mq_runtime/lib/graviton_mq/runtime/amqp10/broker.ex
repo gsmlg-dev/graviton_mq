@@ -53,6 +53,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
          probes: %{},
          auth_supervisor: nil,
          connections: %{},
+         authenticating: MapSet.new(),
+         sasl_failures: %{auth: 0, sys: 0, sys_perm: 0, sys_temp: 0},
          routes: %{},
          link_names: MapSet.new(),
          operations: %{},
@@ -106,6 +108,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
           connections: map_size(state.connections),
           links: map_size(state.routes),
           auth_jobs: map_size(state.jobs),
+          authenticating: MapSet.size(state.authenticating),
+          sasl_failures: state.sasl_failures,
           operations: map_size(state.operations),
           queues:
             Map.new(state.queues, fn {address, queue} ->
@@ -140,12 +144,43 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
           monitor: Process.monitor(connection),
           handle: handle,
           closing: nil,
-          peer_container_id: nil
+          peer_container_id: nil,
+          principal: :anonymous
         }
 
         %{state | connections: Map.put(state.connections, connection, record)}
     end
   end
+
+  # Connection-local SASL facts: a principal (sent before its Endpoint starts,
+  # hence before any Link event) and bounded counters. No credential or
+  # username ever reaches this process.
+  defp info({:amqp10_principal, connection, principal}, state) do
+    case Map.fetch(state.connections, connection) do
+      {:ok, record} ->
+        %{
+          state
+          | connections: Map.put(state.connections, connection, %{record | principal: principal})
+        }
+
+      :error ->
+        state
+    end
+  end
+
+  defp info({:amqp10_sasl_authenticating, connection, active?}, state)
+       when is_map_key(state.connections, connection) do
+    authenticating =
+      if active?,
+        do: MapSet.put(state.authenticating, connection),
+        else: MapSet.delete(state.authenticating, connection)
+
+    %{state | authenticating: authenticating}
+  end
+
+  defp info({:amqp10_sasl_failure, _connection, code}, state)
+       when code in [:auth, :sys, :sys_perm, :sys_temp],
+       do: %{state | sasl_failures: Map.update!(state.sasl_failures, code, &(&1 + 1))}
 
   defp info({:amqp10_endpoint_event, connection, table, token}, state) do
     case Connection.take_event(table, token) do
@@ -444,13 +479,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
       action = if route.role == :receiver, do: :send, else: :receive
       callback = state.config.authorize
       address = route.address
+      principal = Map.fetch!(state.connections, elem(key, 0)).principal
 
       task =
         authorization_task(state.auth_supervisor, fn ->
           Process.flag(:sensitive, true)
 
           try do
-            if callback.(:anonymous, action, address) == :allow, do: :allow, else: :deny
+            if callback.(principal, action, address) == :allow, do: :allow, else: :deny
           rescue
             _ -> :deny
           catch
@@ -887,7 +923,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
       {record, connections} ->
         if record.closing, do: Process.cancel_timer(elem(record.closing, 0))
         Process.demonitor(record.monitor, [:flush])
-        state = %{state | connections: connections}
+
+        state = %{
+          state
+          | connections: connections,
+            authenticating: MapSet.delete(state.authenticating, connection)
+        }
+
         predicate = fn {conn, _, _} -> conn == connection end
         state |> remove_routes(predicate) |> release_names(predicate) |> schedule()
     end

@@ -44,8 +44,10 @@ defmodule GravitonMQ.Runtime.AMQP10.Supervisor do
           Supervisor.child_spec({Task.Supervisor, max_children: config.sasl.max_jobs},
             id: :sasl_tasks
           ),
-          {Authenticator, {policy, parent}},
           {Broker, {config, parent}},
+          # After the Broker: an Authenticator restart (rest_for_one) restarts
+          # only Connections and Listeners, never the Broker.
+          {Authenticator, {policy, parent}},
           Supervisor.child_spec(
             {DynamicSupervisor, strategy: :one_for_one, max_children: config.max_connections},
             id: :connections

@@ -2,7 +2,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
   @moduledoc false
   use GenServer
 
-  alias GravitonMQ.Runtime.AMQP10.{Broker, Connection}
+  alias GravitonMQ.Runtime.AMQP10.{Authenticator, Broker, Connection}
   alias GravitonMQ.Runtime.HellHandoff
 
   def start_link(configuration), do: GenServer.start_link(__MODULE__, configuration)
@@ -134,8 +134,16 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
   defp wire(children, state) do
     with {_, broker, _, _} when is_pid(broker) <- List.keyfind(children, Broker, 0),
          {_, connections, _, _} when is_pid(connections) <-
-           List.keyfind(children, :connections, 0) do
-      state = %{state | broker: broker, connections: connections}
+           List.keyfind(children, :connections, 0),
+         {_, authenticator, _, _} when is_pid(authenticator) <-
+           List.keyfind(children, Authenticator, 0) do
+      # The Authenticator pid is published; its policy never is.
+      state = %{
+        state
+        | broker: broker,
+          connections: connections,
+          config: put_in(state.config, [:sasl, :authenticator], authenticator)
+      }
 
       case state.transport do
         :tcp ->
