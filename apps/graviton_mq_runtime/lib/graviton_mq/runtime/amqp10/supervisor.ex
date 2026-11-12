@@ -2,7 +2,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Supervisor do
   @moduledoc false
   use Supervisor
 
-  alias GravitonMQ.Runtime.AMQP10.{Broker, Listener, Queue, Store}
+  alias GravitonMQ.Runtime.AMQP10.{Authenticator, Broker, Listener, Queue, Store}
   alias GravitonMQ.Runtime.ListenerSupervisor
 
   def start_link(configuration), do: Supervisor.start_link(__MODULE__, configuration)
@@ -12,7 +12,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Supervisor do
 
   @impl true
   def init(configuration) do
-    config = configuration.()
+    # Only the Authenticator receives the host authentication policy; every
+    # other owner gets the configuration without it.
+    {policy, config} = Map.pop(configuration.(), :auth)
     parent = self()
 
     queues =
@@ -37,6 +39,12 @@ defmodule GravitonMQ.Runtime.AMQP10.Supervisor do
           Supervisor.child_spec({Task.Supervisor, max_children: config.max_auth_jobs},
             id: :auth_tasks
           ),
+          # Connection authentication and Link authorization use separate
+          # bounded pools so neither can starve the other.
+          Supervisor.child_spec({Task.Supervisor, max_children: config.sasl.max_jobs},
+            id: :sasl_tasks
+          ),
+          {Authenticator, {policy, parent}},
           {Broker, {config, parent}},
           Supervisor.child_spec(
             {DynamicSupervisor, strategy: :one_for_one, max_children: config.max_connections},
