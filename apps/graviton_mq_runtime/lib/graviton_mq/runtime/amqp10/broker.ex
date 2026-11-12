@@ -137,7 +137,12 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
             end)
         }
 
-        :ets.insert(table, {token, result})
+        # A caller that timed out has deleted its table; nobody awaits the result.
+        try do
+          :ets.insert(table, {token, result})
+        rescue
+          ArgumentError -> :ok
+        end
       end
 
       {:reply, :ok, shell}
@@ -574,20 +579,10 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   defp decide(state, key, :allow) do
     route = Map.fetch!(state.routes, key)
 
-    case lease(state, route) do
-      {:ok, route} ->
-        state = put_route(state, key, %{route | phase: :accepting})
-        issue(state, key, :accept, {:accept_link, elem(key, 2), route.token})
-
-      {:error, :queue_unavailable} ->
-        reject(state, key, unavailable())
-
-      {:error, :uncertain} ->
-        # A registration may exist in the queue. Fencing kills its lease anchor.
-        state |> reject(key, unavailable()) |> fence(route.queue)
-
-      {:error, _} ->
-        decide(state, key, :deny)
+    cond do
+      fenced?(state, route.queue) -> reject(state, key, unavailable())
+      route.role == :receiver -> accept(state, key, route)
+      true -> register(state, key, route)
     end
   end
 
@@ -608,31 +603,39 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     remove_route(state, key)
   end
 
-  defp lease(state, route) do
-    cond do
-      fenced?(state, route.queue) -> {:error, :queue_unavailable}
-      route.role == :receiver -> {:ok, route}
-      true -> register(state, route)
+  defp accept(state, key, route) do
+    state = put_route(state, key, %{route | phase: :accepting})
+    issue(state, key, :accept, {:accept_link, elem(key, 2), route.token})
+  end
+
+  # This coordinator consumes ordered Connection outcome events before DOWN.
+  # Monitoring the socket owner in Queue would race that final settlement
+  # against a DOWN delivered independently to Queue. Queue instead monitors a
+  # per-queue anchor that lives exactly as long as this coordinator unless the
+  # coordinator fences that queue; either death releases all its leases there.
+  defp register(state, key, route) do
+    consumer = :crypto.strong_rand_bytes(24)
+    message = {:register, consumer, Map.fetch!(state.anchors, route.queue)}
+    state = put_route(state, key, %{route | phase: :registering})
+
+    case queue_request(state, route.queue, :register, message, key, %{consumer: consumer}) do
+      {:ok, state} ->
+        state
+
+      {:error, :full, state} ->
+        reject(state, key, error("amqp:resource-limit-exceeded", "queue request limit reached"))
     end
   end
 
-  defp register(state, route) do
-    consumer = :crypto.strong_rand_bytes(24)
-
-    # This coordinator consumes ordered Connection outcome events before DOWN.
-    # Monitoring the socket owner in Queue would race that final settlement
-    # against a DOWN delivered independently to Queue. Queue instead monitors a
-    # per-queue anchor that lives exactly as long as this coordinator unless the
-    # coordinator fences that queue; either death releases all its leases there.
-    case Queue.register(route.queue, consumer, Map.fetch!(state.anchors, route.queue)) do
-      {:ok, generation} ->
-        {:ok, %{route | consumer: consumer, generation: generation}}
-
-      {:error, reason} when reason in @uncertain ->
-        {:error, :uncertain}
-
-      {:error, _} = error ->
-        error
+  # Path 12. A fenced queue has already lost every lease with its killed anchor.
+  defp cleanup(state, queue, consumer, generation) do
+    if fenced?(state, queue) do
+      state
+    else
+      case queue_request(state, queue, :disconnect, {:disconnect, consumer, generation}, nil, %{}) do
+        {:ok, state} -> state
+        {:error, :full, state} -> fence(state, queue)
+      end
     end
   end
 
@@ -756,6 +759,37 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
 
   defp complete(state, operation, _result),
     do: detach(state, operation.key, "link operation failed")
+
+  # Path 4.
+  defp answered(state, %{kind: :register} = entry, outcome) do
+    {route, state} = take_route(state, entry)
+
+    case {outcome, route} do
+      {{:known, {:ok, generation}}, %{phase: :registering} = route} ->
+        accept(state, entry.key, %{route | consumer: entry.data.consumer, generation: generation})
+
+      {{:known, {:ok, generation}}, _removed_or_replaced} ->
+        # Invariant: a lease registered for a route that no longer exists is
+        # released at once, so no lease is orphaned.
+        cleanup(state, entry.queue, entry.data.consumer, generation)
+
+      {{:known, {:error, _}}, nil} ->
+        state
+
+      {{:known, {:error, _}}, _route} ->
+        decide(state, entry.key, :deny)
+
+      {_not_executed_or_uncertain, _route} ->
+        # A registration may exist in the queue: fencing kills its anchor and
+        # rejects this registering Link.
+        fence(state, entry.queue)
+    end
+  end
+
+  defp answered(state, %{kind: :disconnect}, {:known, :ok}), do: state
+  defp answered(state, %{kind: :disconnect}, {:known, {:error, :stale_consumer}}), do: state
+  # The queue may still hold this lease and its claims.
+  defp answered(state, %{kind: :disconnect} = entry, _outcome), do: fence(state, entry.queue)
 
   # Path 6. A lost peer outcome fences: claims return and the message is
   # redelivered (at-least-once).
@@ -1183,12 +1217,6 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
         state
 
       {route, routes} ->
-        # A fenced queue has already lost this lease with its killed anchor.
-        cleanup =
-          if route.consumer && not fenced?(state, route.queue),
-            do: Queue.disconnect(route.queue, route.consumer, route.generation),
-            else: :ok
-
         jobs =
           Enum.reduce(state.jobs, %{}, fn {ref, job}, jobs ->
             if job.key == key do
@@ -1204,12 +1232,11 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
         operations = Map.reject(state.operations, fn {_, op} -> op.key == key end)
         state = %{state | routes: routes, operations: operations, jobs: jobs}
 
-        case cleanup do
-          :ok -> state
-          {:error, :stale_consumer} -> state
-          # The queue may still hold this lease and its claims.
-          {:error, _} -> fence(state, route.queue)
-        end
+        # A route still registering has no consumer yet; its late reply is
+        # released by the register clause of answered/3.
+        if route.consumer,
+          do: cleanup(state, route.queue, route.consumer, route.generation),
+          else: state
     end
   end
 

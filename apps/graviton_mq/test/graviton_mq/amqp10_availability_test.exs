@@ -127,6 +127,43 @@ defmodule GravitonMQ.AMQP10.AvailabilityTest do
     eventually!(fn -> Queue.status(orders).messages == 0 end)
   end
 
+  test "a pending register and cleanup disconnect on a stalled queue do not stall other queues" do
+    broker = broker!()
+    supervisor = amqp_supervisor(broker)
+    orders = child(supervisor, {Queue, "orders"})
+    holder = client!(broker)
+    held = attach!(holder, "orders-held", :receiver, "orders")
+    assert %{consumers: 1} = Queue.status(orders)
+    bystander = client!(broker)
+    publisher = attach!(bystander, "other-publisher", :sender, "other")
+    late = client!(broker)
+    :sys.suspend(orders)
+
+    try do
+      # Register (path 4) and cleanup disconnect (path 12) wait for the queue.
+      assert {:ok, attaching} =
+               Client.attach(late, 0, "orders-late", :receiver, address: Value.string("orders"))
+
+      assert {:ok, _} = Client.detach(holder, 0, held)
+
+      within!(500, fn ->
+        assert {:ok, %Outcome.Accepted{}} =
+                 operation(
+                   Client.send_message(bystander, 0, publisher, message("unaffected")),
+                   bystander
+                 )
+      end)
+
+      refute_received {:graviton_mq, ^late, {:operation, ^attaching, _}}
+      # The register was never taken: at its deadline the Link is refused.
+      assert {:error, _} = operation({:ok, attaching}, late)
+    after
+      :sys.resume(orders)
+    end
+
+    eventually!(fn -> match?(%{consumers: 0, inflight: 0}, Queue.status(orders)) end)
+  end
+
   defp broker! do
     config = [
       container_id: "broker-#{System.unique_integer([:positive])}",
