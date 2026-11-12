@@ -208,7 +208,7 @@ defmodule GravitonMQ.MQTT.BrokerCheckpointTest do
     assert {:error, :wall_clock_regressed} = Checkpoint.restore(new(), snapshot, 1_000, 99_999)
 
     assert {:error, :invalid_broker_checkpoint} =
-             Checkpoint.restore(new(), %{snapshot | version: 2}, 1_000, 100_000)
+             Checkpoint.restore(new(), %{snapshot | version: 3}, 1_000, 100_000)
 
     assert {:error, :invalid_broker_checkpoint} =
              Checkpoint.restore(new(), Map.put(snapshot, :connections, %{}), 1_000, 100_000)
@@ -230,5 +230,53 @@ defmodule GravitonMQ.MQTT.BrokerCheckpointTest do
     assert Map.has_key?(machine.sessions["reader"].subscriptions, "a")
     assert {:ok, snapshot} = Checkpoint.capture(machine, 0, 100_000)
     assert {:ok, _} = Checkpoint.restore(machine, snapshot, 1_000, 100_100)
+  end
+
+  # Written by Checkpoint v1 at commit 4d694e9 (pre-S4 code; Task 0 of the S4
+  # plan, committed in b5ff822). Safe ETF decoding only accepts existing atoms,
+  # so the modules that define the schema atoms are loaded first. Decoded terms
+  # are compared, never raw bytes (ETF encoding varies between OTP releases).
+  @v1_fixture Path.expand("fixtures/broker_checkpoint_v1.etf", __DIR__)
+
+  test "a v1 snapshot written before S4 recovers under v2 and is rewritten as v2" do
+    Code.ensure_loaded!(Checkpoint)
+    Code.ensure_loaded!(Broker)
+
+    {:ok, snapshot} =
+      CheckpointCodec.decode(File.read!(@v1_fixture), max_bytes: 1_048_576, max_items: 500_000)
+
+    assert snapshot.version == 1
+
+    assert %{id: _, options: %{qos: 1}} =
+             sub = snapshot.state.sessions["reader"].subscriptions["fixture/#"]
+
+    assert map_size(sub) == 2
+    assert {:ok, recovered} = Checkpoint.restore(new(), snapshot, 1_000, 100_100)
+
+    assert %{subscription_identifier: nil, shared: nil, options: %{qos: 1}} =
+             recovered.sessions["reader"].subscriptions["fixture/#"]
+
+    assert [%{subscription_identifiers: [], shared: nil, message: %{topic: "fixture/a"}}] =
+             recovered.sessions["reader"].deliveries
+
+    assert recovered.retained["fixture/a"].payload == "v1-content"
+    assert {:ok, again} = Checkpoint.capture(recovered, 1_000, 100_100)
+    assert again.version == 2
+    assert {:ok, _} = Checkpoint.restore(new(), again, 2_000, 100_200)
+  end
+
+  test "only exact v1 shapes are upgraded; mislabelled or unknown versions fail closed" do
+    {machine, _} = connect(new(), :reader)
+
+    {machine, _} =
+      packet(machine, :reader, %Subscribe{packet_id: 1, subscriptions: [{"a", 1}]}, 0)
+
+    assert {:ok, v2} = Checkpoint.capture(machine, 0, 100_000)
+    assert v2.version == 2
+
+    for forged <- [%{v2 | version: 1}, %{v2 | version: 3}] do
+      assert {:error, :invalid_broker_checkpoint} =
+               Checkpoint.restore(new(), forged, 1_000, 100_000)
+    end
   end
 end

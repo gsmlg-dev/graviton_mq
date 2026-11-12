@@ -102,6 +102,47 @@ defmodule GravitonMQ.Runtime.MQTT.PersistenceTest do
     assert :ok = Persistence.close(reopened)
   end
 
+  @v1_fixture Path.expand(
+                "../../../graviton_mq_mqtt/test/fixtures/broker_checkpoint_v1.etf",
+                __DIR__
+              )
+
+  # The WAL record type stays "mqtt-broker-snapshot/v1" (owner decision Q9);
+  # only the snapshot term carries the schema version.
+  test "a v1 snapshot record from before S4 recovers and is rewritten as v2", %{tmp_dir: dir} do
+    config = %{config(dir, 1_048_576) | max_snapshot_bytes: 65_536}
+
+    {:ok, wal} =
+      WAL.start_link(
+        path: dir,
+        stream_id: config.stream_id,
+        mode: :opaque,
+        max_record_bytes: config.max_snapshot_bytes + 64,
+        max_log_bytes: config.max_log_bytes,
+        fault_injector: nil
+      )
+
+    {:ok, reference} =
+      WAL.append_records(wal, [{"mqtt-broker-snapshot/v1", File.read!(@v1_fixture)}])
+
+    {:ok, _durable} = WAL.sync(wal, reference)
+    :ok = WAL.close(wal)
+
+    {:ok, machine} = Machine.new()
+    assert {:ok, persistence, recovered} = Persistence.open(config, machine, now(), wall())
+
+    assert %{subscription_identifier: nil, shared: nil} =
+             recovered.sessions["reader"].subscriptions["fixture/#"]
+
+    assert {:ok, %{version: 2}} =
+             GravitonMQ.Core.CheckpointCodec.decode(persistence.saved_bytes,
+               max_bytes: 65_536,
+               max_items: 500_000
+             )
+
+    assert :ok = Persistence.close(persistence)
+  end
+
   defp config(dir, max_log_bytes) do
     %{
       directory: dir,

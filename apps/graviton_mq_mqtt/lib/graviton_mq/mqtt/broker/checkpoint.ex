@@ -19,7 +19,10 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
   alias GravitonMQ.MQTT.Packet.Publish
 
   @session ~w(principal token expiry expires_at will_id subscriptions incoming_qos2 deliveries next_packet_id online)a
-  @delivery ~w(id message qos phase release_order retain packet_id sending ever_sent delivered dispatch retry_at)a
+  @subscription ~w(id options subscription_identifier shared)a
+  @delivery ~w(id message qos phase release_order retain packet_id sending ever_sent delivered dispatch retry_at subscription_identifiers shared)a
+  @v1_subscription ~w(id options)a
+  @v1_delivery ~w(id message qos phase release_order retain packet_id sending ever_sent delivered dispatch retry_at)a
   @message ~w(topic payload qos retain properties encoded origin expires_at)a
   @will ~w(id principal client_id token packet encoded delay due status registered_at message bytes)a
   @uint64 18_446_744_073_709_551_615
@@ -48,7 +51,7 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
       end)
 
     snapshot = %{
-      version: 1,
+      version: 2,
       at_monotonic: monotonic,
       at_wall: wall,
       state: %{
@@ -69,7 +72,8 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
 
   def restore(%Broker{} = template, snapshot, monotonic, wall)
       when is_integer(monotonic) and is_integer(wall) do
-    with :ok <- validate(snapshot, template),
+    with snapshot = upgrade(snapshot),
+         :ok <- validate(snapshot, template),
          true <- wall >= snapshot.at_wall do
       shift = monotonic - snapshot.at_monotonic - (wall - snapshot.at_wall)
 
@@ -152,7 +156,7 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
   defp validate(snapshot, template) do
     with true <- keys?(snapshot, [:version, :at_monotonic, :at_wall, :state]),
          true <-
-           snapshot.version == 1 and is_integer(snapshot.at_monotonic) and
+           snapshot.version == 2 and is_integer(snapshot.at_monotonic) and
              is_integer(snapshot.at_wall),
          data = snapshot.state,
          true <- keys?(data, [:sessions, :retained, :wills, :next_id]),
@@ -196,11 +200,13 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
   end
 
   defp subscription?(filter, sub, next) do
-    Topic.valid_filter?(filter) and keys?(sub, [:id, :options]) and positive?(sub.id) and
-      sub.id < next and
+    Topic.valid_subscription_filter?(filter) and keys?(sub, @subscription) and positive?(sub.id) and
+      sub.id < next and subscription_identifier?(sub.subscription_identifier) and
+      sub.shared == shared_of(filter) and
       keys?(sub.options, [:qos, :no_local, :retain_as_published, :retain_handling]) and
       sub.options.qos in 0..2 and is_boolean(sub.options.no_local) and
-      is_boolean(sub.options.retain_as_published) and sub.options.retain_handling in 0..2
+      is_boolean(sub.options.retain_as_published) and sub.options.retain_handling in 0..2 and
+      (sub.shared == nil or sub.options.no_local == false)
   end
 
   defp delivery?(entry, next, template) do
@@ -213,7 +219,9 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
       (entry.packet_id == nil or packet_id?(entry.packet_id)) and
       is_boolean(entry.ever_sent) and (entry.packet_id == nil or entry.ever_sent) and
       entry.sending == false and entry.delivered == false and entry.dispatch == nil and
-      entry.retry_at == nil
+      entry.retry_at == nil and is_list(entry.subscription_identifiers) and
+      Enum.all?(entry.subscription_identifiers, &(&1 != nil and subscription_identifier?(&1))) and
+      (entry.shared == nil or match?({:shared, _, _}, Topic.parse_filter(entry.shared)))
   end
 
   defp message?(message, template) do
@@ -285,6 +293,54 @@ defmodule GravitonMQ.MQTT.Broker.Checkpoint do
        do: :ok,
        else: {:error, :checkpoint_limits}
   end
+
+  # Owner decision Q9: v1 is upgraded in memory at read time; the next commit
+  # writes v2. Only an exact v1 shape is upgraded, so mislabelled data keeps
+  # version 1 and fails validation.
+  defp upgrade(%{version: 1, state: %{sessions: sessions} = data} = snapshot)
+       when is_map(sessions) do
+    if Enum.all?(sessions, fn {_id, session} -> v1_session?(session) end) do
+      sessions =
+        Map.new(sessions, fn {id, session} ->
+          subscriptions =
+            Map.new(session.subscriptions, fn {filter, sub} ->
+              {filter, Map.merge(sub, %{subscription_identifier: nil, shared: nil})}
+            end)
+
+          deliveries =
+            Enum.map(
+              session.deliveries,
+              &Map.merge(&1, %{subscription_identifiers: [], shared: nil})
+            )
+
+          {id, %{session | subscriptions: subscriptions, deliveries: deliveries}}
+        end)
+
+      %{snapshot | version: 2, state: %{data | sessions: sessions}}
+    else
+      snapshot
+    end
+  end
+
+  defp upgrade(snapshot), do: snapshot
+
+  defp v1_session?(%{subscriptions: subscriptions, deliveries: deliveries})
+       when is_map(subscriptions) and is_list(deliveries),
+       do:
+         Enum.all?(subscriptions, fn {_filter, sub} -> keys?(sub, @v1_subscription) end) and
+           Enum.all?(deliveries, &keys?(&1, @v1_delivery))
+
+  defp v1_session?(_session), do: false
+
+  defp shared_of(filter) do
+    case Topic.parse_filter(filter) do
+      {:shared, name, inner} -> {name, inner}
+      _ -> nil
+    end
+  end
+
+  defp subscription_identifier?(nil), do: true
+  defp subscription_identifier?(value), do: is_integer(value) and value in 1..268_435_455
 
   defp rebase_message(message, shift),
     do: %{message | expires_at: deadline(message.expires_at, shift)}

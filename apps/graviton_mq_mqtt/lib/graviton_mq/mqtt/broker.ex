@@ -1220,7 +1220,9 @@ defmodule GravitonMQ.MQTT.Broker do
         ever_sent: false,
         delivered: false,
         dispatch: nil,
-        retry_at: nil
+        retry_at: nil,
+        subscription_identifiers: Map.get(target, :subscription_identifiers, []),
+        shared: Map.get(target, :shared)
       }
 
       state = %{state | next_id: state.next_id + 1}
@@ -1950,7 +1952,12 @@ defmodule GravitonMQ.MQTT.Broker do
               end
 
             if code < 0x80 do
-              sub = %{id: state.next_id, options: %{opts | qos: code}}
+              sub = %{
+                id: state.next_id,
+                options: %{opts | qos: code},
+                subscription_identifier: nil,
+                shared: nil
+              }
 
               {%{state | next_id: state.next_id + 1}, Map.put(subscriptions, filter, sub),
                codes ++ [code]}
