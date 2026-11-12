@@ -258,7 +258,7 @@ defmodule GravitonMQ.Runtime.HellHandoff do
     end
   end
 
-  # `handle_close/2` keeps Hell's default: in rc.13 the only `{:shutdown, _}`
+  # `handle_close/2` keeps Hell's default: as of rc.17 the only `{:shutdown, _}`
   # stops of a live handler are this module's own (`:local_closed` after its
   # Connection is gone or released, `:released`), so nothing is left to
   # release there. Hell's `:shutdown` and failures reach the callbacks below.
@@ -321,7 +321,7 @@ defmodule GravitonMQ.Runtime.HellHandoff do
         {:continue, {connections, connection, monitor, connection_stop}, {:persistent, :infinity}}
 
       {:error, _reason} ->
-        _ = DynamicSupervisor.terminate_child(connections, connection)
+        _ = guarded(fn -> DynamicSupervisor.terminate_child(connections, connection) end)
         {:close, nil}
     end
   end
