@@ -63,34 +63,55 @@ defmodule GravitonMQ.Runtime.AMQP10.ConfigTest do
     end
   end
 
-  test "TLS listener options cannot replace passive binary framing or write limits" do
-    for option <- [
-          [active: true],
-          [mode: :list],
-          [packet: 4],
-          [header: 1],
-          [deliver: :port],
-          [packet_size: 0],
-          [send_timeout: :infinity],
-          [send_timeout_close: false]
-        ] do
-      tls = [certfile: "server.pem", keyfile: "server.key"] ++ option
-
-      assert {:error, _} =
-               Config.build(
-                 auth: :anonymous,
-                 container_id: "broker",
-                 queues: ["q"],
-                 listeners: [[transport: :tls, tls_options: tls]]
-               )
+  test "TLS listener options are allowlisted and report the offending key" do
+    build = fn tls ->
+      Config.build(
+        auth: :anonymous,
+        container_id: "broker",
+        queues: ["q"],
+        listeners: [[transport: :tls, tls_options: tls]]
+      )
     end
 
-    assert {:error, _} =
+    identity = [certfile: "server.pem", keyfile: "server.key"]
+
+    for {option, key} <- [
+          {[active: true], :active},
+          {[mode: :list], :mode},
+          {[packet: 4], :packet},
+          {[header: 1], :header},
+          {[deliver: :port], :deliver},
+          {[packet_size: 0], :packet_size},
+          {[send_timeout: :infinity], :send_timeout},
+          {[send_timeout_close: false], :send_timeout_close},
+          {[verify_fun: {fn _, _, s -> {:valid, s} end, nil}], :verify_fun},
+          {[partial_chain: fn _ -> :unknown_ca end], :partial_chain},
+          {[crl_check: true], :crl_check},
+          # The runtime owns the per-delivery bound; it is not a user option.
+          {[active_chunk_size: 16_384], :active_chunk_size}
+        ] do
+      assert {:error, {:unsupported_tls_option, ^key}} = build.(identity ++ option)
+    end
+
+    assert {:error, {:unsupported_tls_option, :versions}} =
+             build.(identity ++ [versions: [:"tlsv1.2"]])
+
+    assert {:error, {:invalid_tls_option, :depth}} = build.(identity ++ [depth: 0])
+    assert {:error, {:invalid_tls_option, :certfile}} = build.([])
+
+    # In-memory identities are accepted (gsmlg-dev/http_fetch#168 is fixed).
+    assert {:ok, %{listeners: [%{transport: :tls}]}} =
+             build.(cert: <<48>>, key: {:RSAPrivateKey, <<48>>})
+
+    assert {:ok, %{listeners: [%{transport: :tls}]}} = build.(identity)
+
+    # TCP listeners keep rejecting owned socket options.
+    assert {:error, :invalid_listener} =
              Config.build(
                auth: :anonymous,
                container_id: "broker",
                queues: ["q"],
-               listeners: [[transport: :tls, tls_options: []]]
+               listeners: [[transport: :tcp, tls_options: [active: true]]]
              )
   end
 

@@ -4,6 +4,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
   alias GravitonMQ.AMQP10.{Endpoint, SessionEngine}
   alias GravitonMQ.Core.NodeId
   alias GravitonMQ.Queue.Machine
+  alias GravitonMQ.Runtime.TLSOptions
 
   @keys ~w(container_id queues queue_options listeners auth authorize profile max_connections
     max_auth_jobs auth_timeout send_timeout connect_timeout max_input_bytes
@@ -256,10 +257,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
         listener.transport in [:tcp, :tls] and valid_ip?(listener.ip) and
           bounded?(listener.port, 0, 65_535) and bounded?(listener.backlog, 1, 1024) and
           is_list(tls) and Keyword.keyword?(tls) and
-          Enum.all?(tls, fn {key, _} -> key not in @owned_socket_options end) and
-          (listener.transport == :tcp or (certificate?(tls) and private_key?(tls)))
+          (listener.transport == :tls or
+             Enum.all?(tls, fn {key, _} -> key not in @owned_socket_options end))
 
-      if valid, do: {:ok, listener}, else: {:error, :invalid_listener}
+      cond do
+        not valid -> {:error, :invalid_listener}
+        listener.transport == :tls -> with :ok <- TLSOptions.validate(tls), do: {:ok, listener}
+        true -> {:ok, listener}
+      end
     else
       {:error, :invalid_listener}
     end
@@ -303,10 +308,4 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
   end
 
   defp valid_ip?(_ip), do: false
-
-  defp certificate?(options),
-    do: Keyword.has_key?(options, :certfile) or Keyword.has_key?(options, :cert)
-
-  defp private_key?(options),
-    do: Keyword.has_key?(options, :keyfile) or Keyword.has_key?(options, :key)
 end
