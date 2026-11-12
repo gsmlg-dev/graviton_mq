@@ -103,7 +103,12 @@ defmodule GravitonMQ.MQTTBroker.FeatureTest do
     end
   end
 
-  defp quiet(socket), do: assert({:error, :timeout} = :gen_tcp.recv(socket, 0, 100))
+  # Nothing more arrives, and nothing is left over from an earlier read: a
+  # duplicate PUBLISH can share the TCP read of the packet before it.
+  defp quiet(socket) do
+    assert Process.get({:mqtt_buffer, socket}, <<>>) == <<>>
+    assert {:error, :timeout} = :gen_tcp.recv(socket, 0, 100)
+  end
 
   defp status(instance) do
     {:ok, status} = GravitonMQ.status(instance)
