@@ -261,4 +261,31 @@ defmodule GravitonMQ.MQTTClient.CheckpointTest do
     {offline, _} = Machine.transition(pinged, {:transport_down, 1, :closed, 1_003})
     refute Checkpoint.content(offline, meta) == saved
   end
+
+  test "shared subscription filters are valid checkpoint content" do
+    {:ok, fresh} = Machine.new(%Connect{version: :v5, clean_start: true, client_id: "one"})
+    machine = %{fresh | subscriptions: %{"$share/g/a/#" => 1}}
+    meta = %{next_operation: 1, deadlines: %{}, results: %{}}
+    assert {:ok, snapshot} = Checkpoint.capture(machine, meta, 0, 1_000)
+    assert snapshot.version == 1
+    assert {:ok, recovered, _} = Checkpoint.restore(snapshot, fresh, 0, 1_000)
+    assert recovered.subscriptions == %{"$share/g/a/#" => 1}
+  end
+
+  test "persisted publications never carry a hop-local Topic Alias" do
+    {:ok, fresh} = Machine.new(%Connect{version: :v5, clean_start: true, client_id: "one"})
+    meta = %{next_operation: 2, deadlines: %{1 => 9_000}, results: %{}}
+
+    packet = %Publish{
+      qos: 1,
+      packet_id: 3,
+      topic: "a",
+      payload: "x",
+      properties: [topic_alias: 1]
+    }
+
+    entry = %{ref: 1, kind: :publish, packet: packet, order: 1, sent: true, expiry_deadline: nil}
+    machine = %{fresh | outbound: %{1 => entry}, next_order: 2}
+    assert {:error, :invalid_checkpoint_schema} = Checkpoint.capture(machine, meta, 0, 1_000)
+  end
 end

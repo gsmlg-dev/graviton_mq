@@ -141,7 +141,7 @@ defmodule GravitonMQ.Client.MQTT.Checkpoint do
         entry.packet.qos == 0 or Map.get(state.incoming, entry.packet.packet_id) == id
       end) and
       Enum.all?(state.subscriptions, fn {filter, qos} ->
-        Topic.valid_filter?(filter) and qos in [0, 1, 2]
+        Topic.valid_subscription_filter?(filter) and qos in [0, 1, 2]
       end) and
       Enum.sort(Map.keys(meta.deadlines)) ==
         Enum.sort(
@@ -208,7 +208,9 @@ defmodule GravitonMQ.Client.MQTT.Checkpoint do
   defp delivery_phase?(%{packet: %Publish{qos: 2}}), do: false
   defp delivery_phase?(entry), do: is_nil(entry.qos2_phase)
 
-  defp packet?(%Publish{} = packet, :publish, fresh), do: valid_packet?(packet, fresh)
+  defp packet?(%Publish{} = packet, :publish, fresh),
+    do: valid_packet?(packet, fresh) and not Keyword.has_key?(packet.properties, :topic_alias)
+
   defp packet?(%Subscribe{} = packet, :subscribe, fresh), do: valid_packet?(packet, fresh)
   defp packet?(%Unsubscribe{} = packet, :unsubscribe, fresh), do: valid_packet?(packet, fresh)
   defp packet?(_, _, _), do: false

@@ -94,18 +94,26 @@ defmodule GravitonMQ.Client.MQTT do
     end
   end
 
-  defp call({:subscribe, <<"$share/", _::binary>>, _options}, _from, %{store: store} = state)
-       when not is_nil(store),
-       do: {:reply, {:error, :shared_subscription_persistence_unsupported}, state}
-
   defp call({:subscribe, filter, options}, from, state) do
+    properties = if is_list(options), do: Keyword.get(options, :properties, []), else: nil
+
     if valid_options?(options, [
          :qos,
          :no_local,
          :retain_as_published,
          :retain_handling,
-         :properties
-       ]) do
+         :properties,
+         :subscription_identifier
+       ]) and is_list(properties) and
+         not (Keyword.has_key?(options, :subscription_identifier) and
+                Keyword.keyword?(properties) and
+                Keyword.has_key?(properties, :subscription_identifier)) do
+      properties =
+        case Keyword.fetch(options, :subscription_identifier) do
+          {:ok, identifier} -> properties ++ [subscription_identifier: identifier]
+          :error -> properties
+        end
+
       subscription = %{
         qos: Keyword.get(options, :qos, 0),
         no_local: Keyword.get(options, :no_local, false),
@@ -116,7 +124,7 @@ defmodule GravitonMQ.Client.MQTT do
       packet = %Subscribe{
         packet_id: 0,
         subscriptions: [{filter, subscription}],
-        properties: Keyword.get(options, :properties, [])
+        properties: properties
       }
 
       operation(state, from, :subscribe, packet)

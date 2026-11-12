@@ -8,7 +8,8 @@ defmodule GravitonMQ.Client.MQTT.Config do
   @keys ~w(id name host port transport tls_options observer client_id version username password
     keep_alive clean_start session_expiry_interval properties will max_inflight max_operations
     max_deliveries max_subscriptions receive_maximum max_packet_size connect_timeout handshake_timeout
-    operation_timeout send_timeout tick_interval reconnect persistence)a
+    operation_timeout send_timeout tick_interval reconnect persistence topic_alias_maximum
+    max_outbound_topic_aliases)a
 
   def build(options) when is_list(options) do
     with true <- Keyword.keyword?(options),
@@ -30,6 +31,8 @@ defmodule GravitonMQ.Client.MQTT.Config do
     deliveries = Keyword.get(options, :max_deliveries, 32)
     maximum = Keyword.get(options, :max_packet_size, 1_048_576)
     properties = Keyword.get(options, :properties, [])
+    aliases = Keyword.get(options, :topic_alias_maximum, 0)
+    outbound_aliases = Keyword.get(options, :max_outbound_topic_aliases, 0)
 
     config = %{
       host: host,
@@ -52,7 +55,9 @@ defmodule GravitonMQ.Client.MQTT.Config do
         max_operations: Keyword.get(options, :max_operations, 32),
         max_deliveries: deliveries,
         max_subscriptions: Keyword.get(options, :max_subscriptions, 1_024),
-        reconnect_max: reconnect.max_attempts
+        reconnect_max: reconnect.max_attempts,
+        topic_alias_maximum: aliases,
+        max_outbound_topic_aliases: outbound_aliases
       ]
     }
 
@@ -70,6 +75,7 @@ defmodule GravitonMQ.Client.MQTT.Config do
         ) and
         Enum.all?([deliveries, receive_maximum], &(is_integer(&1) and &1 in 1..65_535)) and
         receive_maximum <= deliveries and
+        Enum.all?([aliases, outbound_aliases], &(is_integer(&1) and &1 in 0..65_535)) and
         Enum.all?(
           [
             config.connect_timeout,
@@ -89,7 +95,7 @@ defmodule GravitonMQ.Client.MQTT.Config do
         properties
         |> Keyword.put(:receive_maximum, receive_maximum)
         |> Keyword.put(:maximum_packet_size, maximum)
-        |> Keyword.put(:topic_alias_maximum, 0)
+        |> Keyword.put(:topic_alias_maximum, aliases)
         |> Keyword.put_new(
           :session_expiry_interval,
           Keyword.get(options, :session_expiry_interval, 60)

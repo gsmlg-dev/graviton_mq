@@ -30,9 +30,8 @@ defmodule GravitonMQ.MQTTClient do
   transition is synchronized before its wire or host acceptance effects. Store
   failures close the connection and stop the owner with an explicit
   `{:storage_error, {:failed | :unknown, reason}}` observer event.
-  Shared subscriptions are outside this persistence profile: `subscribe/3`
-  returns `{:error, :shared_subscription_persistence_unsupported}` before
-  admission or transmission when persistence is enabled.
+  Shared subscriptions (`$share/...` filters) are persisted like ordinary
+  subscriptions and reported in `{:subscriptions_lost, ...}` on session loss.
 
   Persistent admission also sends the caller `{:operation_identity, reference,
   {store_uuid, integer}}`. After owner/VM recovery the new observer receives
