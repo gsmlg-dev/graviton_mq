@@ -12,6 +12,26 @@ clustering/Raft, management UI, bridges, transactions and AMQP 0-9-1 remain
 excluded. Commit, push, version bump, release and publication are not
 authorized. No sub-project is complete until its recorded exit evidence exists.
 
+Status (2026-11-12). The S2 and S4 plans record per-task commit authorization
+on `main`; version bump, release and publication remain unauthorized, so all
+of the following is unreleased (latest release `0.3.0`).
+
+| Sub-project | Status | Evidence |
+| --- | --- | --- |
+| S0 hygiene | Complete | `5cb8c19` (load-tolerant runtime tests, compaction tests), `a9fd9cd` (current-status summary, stale statements). No GitHub issues were filed for the 2026-11-08 Low review findings. |
+| S1a owned transport (broker plain TCP on `hell`, client TLS on `ex_ssl`) | Complete | `c2accb9`..`8a368af`; hosted CI run 43150172756 for `8a368af` ([ADR 0009](adr/0009-owned-network-stack.md)) |
+| S1b broker TLS on `ex_ssl` | Unblocked, not implemented | gsmlg-dev/http_fetch#161 fixed in `ex_ssl` 1.0.0-rc.14 (`ccac792`) |
+| S2 AMQP SASL ANONYMOUS/PLAIN | Complete | [S2 plan](superpowers/plans/2026-11-12-s2-amqp-sasl.md); hosted CI run 43177284736 for `4967d89`: Proton 0.40.0 → broker P1–P7, client → Artemis 2.41.0 (`security-enabled=true`) A1–A3 including wrong-password refusal |
+| S3 AMQP client reconnect, Manager block | Pending | — |
+| S4 MQTT Topic Alias, Subscription Identifiers, shared subscriptions | Complete | [S4 plan](superpowers/plans/2026-11-12-s4-mqtt-alias-subid-shared.md); same run: Paho 2.1.0 and mosquitto_pub/sub → broker, client → Mosquitto 2.1.2, T0 capability probes |
+| S5 performance, telemetry, TTL | Pending | — |
+| S6 MQTT over WebSocket | Pending | — |
+| S7 MQTT 3.1.1 runtime | Pending | — |
+
+Run 43177284736 (CI) and 43177284490 (Tests) passed 1,536 tests with 0
+failures, the 300 s four-role soak and seven archives with three installed
+consumers. See the [capability matrix](CAPABILITIES.md) for per-role evidence.
+
 ## Release authorization — 2026-11-09
 
 The owner requested publication of the next version containing the
