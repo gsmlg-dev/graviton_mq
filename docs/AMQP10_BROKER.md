@@ -258,8 +258,34 @@ listeners: [[
 ]]
 ```
 
-TLS options cannot replace transport-owned binary/active-once framing or write
-timeouts. This anonymous profile does not convert a client certificate into
+TLS listeners (S1b, 2026-11-13, unreleased) accept through `hell` with
+`ex_ssl`; the runtime neither references nor starts OTP `:ssl`, and the host
+does not need to start it. They negotiate **TLS 1.3 only**: TLS 1.2 and older
+clients are refused during the handshake. `tls_options` are validated before
+any socket opens against the same allowlist as MQTT (see the key table in
+[MQTT_BROKER.md](MQTT_BROKER.md)): `certfile`, `keyfile`, `cacertfile`,
+`cert`, `key` (an in-memory private key is accepted), `certs_keys`,
+`password`, `cacerts`, `verify`, `fail_if_no_peer_cert`, `depth`, `ciphers`
+(TLS 1.3 suites), `versions` (exactly `[:"tlsv1.3"]`),
+`alpn_preferred_protocols`, `sni_hosts` and `sni_fun`, with a required default
+identity. Any other key, including the OTP `:ssl` options this listener used
+to pass through (`verify_fun`, `partial_chain`, `crl_check`, TLS 1.2
+`versions`, `depth: 0`) and socket options, fails start with
+`{:unsupported_tls_option, key}`. `active_chunk_size` is owned by the runtime
+and rejected from users: the runtime sets 16,384 bytes per active-once
+delivery, so `max_input_bytes` behaves as on TCP. Malformed values fail with
+`{:invalid_tls_option, key}`; errors carry the key only. Unreadable files, a
+bad key or a wrong password fail with `{:listener_setup_failed, :tls}`.
+
+There is no TLS session resumption and no client-certificate revocation
+checking. `connect_timeout` (default 2,000 ms, 1..3,000) bounds the TLS
+handshake, including the server flight and `sni_fun`; the protocol-header
+deadline starts after it, so a client gets at most 2 × `connect_timeout` for
+TLS plus its header. Concurrent TLS connections per listener, handshakes
+included, are bounded at `max_connections + 3`. A failed handshake closes
+only that socket and emits no endpoint event. A TLS listener failure closes
+that listener's live connections, as for TCP; the Manager and queues
+survive. This anonymous profile does not convert a client certificate into
 an application principal. Peer trust and hostname verification belong to the
 connecting client; the independent Proton tests cover trusted and wrong CA
 behavior. Callbacks and message content are excluded from ordinary OTP status,

@@ -20,7 +20,7 @@ of the following is unreleased (latest release `0.3.0`).
 | --- | --- | --- |
 | S0 hygiene | Complete | `5cb8c19` (load-tolerant runtime tests, compaction tests), `a9fd9cd` (current-status summary, stale statements). No GitHub issues were filed for the 2026-11-08 Low review findings. |
 | S1a owned transport (broker plain TCP on `hell`, client TLS on `ex_ssl`) | Complete | `c2accb9`..`8a368af`; hosted CI run 43150172756 for `8a368af` ([ADR 0009](adr/0009-owned-network-stack.md)) |
-| S1b broker TLS on `ex_ssl` | In progress (design `8a8a760`, plan amended for rc.17) | #161 fixed in rc.14; #168 and #169 fixed in rc.17 (pins updated 2026-11-13) |
+| S1b broker TLS on `ex_ssl` | Complete | [S1b plan](superpowers/plans/2026-11-13-s1b-broker-tls-ex-ssl.md); `72924ad`..`a124d3f` (#161 fixed in rc.14; #168 and #169 fixed in rc.17); hosted CI run 43223448120 (`interoperability` and `checks`) and Tests run 43223447801 for `375f677`: Paho and Mosquitto → MQTT broker and Proton → AMQP broker over TLS 1.3, Paho TLS 1.2-only refused, installed consumers serve TLS 1.3 without OTP `:ssl` ([ADR 0009](adr/0009-owned-network-stack.md)) |
 | S2 AMQP SASL ANONYMOUS/PLAIN | Complete | [S2 plan](superpowers/plans/2026-11-12-s2-amqp-sasl.md); hosted CI run 43177284736 for `4967d89`: Proton 0.40.0 → broker P1–P7, client → Artemis 2.41.0 (`security-enabled=true`) A1–A3 including wrong-password refusal |
 | S3 AMQP client reconnect, Manager block | Pending | — |
 | S4 MQTT Topic Alias, Subscription Identifiers, shared subscriptions | Complete | [S4 plan](superpowers/plans/2026-11-12-s4-mqtt-alias-subid-shared.md); same run: Paho 2.1.0 and mosquitto_pub/sub → broker, client → Mosquitto 2.1.2, T0 capability probes |
@@ -31,7 +31,12 @@ of the following is unreleased (latest release `0.3.0`).
 **Release block (owner decision 2026-11-13).** S1b removes the OTP `:ssl`
 broker TLS path. From the first S1b commit on `main` until
 broker TLS on ex_ssl is qualified in hosted CI (#169 is fixed in rc.17),
-no version may be released or published from `main`.
+no version may be released or published from `main`. That lifting condition
+("broker TLS on ex_ssl qualified in hosted CI") was met at CI run 43223448120
+on `375f677`. Lifting the block does not authorize a release: version bump,
+release and publication still require an explicit owner request, and none has
+been made. The [upgrade note](releases/UNRELEASED-s1b.md) is prepared for the
+next release.
 
 Run 43177284736 (CI) and 43177284490 (Tests) passed 1,536 tests with 0
 failures, the 300 s four-role soak and seven archives with three installed

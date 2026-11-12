@@ -70,8 +70,9 @@ The source-level rules are stricter than declarations in `mix.exs`:
   pure: no process, clock/timer, runtime, storage, socket, or transport
   dependencies. Running owners interpret their explicit effects in the client
   or broker runtime applications;
-- `Hell` only in runtime; ex_ssl `SSL` only in runtime and client; the client
-  must not reference OTP `:ssl`; and
+- `Hell` only in runtime; ex_ssl `SSL` only in runtime and client; neither the
+  runtime nor the client may reference OTP `:ssl` (owner decision 2026-11-13,
+  S1b); and
 - the application graph must remain acyclic.
 
 Keep `mix graviton_mq.check_architecture` based on compiler xref manifests and

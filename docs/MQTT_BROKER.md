@@ -1,7 +1,7 @@
 # MQTT5 single-node broker
 
 The G2 broker runs in this project, with pure topic/session/routing transitions
-and OTP TCP/TLS shells. It does not depend on `graviton_mq_client` or an external
+and OTP shells over `hell`/`ex_ssl` TCP/TLS listeners. It does not depend on `graviton_mq_client` or an external
 broker. The [capability matrix](CAPABILITIES.md) and
 [G2 qualification](qualification/2026-10-30-g2.md) record exact evidence.
 G5 extends this intermediate profile to QoS0/1/2, with Mosquitto and Paho
@@ -133,8 +133,7 @@ config :graviton_mq, :default_instance,
 
 `:anonymous` is an explicit policy allowing every operation in that instance.
 For embedding, set the host dependency's `runtime: false` and supervise the
-broker explicitly. The host must start OTP `:ssl` when using TLS, for example
-through its own `extra_applications`.
+broker explicitly.
 
 ```elixir
 children = [
@@ -154,6 +153,51 @@ children = [
 ]
 Supervisor.start_link(children, strategy: :one_for_one)
 ```
+
+TLS listeners (S1b, 2026-11-13, unreleased) accept through `hell` with
+`ex_ssl`; the runtime neither references nor starts OTP `:ssl`, and the host
+does not need to start it. They negotiate **TLS 1.3 only**: TLS 1.2 and older
+clients are refused during the handshake. `tls_options` are validated against
+an allowlist before any socket opens:
+
+| Key | Accepted value |
+| --- | --- |
+| `certfile`, `keyfile`, `cacertfile` | non-empty binary or charlist path |
+| `cert` | DER certificate |
+| `key` | in-memory private key `{:RSAPrivateKey \| :ECPrivateKey \| :PrivateKeyInfo, der}` |
+| `certs_keys` | 1..16 identity maps, each with its own certificate and private key (`cert`, `certfile`, `key`, `keyfile`, `password`) |
+| `password` | binary, charlist or 0-arity fun; always passed to Hell as a closure |
+| `cacerts` | non-empty list of DER certificates |
+| `verify` | `:verify_none` or `:verify_peer`; `:verify_peer` requires `cacerts` or `cacertfile` |
+| `fail_if_no_peer_cert` | boolean, only with `verify: :verify_peer` |
+| `depth` | 1..100 |
+| `ciphers` | non-empty, duplicate-free TLS 1.3 suites (`TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`) |
+| `versions` | exactly `[:"tlsv1.3"]` |
+| `alpn_preferred_protocols` | non-empty, duplicate-free list of 1..255-byte binaries |
+| `sni_hosts`, `sni_fun` | per-name identities or a 1-arity fun (not both); the broker does not route on them |
+
+A default identity is required: a certificate (`certfile` or `cert`) with a
+private key (`keyfile` or `key`), or `certs_keys`. Any other key fails start
+with `{:unsupported_tls_option, key}`, including OTP-only options
+(`verify_fun`, `partial_chain`, `crl_check`, `reuse_sessions`,
+`session_tickets`, `secure_renegotiate`, `honor_cipher_order`) and socket
+options. `active_chunk_size` is owned by the runtime and rejected from users:
+the runtime sets 16,384 bytes per active-once delivery, so the
+`max_packet_size` input bound behaves as on TCP. A malformed value, a missing
+identity or a dependent key without its prerequisite fails with
+`{:invalid_tls_option, key}`. Errors carry the key only, never a value. An
+unreadable file, a bad key or a wrong password fails start with
+`{:listener_setup_failed, :tls}`.
+
+There is no TLS session resumption (every connection performs a full
+handshake) and no client-certificate revocation checking. `connect_timeout`
+bounds the TLS handshake, including the server flight and `sni_fun`; the
+CONNECT deadline starts after it, so a client gets at most
+2 × `connect_timeout` for TLS plus CONNECT. Concurrent TLS connections per
+listener, handshakes included, are bounded at `max_connections + 3`. A failed
+handshake closes only that socket and is not reported to the Broker. A TLS
+listener failure closes that listener's live connections, as for TCP; the
+Broker, its sessions and retained messages survive.
 
 `MyApp.MQTTPolicy` must implement the callbacks below. Both registered names
 must differ between instances. Names are exact OTP names; external strings

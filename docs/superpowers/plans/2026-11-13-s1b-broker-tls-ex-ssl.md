@@ -4348,3 +4348,35 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
   first) fails the assertion with `MatchError`.
 - Regressions: umbrella `mqtt_tls` + `amqp10_tls` 20 tests, 0 failures; final
   architecture check passed.
+
+### C-tasks done (2026-11-13)
+
+- **C1/C2 (hosted CI).** CI run 43223448120 for `375f677`: `interoperability`
+  and `checks` PASS; Tests run 43223447801 PASS. Evidence lines:
+  `Paho TLS round trip PASS cipher=('TLS_AES_128_GCM_SHA256', 'TLSv1.3', 128)
+  openssl=OpenSSL 3.0.13`; `TLS1.2-only refused: TLSV1_ALERT_PROTOCOL_VERSION`;
+  `Mosquitto TLS: broker protocol=tlsv1.3; peer OpenSSL 3.0.13`; `Proton TLS:
+  broker protocol=tlsv1.3; host OpenSSL 3.0.13 ...; peer OpenSSL 3.0.13`;
+  `Broker TLS 1.3 listener round trip PASS; OTP :ssl not started` twice (main
+  and embedding consumer); all installed-package checks PASS. The earlier CI
+  run 43214315813 at `83567a7` failed only S3's Artemis R2 (Artemis routing,
+  fixed in `375f677`), not an S1b case. No harness change was needed.
+- **C3.** AGENTS.md: "neither the runtime nor the client may reference OTP
+  `:ssl` (owner decision 2026-11-13, S1b)". ADR 0009: S1b implemented and
+  CI-qualified, rc.17 pins, #168/#169 fixed, in-memory keys accepted,
+  runtime-owned `active_chunk_size: 16_384`, TLS listener failure semantics
+  equal to TCP, the `max_connections + 3` handshake bound; the "TLS listeners
+  still on OTP `:ssl`" consequence is replaced. The rc.14 "Not qualified:
+  blocked on #169" text of C3 is obsolete (Amendment 2026-11-13) and was not
+  used.
+- **C4.** CAPABILITIES MQTT5/AMQP1 broker rows (S1b evidence, TLS 1.3 only in
+  the limitation cells), MQTT_BROKER.md (OTP `:ssl` host sentence deleted;
+  allowlist table, no resumption/revocation, handshake budget),
+  AMQP10_BROKER.md (allowlist statement replaces the framing sentence),
+  upgrade note `docs/releases/UNRELEASED-s1b.md`, ACTIVE_SCOPE S1b row
+  Complete and the release block's lifting condition recorded as met at run
+  43223448120; a release still requires an explicit owner request.
+- **C5 (Agent Note):** not done in this documentation pass.
+- **C6:** none (the Amendment pinned rc.17 with #168/#169 fixed).
+- Verification: `release_test.exs` + `architecture_test.exs` and
+  `mix format --check-formatted` (see the commit report).

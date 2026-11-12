@@ -7,7 +7,12 @@
   independent-peer requalification PASS in hosted CI run 43150172756 for `8a368af` (Mosquitto 2.1.2, Paho 2.1.0, Artemis 2.41.0, Proton 0.40.0; 1,253 tests, 0 failures; 300 s four-role soak PASS; seven archives and three installed consumers PASS);
   local packaging (seven archives, three installed consumers) PASS on a rerun; the first local run failed once in the embedding consumer's durable recovery script ("installed recovered MQTT subscription did not complete", 5 s timeout) while synchronous disk writes took 57-86 ms; the committed baseline passed once. Design and spike record:
   [P0–P3 / S1 design](../superpowers/specs/2026-11-12-http-fetch-transport-and-p0-p3-design.md);
-  plan: [S1a owned transport](../superpowers/plans/2026-11-12-s1a-owned-transport.md)
+  plan: [S1a owned transport](../superpowers/plans/2026-11-12-s1a-owned-transport.md).
+  S1b committed on `main` (`72924ad`..`a124d3f`, interleaved with S3 commits);
+  qualified in hosted CI run 43223448120 (`interoperability` and `checks`
+  PASS) and Tests run 43223447801 (PASS) for `375f677`; design:
+  [S1b spec](../superpowers/specs/2026-11-13-s1b-broker-tls-ex-ssl-design.md);
+  plan: [S1b broker TLS](../superpowers/plans/2026-11-13-s1b-broker-tls-ex-ssl.md)
 
 ## Context
 
@@ -58,8 +63,34 @@ S1 is split:
   this layout; it replaces the earlier "byte pump" layout of the design.
   Client TLS uses ex_ssl `SSL`; client plain TCP stays on `:gen_tcp`; the
   client no longer uses OTP `:ssl`.
-- **S1b (unblocked 2026-11-12).** Broker TLS listeners stay on OTP `:ssl`
-  until S1b is implemented. #161 was fixed in `ex_ssl` 1.0.0-rc.14 (server
+- **S1b (implemented and CI-qualified, 2026-11-13).** Broker TLS listeners
+  (MQTT 5.0 and AMQP 1.0) accept through a Hell server using
+  `Hell.Transports.SSL` (ex_ssl) on the same accept-only `HellHandoff` path as
+  TCP. Hell runs the TLS 1.3 handshake in the handler, bounded by the
+  protocol's `connect_timeout`; only after a successful handshake does the
+  handler start the Connection and hand it the `%SSL.Socket{}`. Broker TLS is
+  TLS 1.3 only. The OTP `:ssl` accept loop is deleted, the runtime no longer
+  references OTP `:ssl` and declares `extra_applications: [:crypto]`, and the
+  architecture check forbids OTP `:ssl` in the runtime as well as the client.
+  TLS listener options are validated against one allowlist for both
+  protocols (`{:unsupported_tls_option, key}` / `{:invalid_tls_option, key}`).
+  In-memory private keys (`key`) are accepted, because #168 is fixed in rc.17;
+  every `password` still reaches Hell only as a 0-arity closure (defence in
+  depth). The runtime always sets `active_chunk_size: 16_384` on TLS listeners
+  (#169), so every active-once delivery is at most 16 KiB and the MQTT and
+  AMQP input limits keep their plain-TCP semantics; `active_chunk_size` is
+  runtime-owned and rejected in user `tls_options`. Hosted CI run
+  43223448120 for `375f677` (`interoperability` and `checks` PASS; Tests run
+  43223447801 PASS) recorded: `Paho TLS round trip PASS
+  cipher=('TLS_AES_128_GCM_SHA256', 'TLSv1.3', 128) openssl=OpenSSL 3.0.13`;
+  `TLS1.2-only refused: TLSV1_ALERT_PROTOCOL_VERSION`; `Mosquitto TLS: broker
+  protocol=tlsv1.3; peer OpenSSL 3.0.13`; `Proton TLS: broker
+  protocol=tlsv1.3; host OpenSSL 3.0.13 ...; peer OpenSSL 3.0.13`; and
+  `Broker TLS 1.3 listener round trip PASS; OTP :ssl not started` for both
+  the main and the embedding installed consumer, with all installed-package
+  checks PASS.
+
+  History: #161 was fixed in `ex_ssl` 1.0.0-rc.14 (server
   writes go through a writer process); after updating the pins to rc.14 the
   original reproduction (Writer blocked by a non-reading peer while the
   client sends) delivered the client bytes and answered `setopts` promptly in
@@ -73,9 +104,9 @@ S1 is split:
   password was absent from `[:hell, :listener, :start]` metadata) and
   gsmlg-dev/http_fetch#169 (ex_ssl server option `active_chunk_size` bounds
   each active-once delivery; with 16 KiB every delivery was ≤ 16,384 bytes and
-  the byte stream was exact, while without it one delivery was 470,016 bytes). S1b still requires the TLS interop
-  suites to pass. Once S1b lands the broker is TLS 1.3-only (ex_ssl
-  has no TLS 1.2 server); that is a documented breaking change.
+  the byte stream was exact, while without it one delivery was 470,016 bytes).
+  The TLS 1.3-only broker (ex_ssl has no TLS 1.2 server) is a documented
+  breaking change ([upgrade note](../releases/UNRELEASED-s1b.md)).
 
 The client offers `versions: [:"tlsv1.3", :"tlsv1.2"]` by default, preserving
 the pre-ex_ssl compatibility; a caller-supplied `versions` wins.
@@ -86,8 +117,10 @@ Listener failure semantics change for plain-TCP listeners: Hell closes its
 handlers' sockets when the server exits and a stopping handler stops its
 Connection, so a TCP listener failure closes that listener's live
 connections. The protocol owner (MQTT Broker, AMQP Manager), queues and
-retained messages survive. TLS listeners, still on OTP `:ssl`, keep their
-previous behaviour. Listeners are isolated from one another under a generic
+retained messages survive. Since S1b, TLS listeners have exactly the same
+failure semantics: a TLS listener failure closes that listener's live
+connections (previously they survived on OTP `:ssl`), and the owner, queues,
+sessions and retained messages survive. Listeners are isolated from one another under a generic
 one_for_one `GravitonMQ.Runtime.ListenerSupervisor` (child `:listeners`,
 started only when listeners are configured, last child of each protocol's
 rest_for_one supervisor). More than 3 listener crashes within 5 s escalate to
@@ -101,8 +134,10 @@ silently dropped.
 `mix graviton_mq.check_architecture` (xref/AST based) allows `Hell`/`Hell.*`
 only in `graviton_mq_runtime` and ex_ssl `SSL`/`SSL.*` only in runtime and
 client. Protocol applications reject both as transport modules; core, storage
-and the public composition cannot reference them; `graviton_mq_client` may
-not reference OTP `:ssl`.
+and the public composition cannot reference them; neither
+`graviton_mq_runtime` nor `graviton_mq_client` may reference OTP `:ssl`
+(owner decision 2026-11-13, S1b). Tests may still start OTP `:ssl` as an
+independent peer.
 
 Hex staging now passes external version requirements through unchanged and
 rejects other non-umbrella dependency forms; archives and installed consumers resolve `hell`/`ex_ssl`
@@ -115,8 +150,20 @@ Operational budgets and limits (detailed in the `HellHandoff` source comment):
   retry runs in listener init and blocks the `ListenerSupervisor` (and
   `GravitonMQ.status/1`) meanwhile; a genuine conflict fails start explicitly.
 - Shutdown: Connection release 5 s plus 0.5 s kill wait; handler drain 6 s;
-  residual `Hell.stop` 7 s; listener child shutdown 14 s. N TCP listeners stop
-  sequentially, so worst-case wall time is N × 14 s.
+  residual `Hell.stop` 7 s; listener child shutdown 14 s. N listeners (TCP or
+  TLS) stop sequentially, so worst-case wall time is N × 14 s.
+- TLS handshakes: Hell's `handshake_timeout` is the protocol's
+  `connect_timeout` (MQTT default 3,000 ms; AMQP default 2,000 ms, 1..3,000),
+  which also bounds the server flight and `sni_fun`. The protocol's own
+  CONNECT/header timer starts after the handshake, so a TLS client gets at
+  most 2 × `connect_timeout` for TLS plus CONNECT/header. Hell applies
+  `num_connections` per acceptor, so each of the 4 acceptors of a TLS
+  listener gets `ceil(max_connections / 4)`: concurrent TLS connections,
+  handshakes included, are bounded at `max_connections + 3` (exact when
+  divisible by 4). Established Connections stay capped at `max_connections`.
+  TCP listeners keep the S1a value.
+- No TLS session resumption (every connection performs a full handshake) and
+  no client-certificate revocation checking.
 - Listener wiring does not block: it uses `send_request` to the protocol
   supervisor. The connection spec is published in a listener-owned
   `:protected` ETS table with allowlisted keys only; handlers accepted before
