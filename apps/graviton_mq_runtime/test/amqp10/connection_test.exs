@@ -269,8 +269,8 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     try do
       :ok = :gen_tcp.send(peer, wire(%Close{}))
       assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _}}}
-      assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
-      assert_receive {:DOWN, ^writer_monitor, :process, ^writer, _}, 1000
+      assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
+      assert_receive {:DOWN, ^writer_monitor, :process, ^writer, _}
       assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
     after
       if Process.alive?(writer), do: :sys.resume(writer)
@@ -352,14 +352,13 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
         })
       end)
 
-    assert_receive {:tls_socket_ready, connection}, 1000
+    assert_receive {:tls_socket_ready, connection}
     monitor = Process.monitor(connection)
     send(connection, {:begin_handshake, self()})
     assert {:ok, ^connection} = Task.await(startup)
 
     assert_receive {:amqp10_endpoint_event, ^connection,
-                    {:event, {:disconnected, {:handshake, :timeout}}}},
-                   1000
+                    {:event, {:disconnected, {:handshake, :timeout}}}}
 
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
@@ -415,7 +414,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     monitor = monitor!(connection)
     :ok = :gen_tcp.send(peer, <<7::32, 2, 0, 0::16>>)
     assert %Close{error: %{}} = read_pdu(peer)
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
   end
 
   test "input frame bound is local and oversize declaration is rejected before its body" do
@@ -425,7 +424,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     monitor = monitor!(connection)
     :ok = :gen_tcp.send(peer, <<513::32, 2, 0, 0::16>>)
     assert %Close{error: %{}} = read_pdu(peer)
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
   end
 
   test "sasl: :disabled answers a SASL header with the AMQP header and keeps its reason" do
@@ -453,7 +452,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
       assert :ok = :gen_tcp.send(peer, header)
       # The reply follows the peer header and precedes the close (TR-2.2).
       assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
-      assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+      assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
       assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
       refute_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, _}}}, 10
     end
@@ -464,7 +463,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     monitor = monitor!(connection)
     assert :ok = :gen_tcp.send(peer, "HTTP/1.1")
     assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
     refute_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, _}}}, 10
   end
@@ -481,8 +480,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     {connection, monitor} = monitored_start!(config!(connect_timeout: 30), relay!())
 
     assert_receive {:amqp10_endpoint_event, ^connection,
-                    {:event, {:disconnected, :accept_timeout}}},
-                   1000
+                    {:event, {:disconnected, :accept_timeout}}}
 
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
   end
@@ -626,9 +624,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     monitor = Process.monitor(connection)
     send(connection, {:accepted, socket})
 
-    assert_receive {:amqp10_endpoint_event, ^connection,
-                    {:event, {:disconnected, :sasl_timeout}}},
-                   1000
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, :sasl_timeout}}}
 
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
@@ -657,7 +653,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
       {connection, peer} = authenticated!([mode: :sleep], auth_timeout: 30)
       monitor = monitor!(connection)
       plain_init!(peer, "graviton-password")
-      assert_receive {:authenticating, task}, 1000
+      assert_receive {:authenticating, task}
       # The 30 ms deadline may kill the task before this monitor exists.
       task_monitor = Process.monitor(task)
       assert %Outcome{code: %Value{value: 4}} = read_sasl(peer)
@@ -668,7 +664,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
                       {:event, {:disconnected, {:sasl, :sys_temp}}}}
 
       assert_killed(task, task_monitor)
-      assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+      assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     end
   end
 
@@ -676,7 +672,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     for {reason, code, value} <- [{:kill, :sys_temp, 4}, {:callback_crashed, :sys, 2}] do
       {connection, peer} = authenticated!(mode: :gate)
       plain_init!(peer, "graviton-password")
-      assert_receive {:authenticating, task}, 1000
+      assert_receive {:authenticating, task}
 
       capture_log(fn ->
         Process.exit(task, reason)
@@ -690,7 +686,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
   test "stale and late authentication results are ignored" do
     {connection, peer} = authenticated!(mode: :gate)
     plain_init!(peer, "graviton-password")
-    assert_receive {:authenticating, task}, 1000
+    assert_receive {:authenticating, task}
 
     # A result whose reference is not the current authentication.
     send(connection, {:amqp10_sasl_result, {:sasl_auth, 41}, {:ok, :forged}})
@@ -728,7 +724,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
         sasl_wire(init) <> @header <> wire(%Open{container_id: Value.string("peer")})
       )
 
-    assert_receive {:authenticating, task}, 1000
+    assert_receive {:authenticating, task}
     # Paused: neither the held header nor the Open reaches the Endpoint.
     assert {:error, :timeout} = :gen_tcp.recv(peer, 1, 30)
     assert data(connection).endpoint.phase == :new
@@ -749,13 +745,13 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: "secret"})
     init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
     :ok = :gen_tcp.send(peer, sasl_wire(init) <> @header)
-    assert_receive {:authenticating, task}, 1000
+    assert_receive {:authenticating, task}
     task_monitor = Process.monitor(task)
     :gen_tcp.close(peer)
     assert_killed(task, task_monitor)
     assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, :closed}}}
     assert_receive {:amqp10_sasl_authenticating, ^connection, false}
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
   end
 
   test "credentials never reach Connection state or status during or after authentication" do
@@ -767,7 +763,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
           {connection, peer} = authenticated!(mode: :gate)
           monitor = monitor!(connection)
           plain_init!(peer, password)
-          assert_receive {:authenticating, task}, 1000
+          assert_receive {:authenticating, task}
 
           # Mid-authentication.
           refute_secret(connection, password)
@@ -785,7 +781,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
               :ok
           end
 
-          assert_receive {:DOWN, ^monitor, :process, ^connection, reason}, 1000
+          assert_receive {:DOWN, ^monitor, :process, ^connection, reason}
           refute inspect(reason) =~ password
         end
       end)
@@ -798,9 +794,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     monitor = Process.monitor(connection)
     send(connection, {:accepted, socket})
 
-    assert_receive {:amqp10_endpoint_event, ^connection,
-                    {:event, {:disconnected, :sasl_timeout}}},
-                   1000
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, :sasl_timeout}}}
 
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
@@ -819,7 +813,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
     unswitchable!(connection, sasl_wire(init))
     assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _reason}}}
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     refute_received {:authenticating, _task}
     refute_received {:amqp10_sasl_authenticating, ^connection, true}
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
@@ -834,7 +828,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     unswitchable!(connection, sasl_wire(%Init{mechanism: Value.symbol("ANONYMOUS")}))
     assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     refute_received {:amqp10_principal, ^connection, _principal}
   end
 
@@ -843,7 +837,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     {connection, peer} = authenticated!(mode: :gate)
     monitor = monitor!(connection)
     plain_init!(peer, "graviton-password")
-    assert_receive {:authenticating, task}, 1000
+    assert_receive {:authenticating, task}
     assert_receive {:amqp10_sasl_authenticating, ^connection, true}
     task_monitor = Process.monitor(task)
 
@@ -859,7 +853,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     assert_killed(task, task_monitor)
     assert_receive {:amqp10_sasl_authenticating, ^connection, false}
     assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, _reason}}}
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     refute_received {:amqp10_sasl_failure, ^connection, _code}
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
   end
@@ -880,7 +874,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
         sasl_wire(init) <> @header <> wire(%Open{container_id: Value.string("peer")})
       )
 
-    assert_receive {:authenticating, task}, 1000
+    assert_receive {:authenticating, task}
     send(task, {:release, {:error, :denied}})
     assert %Outcome{code: %Value{value: 1}} = read_sasl(peer)
     # Neither an AMQP header nor an Open answers the discarded bytes.
@@ -889,7 +883,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     assert_receive {:amqp10_endpoint_event, ^connection,
                     {:event, {:disconnected, {:sasl, :auth}}}}
 
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     refute_received {:amqp10_endpoint_event, ^connection, {:event, {:connected, _}}}
     refute_received {:amqp10_principal, ^connection, _principal}
   end
@@ -908,17 +902,16 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: "secret"})
     init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
     :ok = :gen_tcp.send(peer, sasl_wire(init) <> @header)
-    assert_receive {:authenticating, task}, 1000
+    assert_receive {:authenticating, task}
     task_monitor = Process.monitor(task)
     :ok = :gen_tcp.send(peer, :binary.copy(<<0>>, 70_000))
 
     assert_receive {:amqp10_endpoint_event, ^connection,
-                    {:event, {:disconnected, {:decode_error, :input_buffer_limit}}}},
-                   1000
+                    {:event, {:disconnected, {:decode_error, :input_buffer_limit}}}}
 
     assert_killed(task, task_monitor)
     assert_receive {:amqp10_sasl_authenticating, ^connection, false}
-    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
     refute_received {:amqp10_sasl_failure, ^connection, _code}
   end
 
@@ -945,7 +938,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
       shell
     end)
 
-    assert_receive {^reference, data}, 1000
+    assert_receive {^reference, data}
     data
   end
 
@@ -964,7 +957,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
   # it may be killed before its monitor exists: `:noproc` is accepted only
   # for a task that is really gone.
   defp assert_killed(task, monitor) do
-    assert_receive {:DOWN, ^monitor, :process, ^task, reason}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^task, reason}
     assert reason in [:killed, :noproc]
     refute Process.alive?(task)
   end
@@ -995,7 +988,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
         })
       end)
 
-    assert_receive {:monitor_fixture, connection}, 1000
+    assert_receive {:monitor_fixture, connection}
     monitor = Process.monitor(connection)
     send(connection, {:monitored, self()})
     assert {:ok, ^connection} = Task.await(startup)
