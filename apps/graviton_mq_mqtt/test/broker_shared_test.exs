@@ -574,4 +574,64 @@ defmodule GravitonMQ.MQTT.BrokerSharedTest do
     assert holders(state, large) == ["m2"]
     assert state.shared_discarded == 0
   end
+
+  # Review minor: the dispatch-time discard when no other member can take the
+  # never-sent copy (the other member is connected but too small, or gone).
+  for {name, other} <- [
+        {"connected but too small", :too_small},
+        {"no longer a member", :gone}
+      ] do
+    @other other
+    test "a never-sent copy that fits no member is deleted and counted (other member #{name})" do
+      large = String.duplicate("p", 100)
+      state = race_group(60)
+      {state, _} = Broker.transition(state, {:connection_down, :m1, 1, :abnormal, 2})
+      {state, _} = Broker.transition(state, {:connection_down, :m2, 1, :abnormal, 2})
+
+      {state, _} =
+        packet(state, :pub, %Publish{topic: "t", payload: large, qos: 1, packet_id: 1}, 3)
+
+      assert holders(state, large) == ["m1"]
+
+      {state, []} = Broker.transition(state, {:connection_open, :m2_again, 1, 4})
+
+      connect_m2 =
+        case @other do
+          :too_small ->
+            %Connect{
+              version: :v5,
+              client_id: "m2",
+              clean_start: false,
+              properties: [session_expiry_interval: 60, maximum_packet_size: 64]
+            }
+
+          :gone ->
+            %Connect{version: :v5, client_id: "m2", clean_start: true}
+        end
+
+      {state, effects} =
+        Broker.transition(state, {:packet, :m2_again, 1, connect_m2, <<16, 0>>, 4})
+
+      {state, _} = allowed(state, effects, 4)
+      {state, []} = Broker.transition(state, {:connection_open, :m1_again, 1, 5})
+
+      connect_m1 = %Connect{
+        version: :v5,
+        client_id: "m1",
+        clean_start: false,
+        properties: [session_expiry_interval: 60, maximum_packet_size: 64]
+      }
+
+      {state, effects} =
+        Broker.transition(state, {:packet, :m1_again, 1, connect_m1, <<16, 0>>, 5})
+
+      {state, _} = allowed(state, effects, 5)
+      {state, effects} = Broker.transition(state, {:tick, 6})
+      {state, more} = allowed(state, effects, 6)
+      assert holders(state, large) == []
+      assert state.shared_discarded == 1
+
+      refute Enum.any?(effects ++ more, &match?({:send, _, _, _, %Publish{payload: ^large}}, &1))
+    end
+  end
 end
