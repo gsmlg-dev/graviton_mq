@@ -19,7 +19,7 @@ defmodule GravitonMQRuntime.MixProject do
     ]
   end
 
-  def application, do: [extra_applications: [:ssl]]
+  def application, do: [extra_applications: [:crypto]]
 
   defp deps do
     [

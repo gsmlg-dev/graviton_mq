@@ -654,18 +654,28 @@ defmodule GravitonMQ.ArchitectureTest do
     end
   end
 
-  test "client may not reference OTP :ssl; runtime still may" do
-    assert {:error, [{:forbidden_otp_transport_dependency, %{target_module: :ssl}} = violation]} =
-             Architecture.check([
-               ref(:graviton_mq_client, GravitonMQ.Client.Transport, nil, :ssl)
-             ])
+  test "neither the client nor the runtime may reference OTP :ssl" do
+    for {app, module} <- [
+          {:graviton_mq_client, GravitonMQ.Client.Transport},
+          {:graviton_mq_runtime, GravitonMQ.Runtime.MQTT.Listener}
+        ] do
+      assert {:error, [{:forbidden_otp_transport_dependency, %{target_module: :ssl}} = violation]} =
+               Architecture.check([ref(app, module, nil, :ssl)])
 
-    assert Architecture.format_violation(violation) =~
-             "graviton_mq_client may not reference :ssl (use the owned SSL package)"
+      assert Architecture.format_violation(violation) =~
+               "#{app} may not reference :ssl (use the owned SSL package)"
+    end
 
     assert :ok =
              Architecture.check([
-               ref(:graviton_mq_runtime, GravitonMQ.Runtime.Listener, nil, :ssl),
+               ref(:graviton_mq_runtime, GravitonMQ.Runtime.MQTT.Listener, nil, SSL),
+               ref(
+                 :graviton_mq_runtime,
+                 GravitonMQ.Runtime.HellHandoff,
+                 nil,
+                 Hell.Transports.SSL
+               ),
+               ref(:graviton_mq_runtime, GravitonMQ.Runtime.MQTT.Broker, nil, :crypto),
                ref(:graviton_mq_client, GravitonMQ.Client.Transport, nil, SSL),
                ref(:graviton_mq_client, GravitonMQ.Client.Transport, nil, :gen_tcp)
              ])

@@ -92,7 +92,7 @@ defmodule GravitonMQ.ReleaseTest do
         case app do
           :graviton_mq -> [mod: {GravitonMQ.Application, []}]
           :graviton_mq_client -> [extra_applications: [:public_key]]
-          :graviton_mq_runtime -> [extra_applications: [:ssl]]
+          :graviton_mq_runtime -> [extra_applications: [:crypto]]
           _ -> []
         end
 

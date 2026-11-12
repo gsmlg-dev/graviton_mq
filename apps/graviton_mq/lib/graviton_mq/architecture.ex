@@ -76,10 +76,10 @@ defmodule GravitonMQ.Architecture do
   }
 
   # OTP modules an application must not reference even though other
-  # applications may: the independent client uses the owned `SSL` package.
-  # `release_test` pins the client's application list, so
+  # applications may: the runtime and the independent client use the owned
+  # `SSL` package (S1b). `release_test` pins both application lists, so
   # `extra_applications: [:ssl]` cannot silently return.
-  @forbidden_otp_transport_by_app %{graviton_mq_client: [:ssl]}
+  @forbidden_otp_transport_by_app %{graviton_mq_client: [:ssl], graviton_mq_runtime: [:ssl]}
 
   @third_party_transport_prefixes [
     "Elixir.Bandit",
