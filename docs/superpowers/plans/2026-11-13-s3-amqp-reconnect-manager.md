@@ -4375,3 +4375,12 @@ Placeholder scan: every code step has code, and every command has an expected re
 - Green: the same file 11 tests, 0 failures. `mix compile --warnings-as-errors` clean. Seeds 1, 2, 3 over `amqp10_reconnect_test`, `amqp10_client_test`, `amqp10_sasl_client_test`, `tls_transport_test`, `privacy_test` and the three Artemis files (interop tags excluded): 60 tests, 0 failures, 13 excluded each.
 - Folded in the Task 7 review test: `Reconnect.delay(%{delay: 1, max_delay: 60_000}, 100) == 60_000` (the `min(attempt - 1, 20)` exponent cap).
 - Deviations: none in `amqp10.ex` beyond the plan's code. The plan's `recv_frame!/2` helper default was never used and raised a test-compile warning, so the default was dropped. Task 9 may restore it if it calls `recv_frame!(socket)`.
+
+### 2026-11-12 — Stream B, Tasks 0–3 (broker)
+
+- Build root `/tmp/gmq-build-s3b`, `TMPDIR=/tmp/gmq-s3b-tmp`.
+- Task 0: `S3_BASE` e015263. Baseline: runtime `test/amqp10` 105 tests, 0 failures; umbrella `amqp10_availability`, `amqp10_boundaries` and `amqp10_runtime` 25 tests, 0 failures.
+- Task 1 (49e4c61): red, `QueueRequests` module undefined; green, 5 tests, 0 failures.
+- Task 2 (0b0ea49): red, 14 tests, 1 failure (`send_request/3` undefined); green 14/0; regression 105/0 and 25/0.
+- Task 3 (e29bccf): red, availability 2 tests, 1 failure. It failed in the **second** `within!` (bystander attach, "took 4968 ms, limit 500 ms"), not the first as expected: the bystander publish completed before the Manager blocked in `Queue.settle/5`. Green: `mix compile --warnings-as-errors` clean; availability, boundaries, runtime, g5_flow, g5_annotations and sasl together 41 tests, 0 failures, 2 excluded, with seeds 1, 2 and 3; boundaries `--only line:177` (pump wave) passes alone; regression runtime `test/amqp10` 105/0, three umbrella AMQP suites 25/0.
+- Task 3 deviations: none in `broker.ex` beyond the plan's code. `fence/2` already rejects `:registering` routes, although that phase only appears in Task 4.
