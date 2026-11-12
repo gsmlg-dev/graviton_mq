@@ -8,8 +8,9 @@ defmodule GravitonMQ.AMQP10.Frame do
   Encoding requires `declared_size` to equal eight fixed-header octets plus the
   extended header and body lengths. `data_offset_words` must equal two plus
   the extended header length divided by four; padding is never added implicitly.
-  The encoder supports only the `:amqp` frame type and retains both binaries
-  exactly without interpreting their content.
+  The encoder emits `:amqp` frames by default and `:sasl` frames only when
+  called with `types: [:sasl]`; it retains both binaries exactly without
+  interpreting their content.
   """
 
   @enforce_keys [:declared_size, :data_offset_words, :type, :channel, :extended_header, :body]

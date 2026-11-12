@@ -90,4 +90,34 @@ defmodule GravitonMQ.AMQP10.Codec.FrameTest do
               details: %{}
             }} = Frame.decode(input, limits)
   end
+
+  test "SASL frames decode only when requested and are bounded by 512 octets" do
+    body = <<0x00, 0x53, 0x44, 0x45>>
+    sasl = <<12::32, 2, 1, 7::16, body::binary>>
+
+    assert {:ok, %AMQPFrame{type: :sasl, channel: 7, body: ^body}, <<>>} =
+             Frame.decode(sasl, Limits.default(), types: [:sasl])
+
+    assert_frame_error(sasl, :unsupported, :sasl_frame_not_supported, 5)
+
+    extended = <<16::32, 3, 1, 0::16, 1, 2, 3, 4, 9, 9, 9, 9>>
+
+    assert {:ok, %AMQPFrame{type: :sasl, extended_header: <<1, 2, 3, 4>>}, <<>>} =
+             Frame.decode(extended, Limits.default(), types: [:sasl])
+
+    maximum = <<512::32, 2, 1, 0::16>> <> :binary.copy(<<0>>, 504)
+
+    assert {:ok, %AMQPFrame{declared_size: 512}, <<>>} =
+             Frame.decode(maximum, Limits.default(), types: [:sasl])
+
+    # The bound applies even when the AMQP limit is larger, before any body.
+    assert {:error, %Error{class: :limit_exceeded, reason: :frame_size_limit, offset: 0}} =
+             Frame.decode(<<513::32, 2, 1, 0::16>>, Limits.default(), types: [:sasl])
+
+    assert {:error, %Error{class: :malformed, reason: :amqp_frame_in_sasl_layer, offset: 5}} =
+             Frame.decode(<<8::32, 2, 0, 0::16>>, Limits.default(), types: [:sasl])
+
+    assert {:error, %Error{class: :invalid_value, reason: :invalid_frame_types}} =
+             Frame.decode(sasl, Limits.default(), types: [:amqp, :sasl])
+  end
 end

@@ -1,10 +1,16 @@
 defmodule GravitonMQ.AMQP10.Codec.Frame do
   @moduledoc """
-  Encodes and decodes AMQP 1.0 frame envelopes without interpreting their bodies.
+  Encodes and decodes AMQP 1.0 and SASL frame envelopes without interpreting their bodies.
 
   The codec is process-free and preserves the extended header and opaque body
   exactly for later protocol layers. Encoding validates the supplied size and
   data offset against the actual bytes before allocating the wire envelope.
+
+  The `types:` option selects the expected layer: `[:amqp]` (default) or
+  `[:sasl]`. A SASL frame (type `0x01`, Part 5 §5.3.1) is bounded by
+  MIN-MAX-FRAME-SIZE (512 octets) in both directions regardless of
+  `Limits.max_frame_size`. Its channel bytes and extended header are ignored
+  data on decode; encoding requires channel 0 and data offset 2.
   """
 
   alias GravitonMQ.AMQP10.Codec
@@ -15,20 +21,33 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
   @fixed_header_size 8
   @max_wire_frame_size 0xFFFF_FFFF
   @max_data_offset_words 255
+  @sasl_max_frame_size 512
 
   @spec decode(binary()) :: Codec.decode_result(AMQPFrame.t())
   @spec decode(binary(), Limits.t()) :: Codec.decode_result(AMQPFrame.t())
-  def decode(input, limits \\ Limits.default()) when is_binary(input) do
-    with {:ok, limits} <- Limits.validate(limits, :frame_decode) do
-      decode_frame(input, limits)
+  @spec decode(binary(), Limits.t(), keyword()) :: Codec.decode_result(AMQPFrame.t())
+  def decode(input, limits \\ Limits.default(), options \\ []) when is_binary(input) do
+    with {:ok, limits} <- Limits.validate(limits, :frame_decode),
+         {:ok, type} <- frame_type(options, :frame_decode) do
+      decode_frame(input, limits, type)
     end
   end
 
   @spec encode(AMQPFrame.t()) :: Codec.encode_result()
   @spec encode(AMQPFrame.t(), Limits.t()) :: Codec.encode_result()
-  def encode(frame, limits \\ Limits.default()) do
-    with {:ok, limits} <- Limits.validate(limits, :frame_encode) do
-      encode_frame(frame, limits)
+  @spec encode(AMQPFrame.t(), Limits.t(), keyword()) :: Codec.encode_result()
+  def encode(frame, limits \\ Limits.default(), options \\ []) do
+    with {:ok, limits} <- Limits.validate(limits, :frame_encode),
+         {:ok, type} <- frame_type(options, :frame_encode) do
+      encode_frame(frame, limits, type)
+    end
+  end
+
+  defp frame_type(options, operation) do
+    case Keyword.get(options, :types, [:amqp]) do
+      [:amqp] -> {:ok, :amqp}
+      [:sasl] -> {:ok, :sasl}
+      _other -> {:error, Error.new(operation, :invalid_value, :invalid_frame_types)}
     end
   end
 
@@ -41,7 +60,8 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
            extended_header: extended_header,
            body: body
          } = frame,
-         limits
+         limits,
+         type
        ) do
     cond do
       not integer_between?(declared_size, @fixed_header_size, @max_wire_frame_size) ->
@@ -60,13 +80,13 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
         encode_error(:invalid_value, :invalid_body)
 
       true ->
-        encode_envelope(frame, limits)
+        encode_envelope(frame, limits, type)
     end
   end
 
-  defp encode_frame(_frame, _limits), do: encode_error(:invalid_value, :invalid_frame)
+  defp encode_frame(_frame, _limits, _type), do: encode_error(:invalid_value, :invalid_frame)
 
-  defp encode_envelope(frame, limits) do
+  defp encode_envelope(frame, limits, type) do
     header_size = @fixed_header_size + byte_size(frame.extended_header)
     size = header_size + byte_size(frame.body)
 
@@ -86,49 +106,60 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
       frame.declared_size != size ->
         encode_error(:invalid_value, :declared_size_mismatch)
 
-      frame.type == :sasl ->
+      frame.type == :sasl and type == :amqp ->
         encode_error(:unsupported, :sasl_frame_not_supported)
 
-      frame.type != :amqp ->
+      frame.type != type ->
         encode_error(:invalid_value, :invalid_frame_type)
+
+      type == :sasl and (frame.channel != 0 or frame.data_offset_words != 2) ->
+        encode_error(:invalid_value, :invalid_sasl_envelope)
+
+      type == :sasl and size > @sasl_max_frame_size ->
+        encode_error(:limit_exceeded, :frame_size_limit)
 
       true ->
         {:ok,
-         <<size::32, frame.data_offset_words, 0, frame.channel::16, frame.extended_header::binary,
-           frame.body::binary>>}
+         <<size::32, frame.data_offset_words, type_code(type), frame.channel::16,
+           frame.extended_header::binary, frame.body::binary>>}
     end
   end
+
+  defp type_code(:amqp), do: 0
+  defp type_code(:sasl), do: 1
 
   defp integer_between?(value, minimum, maximum),
     do: is_integer(value) and value >= minimum and value <= maximum
 
   defp encode_error(class, reason), do: {:error, Error.new(:frame_encode, class, reason)}
 
-  defp decode_frame(input, _limits) when byte_size(input) < @fixed_header_size do
+  defp decode_frame(input, _limits, _type) when byte_size(input) < @fixed_header_size do
     {:more, @fixed_header_size - byte_size(input)}
   end
 
   defp decode_frame(
-         <<size::32, data_offset_words, type, channel::16, _rest::binary>> = input,
-         limits
+         <<size::32, data_offset_words, type_code, channel::16, _rest::binary>> = input,
+         limits,
+         type
        ) do
     with :ok <- validate_size(size),
          :ok <- validate_data_offset(data_offset_words),
          :ok <- validate_frame_boundary(size, data_offset_words),
-         :ok <- validate_frame_limit(size, limits),
-         :ok <- validate_type(type) do
-      decode_complete_frame(input, size, data_offset_words, channel)
-    else
-      {:error, error} -> {:error, error}
+         :ok <- validate_frame_limit(size, maximum_frame_size(type, limits)),
+         {:ok, type} <- validate_type(type_code, type) do
+      decode_complete_frame(input, size, data_offset_words, channel, type)
     end
   end
 
-  defp decode_complete_frame(input, size, _data_offset_words, _channel)
+  defp maximum_frame_size(:sasl, _limits), do: @sasl_max_frame_size
+  defp maximum_frame_size(:amqp, limits), do: limits.max_frame_size
+
+  defp decode_complete_frame(input, size, _data_offset_words, _channel, _type)
        when byte_size(input) < size do
     {:more, size - byte_size(input)}
   end
 
-  defp decode_complete_frame(input, size, data_offset_words, channel) do
+  defp decode_complete_frame(input, size, data_offset_words, channel, type) do
     data_offset = data_offset_words * 4
     extended_header_size = data_offset - @fixed_header_size
     body_size = size - data_offset
@@ -141,7 +172,7 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
      %AMQPFrame{
        declared_size: size,
        data_offset_words: data_offset_words,
-       type: :amqp,
+       type: type,
        channel: channel,
        extended_header: extended_header,
        body: body
@@ -167,20 +198,24 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
     {:error, Error.new(:frame_decode, :malformed, :data_offset_beyond_frame, offset: 4)}
   end
 
-  defp validate_frame_limit(size, %{max_frame_size: max_frame_size}) when size <= max_frame_size,
-    do: :ok
+  defp validate_frame_limit(size, maximum) when size <= maximum, do: :ok
 
-  defp validate_frame_limit(_size, _limits) do
+  defp validate_frame_limit(_size, _maximum) do
     {:error, Error.new(:frame_decode, :limit_exceeded, :frame_size_limit, offset: 0)}
   end
 
-  defp validate_type(0), do: :ok
+  defp validate_type(0, :amqp), do: {:ok, :amqp}
+  defp validate_type(1, :sasl), do: {:ok, :sasl}
 
-  defp validate_type(1) do
+  defp validate_type(1, :amqp) do
     {:error, Error.new(:frame_decode, :unsupported, :sasl_frame_not_supported, offset: 5)}
   end
 
-  defp validate_type(_type) do
+  defp validate_type(0, :sasl) do
+    {:error, Error.new(:frame_decode, :malformed, :amqp_frame_in_sasl_layer, offset: 5)}
+  end
+
+  defp validate_type(_type_code, _type) do
     {:error, Error.new(:frame_decode, :unsupported, :unsupported_frame_type, offset: 5)}
   end
 end
