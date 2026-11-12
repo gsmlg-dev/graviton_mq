@@ -50,6 +50,38 @@ peers.
 
 ---
 
+## Amendment 2026-11-13 — upstream fixed (supersedes conflicting text below)
+
+`hell`/`ex_ssl` are pinned to **1.0.0-rc.17** (commit after `57e7914`), which
+fixes both S1b prerequisites; the coordinator verified each with a throwaway
+behavioural test before pinning:
+
+- **gsmlg-dev/http_fetch#168 fixed.** Hell redacts `password`, `key`,
+  `sni_fun` and nested `certs_keys`/`sni_hosts` secrets in listener telemetry
+  (`Hell.ServerConfig.redact_transport_options/1`). Therefore: **do not**
+  reject in-memory private keys and **do not** add the
+  `WORKAROUND(upstream): gsmlg-dev/http_fetch#168`; `TLSOptions` accepts
+  `key`/`cert` (top level, in `certs_keys` and `sni_hosts`) like the other
+  ex_ssl server options. Keep passing `password` as a closure (defence in
+  depth, cheap). T9 (privacy) must cover an in-memory key and a password:
+  neither may appear in `[:hell, :listener, :start|:stop]` metadata, Listener
+  / Connection / HellHandoff status, or crash logs.
+- **gsmlg-dev/http_fetch#169 fixed.** ex_ssl server option
+  `active_chunk_size` (positive integer, default `:infinity`; accepted by
+  `listen` and `setopts`) bounds every active-once delivery. Therefore: always
+  set `active_chunk_size` for TLS listeners to the protocol's per-delivery
+  bound equivalent to plain TCP — 16_384 bytes (the `buffer` the TCP listener
+  uses), so existing input-limit semantics are unchanged. T6 (pipelining while
+  slow) is a **normal** test that must pass: **no** `:requires_http_fetch_169`
+  tag, no test_helper exclusion, no "expected failure" step; it asserts that no
+  delivered chunk exceeds 16 KiB and that a well-behaved pipelining client is
+  not disconnected. `active_chunk_size` is owned by the runtime (not a user
+  TLS option) — reject it in user `tls_options` with
+  `{:unsupported_tls_option, :active_chunk_size}`.
+- Coordinator task C6 reduces to: none for #168/#169 (done by this amendment).
+- **Release block stays** until S1b is qualified in hosted CI (owner decision
+  2026-11-13, `docs/ACTIVE_SCOPE.md`).
+
 ## Execution rules (read before Task 0)
 
 ### Parallel checkout with S3

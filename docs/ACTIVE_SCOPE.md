@@ -20,7 +20,7 @@ of the following is unreleased (latest release `0.3.0`).
 | --- | --- | --- |
 | S0 hygiene | Complete | `5cb8c19` (load-tolerant runtime tests, compaction tests), `a9fd9cd` (current-status summary, stale statements). No GitHub issues were filed for the 2026-11-08 Low review findings. |
 | S1a owned transport (broker plain TCP on `hell`, client TLS on `ex_ssl`) | Complete | `c2accb9`..`8a368af`; hosted CI run 43150172756 for `8a368af` ([ADR 0009](adr/0009-owned-network-stack.md)) |
-| S1b broker TLS on `ex_ssl` | In progress (design `8a8a760`); qualification blocked on gsmlg-dev/http_fetch#169 | #161 fixed in `ex_ssl` 1.0.0-rc.14 (`ccac792`); #168 needed (in-memory keys rejected meanwhile) |
+| S1b broker TLS on `ex_ssl` | In progress (design `8a8a760`, plan amended for rc.17) | #161 fixed in rc.14; #168 and #169 fixed in rc.17 (pins updated 2026-11-13) |
 | S2 AMQP SASL ANONYMOUS/PLAIN | Complete | [S2 plan](superpowers/plans/2026-11-12-s2-amqp-sasl.md); hosted CI run 43177284736 for `4967d89`: Proton 0.40.0 → broker P1–P7, client → Artemis 2.41.0 (`security-enabled=true`) A1–A3 including wrong-password refusal |
 | S3 AMQP client reconnect, Manager block | Pending | — |
 | S4 MQTT Topic Alias, Subscription Identifiers, shared subscriptions | Complete | [S4 plan](superpowers/plans/2026-11-12-s4-mqtt-alias-subid-shared.md); same run: Paho 2.1.0 and mosquitto_pub/sub → broker, client → Mosquitto 2.1.2, T0 capability probes |
@@ -30,7 +30,7 @@ of the following is unreleased (latest release `0.3.0`).
 
 **Release block (owner decision 2026-11-13).** S1b removes the OTP `:ssl`
 broker TLS path. From the first S1b commit on `main` until
-gsmlg-dev/http_fetch#169 is released, pinned and broker TLS is requalified,
+broker TLS on ex_ssl is qualified in hosted CI (#169 is fixed in rc.17),
 no version may be released or published from `main`.
 
 Run 43177284736 (CI) and 43177284490 (Tests) passed 1,536 tests with 0
