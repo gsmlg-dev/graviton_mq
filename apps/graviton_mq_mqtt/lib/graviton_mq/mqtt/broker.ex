@@ -609,16 +609,28 @@ defmodule GravitonMQ.MQTT.Broker do
         if Map.has_key?(session.subscriptions, filter), do: 0, else: 0x11
       end)
 
+    removed =
+      Enum.filter(packet.filters, &match?(%{shared: {_, _}}, Map.get(session.subscriptions, &1)))
+
     session = %{session | subscriptions: Map.drop(session.subscriptions, packet.filters)}
     state = put_session(state, conn.client_id, session)
 
-    send_packet(
-      state,
-      id,
-      %Unsuback{packet_id: packet.packet_id, reason_codes: codes},
-      {:request_ack, packet.packet_id},
-      now
-    )
+    state =
+      if removed == [],
+        do: state,
+        else: redistribute(state, conn.client_id, {:unsubscribe, removed}, now)
+
+    {state, effects} =
+      send_packet(
+        state,
+        id,
+        %Unsuback{packet_id: packet.packet_id, reason_codes: codes},
+        {:request_ack, packet.packet_id},
+        now
+      )
+
+    {state, more} = if removed == [], do: {state, []}, else: pump(state, now)
+    {state, effects ++ more}
   end
 
   defp outgoing_ack(state, id, packet, now) do
@@ -1756,7 +1768,10 @@ defmodule GravitonMQ.MQTT.Broker do
         }
 
         state = put_session(state, conn.client_id, session)
-        if session.expiry == 0, do: end_session(state, conn.client_id, now), else: {state, []}
+
+        if session.expiry == 0,
+          do: end_session(state, conn.client_id, now),
+          else: {redistribute(state, conn.client_id, :connection_loss, now), []}
 
       _ ->
         {state, []}
@@ -1843,6 +1858,8 @@ defmodule GravitonMQ.MQTT.Broker do
         {state, []}
 
       session ->
+        state = redistribute(state, client_id, :session_end, now)
+
         state =
           case Map.get(state.wills, session.will_id) do
             nil ->
@@ -1861,6 +1878,83 @@ defmodule GravitonMQ.MQTT.Broker do
           end
 
         {%{state | sessions: Map.delete(state.sessions, client_id)}, []}
+    end
+  end
+
+  # MQTT 5 §4.8.2 responsibility for shared entries of a member whose session
+  # ends, whose connection is lost (spec MAY, Q6) or which leaves the group.
+  # Pure state change; moved entries are dispatched by the next pump (D5).
+  # A moved entry is appended to the receiving member's queue with a fresh
+  # entry identifier, so it is sent after that member's earlier entries and
+  # moved entries keep their relative order. Shared copies have no ordering
+  # obligation across members (MQTT-4.6.0-6 covers non-shared only).
+  defp redistribute(state, client_id, trigger, now) do
+    case Map.get(state.sessions, client_id) do
+      nil ->
+        state
+
+      session ->
+        {moving, staying} = Enum.split_with(session.deliveries, &movable?(&1, trigger))
+        state = put_session(state, client_id, %{session | deliveries: staying})
+        Enum.reduce(moving, state, &reroute(&2, &1, client_id, trigger, now))
+    end
+  end
+
+  defp movable?(%{shared: nil}, _trigger), do: false
+  # QoS1 always moves; QoS2 moves only if never sent (MQTT-4.8.2-5).
+  defp movable?(entry, :session_end), do: entry.qos == 1 or not entry.ever_sent
+  # Sent entries stay to resume with the same member (MQTT-4.8.2-4).
+  defp movable?(entry, :connection_loss), do: not entry.ever_sent
+
+  defp movable?(entry, {:unsubscribe, filters}),
+    do: entry.shared in filters and not entry.ever_sent
+
+  defp reroute(state, entry, from, trigger, now) do
+    members =
+      state.sessions
+      |> Enum.flat_map(fn {client_id, session} ->
+        case Map.get(session.subscriptions, entry.shared) do
+          %{shared: {_, _}} = sub when client_id != from -> [{client_id, sub}]
+          _ -> []
+        end
+      end)
+      |> Enum.sort_by(&elem(&1, 0))
+
+    tiers = if trigger == :connection_loss, do: :connected, else: :all
+
+    case select_member(state, entry.shared, members, entry.message, now, tiers) do
+      {client_id, sub} ->
+        moved = %{
+          entry
+          | id: state.next_id,
+            qos: min(entry.message.qos, sub.options.qos),
+            retain: entry.message.retain and sub.options.retain_as_published,
+            subscription_identifiers: List.wrap(sub.subscription_identifier),
+            phase: :publish,
+            release_order: nil,
+            packet_id: nil,
+            sending: false,
+            ever_sent: false,
+            dispatch: nil,
+            retry_at: nil
+        }
+
+        session = state.sessions[client_id]
+
+        state = %{
+          state
+          | next_id: state.next_id + 1,
+            share_cursor: Map.put(state.share_cursor, entry.shared, client_id)
+        }
+
+        put_session(state, client_id, %{session | deliveries: session.deliveries ++ [moved]})
+
+      nil when trigger == :connection_loss ->
+        session = state.sessions[from]
+        put_session(state, from, %{session | deliveries: session.deliveries ++ [entry]})
+
+      nil ->
+        %{state | shared_discarded: state.shared_discarded + 1}
     end
   end
 
