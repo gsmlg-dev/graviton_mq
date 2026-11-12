@@ -151,19 +151,36 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
   end
 
   # Messages the connection receives while nothing happens on its socket.
+  # The Connection is :sensitive, so tracing it delivers nothing. A :sys debug
+  # function runs inside the Connection and reports every non-system message
+  # its GenServer loop decodes ({:in, message}).
   defp idle_messages(connection, interval) do
-    :erlang.trace(connection, true, [:receive, {:tracer, self()}])
+    test = self()
+    reference = make_ref()
+
+    report = fn
+      ^reference, {:in, message}, _name ->
+        send(test, {reference, message})
+        reference
+
+      ^reference, _event, _name ->
+        reference
+    end
+
+    :ok = :sys.install(connection, {report, reference})
     Process.sleep(interval)
-    :erlang.trace(connection, false, [:receive])
+    # Synchronous: every report sent before removal is already in our mailbox.
+    :ok = :sys.remove(connection, report)
+
     # Acknowledgements of earlier ready hints are not socket wakeups.
-    connection |> collect_trace([]) |> Enum.reject(&match?({:"$gen_cast", :pump_ack}, &1))
+    reference |> collect_reports([]) |> Enum.reject(&match?({:"$gen_cast", :pump_ack}, &1))
   end
 
-  defp collect_trace(connection, acc) do
+  defp collect_reports(reference, acc) do
     receive do
-      {:trace, ^connection, :receive, message} -> collect_trace(connection, [message | acc])
+      {^reference, message} -> collect_reports(reference, [message | acc])
     after
-      20 -> Enum.reverse(acc)
+      0 -> Enum.reverse(acc)
     end
   end
 
