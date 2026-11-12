@@ -50,6 +50,7 @@ defmodule GravitonMQ.Client.AMQP10 do
        lost: nil,
        intent: Intent.new(),
        restore_pending: false,
+       connected_once: false,
        observer_monitor: Process.monitor(config.observer)
      }, {:continue, :connect}}
   end
@@ -561,8 +562,9 @@ defmodule GravitonMQ.Client.AMQP10 do
       {%{caller: :restore, item: key}, operations} ->
         state = %{state | operations: operations}
 
-        # A loss failed it: not reported, the entry stays declared (D13).
-        if state.endpoint.phase == :closed,
+        # A loss or a Close in flight failed it (a deadline can still fire
+        # while :closing): not reported, the entry stays declared (D13).
+        if state.endpoint.phase != :active,
           do: %{state | intent: Intent.interrupt(state.intent)},
           else: restored(state, key, result)
 
@@ -582,7 +584,7 @@ defmodule GravitonMQ.Client.AMQP10 do
 
   defp effect({:event, {:connected, _container} = event}, state) do
     notify(state, event)
-    start_restore(%{state | owner: :active, attempt: 0})
+    %{start_restore(%{state | owner: :active, attempt: 0}) | connected_once: true}
   end
 
   defp effect({:event, {:disconnected, reason} = event}, state) do
@@ -711,8 +713,10 @@ defmodule GravitonMQ.Client.AMQP10 do
     end
   end
 
-  # The first connection has nothing to restore and reports nothing (D13).
-  defp start_restore(%{endpoint: %{generation: 0}} = state), do: state
+  # The first successful connection has nothing to restore and reports
+  # nothing (D13). Generation counts attempts, so a failed first attempt
+  # must not make the next success look like a reconnect.
+  defp start_restore(%{connected_once: false} = state), do: state
 
   defp start_restore(state),
     do: %{state | intent: Intent.start(state.intent)} |> schedule_restore() |> finish_restore()
@@ -775,7 +779,10 @@ defmodule GravitonMQ.Client.AMQP10 do
   defp observe(state, {:session_ended, sid, _error}),
     do: %{state | intent: Intent.drop_session(state.intent, sid)}
 
-  defp observe(state, {:session_error, sid, _reason}),
+  # A session error once the Endpoint has left :active (for example a Begin
+  # deadline firing during an idle-timeout Close) is part of the loss, not
+  # the peer's decision: the entry stays declared (D13).
+  defp observe(%{endpoint: %{phase: :active}} = state, {:session_error, sid, _reason}),
     do: %{state | intent: Intent.drop_session(state.intent, sid)}
 
   defp observe(state, _event), do: state

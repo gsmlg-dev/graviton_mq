@@ -349,6 +349,45 @@ defmodule GravitonMQ.AMQP10Client.ReconnectTest do
              )
     end
 
+    test "a restoration timing out while the Endpoint is closing stays declared (D13)" do
+      {listener, client} =
+        client!(
+          idle_timeout_ms: 200,
+          operation_timeout_ms: 300,
+          close_timeout_ms: 500,
+          reconnect: [max_attempts: 2, delay: 20, max_delay: 20]
+        )
+
+      socket = handshake!(listener, client)
+      session!(client, socket, 1)
+      :ok = :gen_tcp.close(socket)
+      assert_receive {:graviton_mq, ^client, {:disconnected, :closed}}, 1_000
+      assert_receive {:graviton_mq, ^client, {:reconnecting, 1}}, 1_000
+      socket = handshake!(listener, client)
+
+      # Silent peer: the idle Close begins, then the Begin's deadline fires
+      # while the Endpoint is still closing.
+      assert {0, %Begin{}} = recv_frame!(socket)
+      assert {0, %Close{}} = recv_frame!(socket, 2_000)
+      assert_receive {:graviton_mq, ^client, {:disconnected, _}}, 2_000
+      refute_received {:graviton_mq, ^client, {:restored, {:session, 1}, _}}
+      assert %{intent: %{sessions: 1}} = Client.status(client)
+      # The budget reset when the peer's Open arrived.
+      assert_receive {:graviton_mq, ^client, {:reconnecting, 1}}, 1_000
+      socket = handshake!(listener, client)
+      assert {0, %Begin{}} = recv_frame!(socket)
+    end
+
+    test "the first successful connection reports no restoration, even after failed attempts" do
+      {listener, client} = client!(reconnect: [max_attempts: 2, delay: 20, max_delay: 20])
+      {:ok, refused} = :gen_tcp.accept(listener, 1_000)
+      :ok = :gen_tcp.close(refused)
+      assert_receive {:graviton_mq, ^client, {:reconnecting, 1}}, 1_000
+      handshake!(listener, client)
+      refute_receive {:graviton_mq, ^client, {:restore_complete, _}}, 200
+      assert %{owner: :active} = Client.status(client)
+    end
+
     test "host detach and End remove declarations at admission" do
       {listener, client} = client!(reconnect: [max_attempts: 1, delay: 20, max_delay: 20])
       socket = handshake!(listener, client)
