@@ -151,7 +151,67 @@ defmodule GravitonMQ.AMQP10.Codec.SASLTest do
       initial_response: Value.binary(:binary.copy("x", 600))
     }
 
-    assert {:error, %Error{class: :limit_exceeded} = error} = Codec.encode_frame(big)
-    refute inspect(error) =~ "600"
+    assert {:error, error} = Codec.encode_frame(big)
+
+    assert %Error{
+             operation: :sasl_encode,
+             class: :limit_exceeded,
+             reason: :value_size_limit,
+             offset: nil,
+             details: %{}
+           } = error
+
+    assert error.details == %{}
+  end
+
+  test "sixteen mechanisms are accepted" do
+    names = for i <- 1..16, do: Value.symbol("M#{i}")
+    body = %Mechanisms{server_mechanisms: Value.array(:symbol, names)}
+    assert {:ok, bytes} = Codec.encode(body)
+    assert {:ok, ^body} = Codec.decode(bytes)
+    assert length(Mechanisms.names(body)) == 16
+  end
+
+  test "non-binary input and descriptors outside the AMQP domain are refused" do
+    assert {:error, %Error{operation: :sasl_decode, reason: :invalid_sasl_body}} =
+             Codec.decode(:not_binary)
+
+    for code <- [0x0000_0001_0000_0041, 0xFFFF_FFFF_0000_0044] do
+      {:ok, bytes} =
+        ValueCodec.encode(Value.described(Value.ulong(code), Value.list([Value.symbol("PLAIN")])))
+
+      assert {:error, %Error{operation: :sasl_decode, reason: :not_a_sasl_body}} =
+               Codec.decode(bytes)
+    end
+  end
+
+  test "trailing explicit nulls are trimmed like absent fields" do
+    for {with_nulls, without} <- [
+          {%Init{
+             mechanism: Value.symbol("ANONYMOUS"),
+             initial_response: Value.null(),
+             hostname: Value.null()
+           }, %Init{mechanism: Value.symbol("ANONYMOUS")}},
+          {%Init{
+             mechanism: Value.symbol("ANONYMOUS"),
+             initial_response: nil,
+             hostname: Value.null()
+           }, %Init{mechanism: Value.symbol("ANONYMOUS")}},
+          {%Outcome{code: Value.ubyte(0), additional_data: Value.null()},
+           %Outcome{code: Value.ubyte(0)}}
+        ] do
+      assert Codec.encode(with_nulls) == Codec.encode(without)
+    end
+
+    # An interior null before a present field is preserved.
+    {:ok, interior} =
+      Codec.encode(%Init{
+        mechanism: Value.symbol("PLAIN"),
+        initial_response: Value.null(),
+        hostname: Value.string("h")
+      })
+
+    assert {:ok, %Init{initial_response: nil, hostname: %Value{value: "h"}}} =
+             Codec.decode(interior)
   end
 end

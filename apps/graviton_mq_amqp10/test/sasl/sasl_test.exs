@@ -42,11 +42,33 @@ defmodule GravitonMQ.AMQP10.SASLTest do
           %Outcome{code: Value.ubyte(1), additional_data: Value.binary(secret)}
         ] do
       refute inspect(body) =~ secret
-      refute inspect([body], structs: true) =~ secret
+      assert inspect(body) =~ ":redacted"
+
+      # Nested containers and unbounded/pretty options still dispatch to the
+      # redacting Inspect implementation.
+      for container <- [[body], %{body: body}, {:body, body}, [frame: [body: body]]],
+          options <- [[], [pretty: true, limit: :infinity, printable_limit: :infinity]] do
+        refute inspect(container, options) =~ secret
+      end
     end
 
     assert inspect(%Init{mechanism: Value.symbol("PLAIN")}) =~ "\"PLAIN\""
     refute inspect(%Init{mechanism: Value.symbol(secret)}) =~ secret
+  end
+
+  test "redaction is limited to the Inspect protocol, as documented" do
+    secret = "secret-#{System.unique_integer([:positive])}"
+    body = %Response{response: Value.binary(secret)}
+
+    # `structs: false` and Erlang term formatting bypass Inspect; callers must
+    # not keep these bodies in printable process state.
+    assert inspect(body, structs: false) =~ secret
+    assert :io_lib.format(~c"~p", [body]) |> IO.iodata_to_binary() =~ secret
+
+    for module <- [Init, Response, Challenge, Outcome, SASL.Plain] do
+      {:docs_v1, _, _, _, %{"en" => doc}, _, _} = Code.fetch_docs(module)
+      assert doc =~ "`inspect/1` only", "#{inspect(module)} must document the redaction limit"
+    end
   end
 
   test "codec errors accept the SASL operations" do

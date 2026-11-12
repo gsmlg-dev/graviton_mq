@@ -47,7 +47,8 @@ defmodule GravitonMQ.AMQP10.SASL.PlainTest do
 
       authzid = if :rand.uniform(2) == 1, do: nil, else: field.(1)
       {:ok, plain} = Plain.new(field.(1), field.(1), authzid)
-      assert {:ok, ^plain} = plain |> Plain.encode() |> Plain.parse()
+      assert {:ok, message} = Plain.encode(plain)
+      assert {:ok, ^plain} = Plain.parse(message)
     end
   end
 
@@ -57,6 +58,47 @@ defmodule GravitonMQ.AMQP10.SASL.PlainTest do
     assert {:error, :invalid_plain_message} = Plain.new("u", "")
     assert {:error, :invalid_plain_message} = Plain.new("u", "p\0q")
     assert {:error, :invalid_plain_message} = Plain.new(:u, "p")
+  end
+
+  test "fields of exactly 255 octets are accepted and 256 octets are refused" do
+    max = String.duplicate("a", 255)
+    over = String.duplicate("a", 256)
+
+    assert {:ok, %Plain{username: ^max, password: ^max, authzid: ^max} = plain} =
+             Plain.new(max, max, max)
+
+    assert {:ok, message} = Plain.encode(plain)
+    assert byte_size(message) == 767
+    assert {:ok, ^plain} = Plain.parse(message)
+
+    for {username, password, authzid} <- [{over, "p", nil}, {"u", over, nil}, {"u", "p", over}] do
+      assert Plain.new(username, password, authzid) == {:error, :invalid_plain_message}
+
+      assert Plain.parse((authzid || "") <> <<0>> <> username <> <<0>> <> password) ==
+               {:error, :invalid_plain_message}
+    end
+  end
+
+  test "encode re-validates fields and never raises or emits ambiguous bytes" do
+    for plain <- [
+          %Plain{username: "a\0b", password: "p"},
+          %Plain{username: "u", password: "p\0q"},
+          %Plain{username: "u", password: "p", authzid: "z\0"},
+          %Plain{username: "", password: "p"},
+          %Plain{username: "u", password: ""},
+          %Plain{username: String.duplicate("u", 256), password: "p"},
+          %Plain{username: "u", password: <<0xFF>>},
+          %Plain{username: :user, password: "sentinel-password"},
+          %Plain{username: "u", password: ~c"sentinel-password"},
+          %Plain{username: "u", password: "p", authzid: :admin}
+        ] do
+      assert Plain.encode(plain) == {:error, :invalid_plain_message}
+    end
+
+    assert Plain.encode(%Plain{username: "u", password: "p", authzid: ""}) ==
+             {:ok, <<0, "u", 0, "p">>}
+
+    assert Plain.encode(:not_plain) == {:error, :invalid_plain_message}
   end
 
   test "inspect never prints any credential field" do

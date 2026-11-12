@@ -16,4 +16,24 @@ defmodule GravitonMQ.AMQP10.SASL.AnonymousTest do
       assert Anonymous.parse(trace) == {:error, :invalid_anonymous_message}
     end
   end
+
+  test "control characters are prohibited by the RFC 4505 trace profile" do
+    for trace <- [
+          <<0>>,
+          "a\0b",
+          "\e[31m",
+          "line\nbreak",
+          "tab\there",
+          "\r",
+          <<0x1F>>,
+          "del\x7F",
+          "next\u0085line",
+          <<0xC2, 0x80>>,
+          <<0xC2, 0x9F>>
+        ] do
+      assert Anonymous.parse(trace) == {:error, :invalid_anonymous_message}
+    end
+
+    assert Anonymous.parse(" ~\u00A0é") == {:ok, " ~\u00A0é"}
+  end
 end

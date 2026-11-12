@@ -5,7 +5,8 @@ defmodule GravitonMQ.AMQP10.Codec.SASL do
   A SASL frame body holds exactly one described list with no trailing bytes.
   Decoding accepts numeric (`ulong 0x40`–`0x44`) and symbolic descriptors and
   retains exact tagged field values; encoding emits the numeric descriptor and
-  may omit trailing absent fields. Values are bounded by the 512-octet SASL
+  omits trailing absent fields (`nil` or an explicit null) for a canonical
+  encoding, preserving interior nulls. Values are bounded by the 512-octet SASL
   frame. Errors carry only the body name and field index — never field bytes,
   lengths or values. `sasl-code` is not whitelisted.
   """
@@ -76,7 +77,7 @@ defmodule GravitonMQ.AMQP10.Codec.SASL do
       fields =
         fields
         |> Enum.reverse()
-        |> Enum.drop_while(&is_nil/1)
+        |> Enum.drop_while(&absent?/1)
         |> Enum.reverse()
         |> Enum.map(&(&1 || Value.null()))
 

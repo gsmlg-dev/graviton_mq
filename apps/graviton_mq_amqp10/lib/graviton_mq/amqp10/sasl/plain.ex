@@ -4,8 +4,14 @@ defmodule GravitonMQ.AMQP10.SASL.Plain do
 
   `username` (authcid) and `password` are 1..255 octets, `authzid` 0..255
   octets (empty means absent); all are valid UTF-8 without NUL. Failures carry
-  no detail. `Inspect` prints no field. The authorization identity is passed
-  through; the host decides whether it is acceptable.
+  no detail. The authorization identity is passed through; the host decides
+  whether it is acceptable. `encode/1` re-validates every field, so a
+  hand-built struct can never produce ambiguous bytes.
+
+  Redaction covers `inspect/1` only: `Inspect` prints no field, but
+  `inspect(plain, structs: false)`, Erlang `~p` formatting, crash reports and
+  `:sys.get_status/1` print the raw struct. Callers must not keep a `Plain` (or
+  its fields) in process state that can be printed.
   """
 
   @enforce_keys [:username, :password]
@@ -36,9 +42,14 @@ defmodule GravitonMQ.AMQP10.SASL.Plain do
 
   def parse(_message), do: {:error, :invalid_plain_message}
 
-  @spec encode(t()) :: binary()
-  def encode(%__MODULE__{username: username, password: password, authzid: authzid}),
-    do: (authzid || "") <> <<0>> <> username <> <<0>> <> password
+  @spec encode(t()) :: {:ok, binary()} | {:error, :invalid_plain_message}
+  def encode(%__MODULE__{username: username, password: password, authzid: authzid}) do
+    if field?(username, 1) and field?(password, 1) and (is_nil(authzid) or field?(authzid, 0)),
+      do: {:ok, (authzid || "") <> <<0>> <> username <> <<0>> <> password},
+      else: {:error, :invalid_plain_message}
+  end
+
+  def encode(_plain), do: {:error, :invalid_plain_message}
 
   defp field?(value, minimum),
     do:

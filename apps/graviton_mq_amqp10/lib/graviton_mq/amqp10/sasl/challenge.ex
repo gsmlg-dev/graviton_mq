@@ -1,5 +1,13 @@
 defmodule GravitonMQ.AMQP10.SASL.Challenge do
-  @moduledoc "Immutable `sasl-challenge` body (descriptor `0x00000000:0x00000042`). Never inspected."
+  @moduledoc """
+  Immutable `sasl-challenge` body (descriptor `0x00000000:0x00000042`).
+
+  `challenge` may carry credentials; `Inspect` never prints it.
+
+  Redaction covers `inspect/1` only. `inspect(body, structs: false)`, Erlang
+  `~p` formatting, crash reports and `:sys.get_status/1` print the raw fields;
+  callers must not keep this body in process state that can be printed.
+  """
 
   @enforce_keys [:challenge]
   defstruct [:challenge]

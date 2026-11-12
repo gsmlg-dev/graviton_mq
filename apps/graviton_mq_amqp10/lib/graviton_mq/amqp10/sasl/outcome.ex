@@ -3,6 +3,10 @@ defmodule GravitonMQ.AMQP10.SASL.Outcome do
   Immutable `sasl-outcome` body (descriptor `0x00000000:0x00000044`).
 
   `code` is a tagged `ubyte` and is not whitelisted (5..255 are data).
+
+  Redaction covers `inspect/1` only. `inspect(body, structs: false)`, Erlang
+  `~p` formatting, crash reports and `:sys.get_status/1` print the raw fields;
+  callers must not keep this body in process state that can be printed.
   """
 
   @enforce_keys [:code]

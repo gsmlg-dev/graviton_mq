@@ -1,5 +1,13 @@
 defmodule GravitonMQ.AMQP10.SASL.Response do
-  @moduledoc "Immutable `sasl-response` body (descriptor `0x00000000:0x00000043`). Never inspected."
+  @moduledoc """
+  Immutable `sasl-response` body (descriptor `0x00000000:0x00000043`).
+
+  `response` may carry credentials; `Inspect` never prints it.
+
+  Redaction covers `inspect/1` only. `inspect(body, structs: false)`, Erlang
+  `~p` formatting, crash reports and `:sys.get_status/1` print the raw fields;
+  callers must not keep this body in process state that can be printed.
+  """
 
   @enforce_keys [:response]
   defstruct [:response]
