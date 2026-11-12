@@ -3,8 +3,11 @@ Code.require_file("../../../graviton_mq_runtime/test/support/tls.exs", __DIR__)
 defmodule GravitonMQ.MQTTBroker.TLSTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias GravitonMQ.MQTT.Codec.Packet
   alias GravitonMQ.MQTT.Packet.{Connack, Disconnect, Suback, Unsuback}
+  alias GravitonMQ.Runtime.MQTT.Listener
   alias GravitonMQ.Runtime.Test.TLS
 
   @compile {:no_warn_undefined, :ssl}
@@ -236,6 +239,189 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
     assert %Disconnect{reason_code: 0x95} = receive_packet(socket)
   end
 
+  # T7
+  test "a TLS listener failure closes its own connections; the TCP sibling and owner state survive",
+       %{certificates: certificates} do
+    instance =
+      broker(certificates,
+        listeners: [
+          tls_listener(certificates),
+          [id: :tcp, transport: :tcp, ip: {127, 0, 0, 1}, port: 0]
+        ]
+      )
+
+    %{owner: owner} = status(instance)
+    tls = tls_connected(port(instance, :tls), certificates, "tls-casualty")
+    tcp = tcp_connected(port(instance, :tcp), "tcp-survivor")
+    listener = listener!(instance, :tls)
+    listener_monitor = monitor!(listener)
+
+    capture_log(fn ->
+      Process.exit(listener, :kill)
+      assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+      assert {:error, _closed} = :ssl.recv(tls, 0, 2_000)
+
+      assert eventually(fn ->
+               replacement = find_listener(instance, :tls)
+               is_pid(replacement) and replacement != listener
+             end)
+
+      :ok = :gen_tcp.send(tcp, <<0xC0, 0>>)
+      assert {:ok, <<0xD0, 0>>} = :gen_tcp.recv(tcp, 2, 1_000)
+      assert eventually(fn -> match?(%{owner: ^owner, connections: 1}, status(instance)) end)
+
+      replacement = tls_connected(port(instance, :tls), certificates, "tls-after")
+      assert_ping(replacement)
+    end)
+  end
+
+  # T8
+  test "a TLS listener on a fixed port rebinds the same port after repeated kills",
+       %{certificates: certificates} do
+    port = free_port()
+    instance = broker(certificates, listeners: [tls_listener(certificates, [], :tls, port)])
+    %{owner: owner} = status(instance)
+
+    capture_log(fn ->
+      for round <- 1..3 do
+        listener = listener!(instance, :tls)
+        listener_monitor = monitor!(listener)
+        Process.exit(listener, :kill)
+        assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+
+        assert eventually(fn ->
+                 replacement = find_listener(instance, :tls)
+                 is_pid(replacement) and replacement != listener
+               end)
+
+        assert %{owner: ^owner} = status(instance)
+        assert port(instance) == port
+        assert_ping(tls_connected(port, certificates, "fixed-port-#{round}"))
+      end
+    end)
+  end
+
+  # T9 (spec §4.10). gsmlg-dev/http_fetch#168 is fixed in rc.17: Hell redacts
+  # secret transport options, so an in-memory key is accepted. The password
+  # is still passed to ex_ssl as a closure.
+  test "a key password and an in-memory key never reach Hell telemetry, process status or logs",
+       %{certificates: certificates} do
+    password = TLS.password()
+    handler = "s1b-privacy-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        [[:hell, :listener, :start], [:hell, :listener, :stop]],
+        &__MODULE__.forward_telemetry/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+    # The detector itself finds an unredacted key.
+    assert leaks?([key: {:PrivateKeyInfo, certificates.key_der}], certificates.key_der)
+
+    in_memory = [
+      id: :key,
+      transport: :tls,
+      ip: {127, 0, 0, 1},
+      port: 0,
+      tls_options: [
+        certfile: certificates.certificate,
+        key: {:PrivateKeyInfo, certificates.key_der}
+      ]
+    ]
+
+    log =
+      capture_log(fn ->
+        instance =
+          broker(certificates,
+            listeners: [
+              tls_listener(certificates, keyfile: certificates.encrypted_key, password: password),
+              in_memory
+            ]
+          )
+
+        for id <- [:tls, :key] do
+          socket = tls_connected(port(instance, id), certificates, "privacy-#{id}")
+          assert_ping(socket)
+          connection = connection!(instance)
+          listener = listener!(instance, id)
+          server = :sys.get_state(listener).socket
+          hell_listener = child(server, :listener)
+          assert {:ok, handlers} = Hell.connection_pids(server)
+
+          terms =
+            [
+              :sys.get_status(listener),
+              :sys.get_status(connection),
+              :sys.get_state(hell_listener),
+              :sys.get_status(hell_listener),
+              :sys.get_state(server),
+              Supervisor.which_children(server)
+            ] ++ Enum.map(handlers, &:sys.get_status/1)
+
+          for term <- terms, secret <- [password, certificates.key_der] do
+            refute leaks?(term, secret)
+          end
+
+          :ok = :ssl.close(socket)
+          assert eventually(fn -> status(instance).connections == 0 end)
+        end
+
+        for id <- [:tls, :key] do
+          listener = listener!(instance, id)
+          listener_monitor = monitor!(listener)
+          Process.exit(listener, :kill)
+          assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+
+          assert eventually(fn ->
+                   replacement = find_listener(instance, id)
+                   is_pid(replacement) and replacement != listener
+                 end)
+        end
+      end)
+
+    refute leaks?(log, password)
+    refute leaks?(log, certificates.key_der)
+    events = telemetry_events([])
+    assert Enum.count(events, &match?({[:hell, :listener, :start], _}, &1)) >= 4
+    assert Enum.any?(events, &match?({[:hell, :listener, :stop], _}, &1))
+
+    for {_event, metadata} <- events, secret <- [password, certificates.key_der] do
+      refute leaks?(metadata, secret)
+    end
+  end
+
+  def forward_telemetry(event, _measurements, metadata, test),
+    do: send(test, {:telemetry, event, metadata})
+
+  defp telemetry_events(events) do
+    receive do
+      {:telemetry, event, metadata} -> telemetry_events([{event, metadata} | events])
+    after
+      0 -> events
+    end
+  end
+
+  # A secret leaks if its bytes, or its inspected form, appear in the printed
+  # term. The inspected prefix (without the closing ">>") also catches a
+  # truncated binary in a log line.
+  defp leaks?(term, secret) do
+    printed =
+      if is_binary(term),
+        do: term,
+        else: inspect(term, limit: :infinity, printable_limit: :infinity)
+
+    prefix =
+      secret
+      |> binary_part(0, min(byte_size(secret), 24))
+      |> inspect(limit: :infinity)
+      |> String.trim_trailing(">>")
+
+    String.contains?(printed, secret) or String.contains?(printed, prefix)
+  end
+
   # Helpers (used by all MQTT TLS tests).
 
   defp broker(certificates, options \\ [], tls \\ []) do
@@ -258,12 +444,12 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
     )
   end
 
-  defp tls_listener(certificates, tls),
+  defp tls_listener(certificates, tls \\ [], id \\ :tls, port \\ 0),
     do: [
-      id: :tls,
+      id: id,
       transport: :tls,
       ip: {127, 0, 0, 1},
-      port: 0,
+      port: port,
       tls_options: TLS.listener_options(certificates, tls)
     ]
 
@@ -282,6 +468,14 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
     on_exit(fn -> :ssl.close(socket) end)
     assert :ok = :ssl.send(socket, connect_packet(client_id))
     assert %Connack{reason_code: 0} = receive_packet(socket)
+    socket
+  end
+
+  defp tcp_connected(port, client_id) do
+    {:ok, socket} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1_000)
+    on_exit(fn -> :gen_tcp.close(socket) end)
+    :ok = :gen_tcp.send(socket, connect_packet(client_id))
+    {:ok, <<0x20, _rest::binary>>} = :gen_tcp.recv(socket, 0, 1_000)
     socket
   end
 
@@ -342,6 +536,16 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
   # The MQTT Connection state is a plain map; :sys.get_state/1 bypasses the
   # redacting format_status/1 and also works while the process is suspended.
   defp server_socket(connection), do: :sys.get_state(connection).socket
+
+  defp listener!(instance, id),
+    do: child(child(mqtt_supervisor(instance), :listeners), {Listener, id})
+
+  defp find_listener(instance, id) do
+    case find_child(mqtt_supervisor(instance), :listeners) do
+      nil -> nil
+      listeners -> find_child(listeners, {Listener, id})
+    end
+  end
 
   defp child(supervisor, id) do
     pid = find_child(supervisor, id)
@@ -423,6 +627,13 @@ defmodule GravitonMQ.MQTTBroker.TLSTest do
     monitor = Process.monitor(pid)
     _ = :sys.get_state(pid)
     monitor
+  end
+
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 
   defp eventually(predicate, timeout \\ 2_000),

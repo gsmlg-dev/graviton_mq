@@ -17,6 +17,8 @@ end
 defmodule GravitonMQ.AMQP10TLSTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias GravitonMQ.AMQP10.Value
   alias GravitonMQ.AMQP10.Codec.{Frame, Limits, Performative}
   alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
@@ -24,6 +26,7 @@ defmodule GravitonMQ.AMQP10TLSTest do
   alias GravitonMQ.AMQP10.Performative.Open
   alias GravitonMQ.AMQP10.SASL.{Init, Mechanisms, Outcome, Plain}
   alias GravitonMQ.AMQP10TLSTest.Auth
+  alias GravitonMQ.Runtime.AMQP10.Listener
   alias GravitonMQ.Runtime.Test.TLS
 
   @compile {:no_warn_undefined, :ssl}
@@ -116,6 +119,171 @@ defmodule GravitonMQ.AMQP10TLSTest do
     assert %{active: 0} = DynamicSupervisor.count_children(connections(broker))
   end
 
+  # T7
+  test "a TLS listener failure closes its own connections; the TCP sibling and queues survive",
+       %{certificates: certificates} do
+    broker =
+      broker!(certificates,
+        listeners: [
+          tls_listener(certificates),
+          [id: :tcp, transport: :tcp, ip: {127, 0, 0, 1}, port: 0]
+        ]
+      )
+
+    tls = opened!(port(broker), certificates)
+
+    {:ok, tcp} =
+      :gen_tcp.connect({127, 0, 0, 1}, port(broker, :tcp), [:binary, active: false], 1_000)
+
+    on_exit(fn -> :gen_tcp.close(tcp) end)
+    :ok = :gen_tcp.send(tcp, @amqp)
+    assert {:ok, @amqp} = :gen_tcp.recv(tcp, 8, 1_000)
+    listener = listener!(broker, :tls)
+    listener_monitor = monitor!(listener)
+
+    capture_log(fn ->
+      Process.exit(listener, :kill)
+      assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+      assert {:error, _closed} = :ssl.recv(tls, 0, 2_000)
+
+      assert eventually(fn ->
+               replacement = find_listener(broker, :tls)
+               is_pid(replacement) and replacement != listener
+             end)
+
+      # The TCP sibling's connection is still open (no close, no EOF).
+      assert {:ok, _broker_open} = :gen_tcp.recv(tcp, 0, 1_000)
+      assert {:error, :timeout} = :gen_tcp.recv(tcp, 0, 100)
+      assert {:ok, %{queues: %{"q" => _}}} = GravitonMQ.amqp10_status(broker)
+      opened!(port(broker), certificates)
+    end)
+  end
+
+  # T8
+  test "a TLS listener on a fixed port rebinds the same port after repeated kills",
+       %{certificates: certificates} do
+    port = free_port()
+    broker = broker!(certificates, listeners: [tls_listener(certificates, [], :tls, port)])
+
+    capture_log(fn ->
+      for _round <- 1..3 do
+        listener = listener!(broker, :tls)
+        listener_monitor = monitor!(listener)
+        Process.exit(listener, :kill)
+        assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+
+        assert eventually(fn ->
+                 replacement = find_listener(broker, :tls)
+                 is_pid(replacement) and replacement != listener
+               end)
+
+        assert port(broker) == port
+        opened!(port, certificates)
+      end
+    end)
+  end
+
+  # T9 (AMQP config path; spec §4.10). gsmlg-dev/http_fetch#168 is fixed in
+  # rc.17, so an in-memory key is accepted; a malformed password is refused
+  # before any socket opens; neither secret reaches status or logs.
+  test "an in-memory key and a key password are kept out of status and logs; a bad password is refused",
+       %{certificates: certificates} do
+    password = TLS.password()
+    assert leaks?([key: {:PrivateKeyInfo, certificates.key_der}], certificates.key_der)
+
+    assert {:error, {:invalid_tls_option, :password}} =
+             GravitonMQ.Runtime.Supervisor.start_link(
+               name: nil,
+               amqp10: [
+                 container_id: "password-refused",
+                 auth: :anonymous,
+                 queues: ["q"],
+                 listeners: [
+                   [
+                     transport: :tls,
+                     tls_options: TLS.listener_options(certificates, password: 4_242)
+                   ]
+                 ]
+               ]
+             )
+
+    in_memory = [
+      id: :key,
+      transport: :tls,
+      ip: {127, 0, 0, 1},
+      port: 0,
+      tls_options: [
+        certfile: certificates.certificate,
+        key: {:PrivateKeyInfo, certificates.key_der}
+      ]
+    ]
+
+    log =
+      capture_log(fn ->
+        broker =
+          broker!(certificates,
+            listeners: [
+              tls_listener(certificates, keyfile: certificates.encrypted_key, password: password),
+              in_memory
+            ]
+          )
+
+        for id <- [:tls, :key] do
+          socket = opened!(port(broker, id), certificates)
+          connection = connection!(broker)
+          listener = listener!(broker, id)
+          assert {:ok, handlers} = Hell.connection_pids(:sys.get_state(listener).socket)
+
+          terms =
+            [:sys.get_status(listener), :sys.get_status(connection)] ++
+              Enum.map(handlers, &:sys.get_status/1)
+
+          for term <- terms, secret <- [password, certificates.key_der] do
+            refute leaks?(term, secret)
+          end
+
+          :ok = :ssl.close(socket)
+
+          assert eventually(fn ->
+                   DynamicSupervisor.count_children(connections(broker)).active == 0
+                 end)
+        end
+
+        for id <- [:tls, :key] do
+          listener = listener!(broker, id)
+          listener_monitor = monitor!(listener)
+          Process.exit(listener, :kill)
+          assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+
+          assert eventually(fn ->
+                   replacement = find_listener(broker, id)
+                   is_pid(replacement) and replacement != listener
+                 end)
+        end
+      end)
+
+    refute leaks?(log, password)
+    refute leaks?(log, certificates.key_der)
+  end
+
+  # A secret leaks if its bytes, or its inspected form, appear in the printed
+  # term. The inspected prefix (without the closing ">>") also catches a
+  # truncated binary in a log line.
+  defp leaks?(term, secret) do
+    printed =
+      if is_binary(term),
+        do: term,
+        else: inspect(term, limit: :infinity, printable_limit: :infinity)
+
+    prefix =
+      secret
+      |> binary_part(0, min(byte_size(secret), 24))
+      |> inspect(limit: :infinity)
+      |> String.trim_trailing(">>")
+
+    String.contains?(printed, secret) or String.contains?(printed, prefix)
+  end
+
   # Helpers (used by all AMQP TLS tests).
 
   defp broker!(certificates, options \\ [], tls \\ []) do
@@ -136,18 +304,18 @@ defmodule GravitonMQ.AMQP10TLSTest do
     )
   end
 
-  defp tls_listener(certificates, tls),
+  defp tls_listener(certificates, tls \\ [], id \\ :tls, port \\ 0),
     do: [
-      id: :tls,
+      id: id,
       transport: :tls,
       ip: {127, 0, 0, 1},
-      port: 0,
+      port: port,
       tls_options: TLS.listener_options(certificates, tls)
     ]
 
-  defp port(broker) do
+  defp port(broker, id \\ :tls) do
     assert {:ok, %{listeners: listeners}} = GravitonMQ.amqp10_status(broker)
-    %{port: port} = Enum.find(listeners, &(&1.id == :tls))
+    %{port: port} = Enum.find(listeners, &(&1.id == id))
     port
   end
 
@@ -244,6 +412,16 @@ defmodule GravitonMQ.AMQP10TLSTest do
     end
   end
 
+  defp listener!(broker, id),
+    do: child(child(amqp_supervisor(broker), :listeners), {Listener, id})
+
+  defp find_listener(broker, id) do
+    case find_child(amqp_supervisor(broker), :listeners) do
+      nil -> nil
+      listeners -> find_child(listeners, {Listener, id})
+    end
+  end
+
   defp child(supervisor, id) do
     pid = find_child(supervisor, id)
     assert is_pid(pid)
@@ -262,6 +440,19 @@ defmodule GravitonMQ.AMQP10TLSTest do
       {:ok, _bytes} -> closed(raw, deadline)
       {:error, reason} -> reason
     end
+  end
+
+  defp monitor!(pid) do
+    monitor = Process.monitor(pid)
+    _ = :sys.get_state(pid)
+    monitor
+  end
+
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 
   defp eventually(predicate, timeout \\ 2_000),
