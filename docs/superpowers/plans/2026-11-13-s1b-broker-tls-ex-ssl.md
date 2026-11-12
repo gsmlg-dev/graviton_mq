@@ -4176,3 +4176,56 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
   `find_listener/2`, `monitor!/1`, `free_port/0`; `broker!/2`,
   `tls_listener/1`, `port/1`); the `Auth` module is kept. The AMQP listener
   comment gets the same "a listener" wording.
+
+### Tasks 8–10 (2026-11-12)
+
+- **Task 8.** `1503a68` test(mqtt): T2/T3/T4 regression tests passed on
+  their first run (6 tests, 0 failures; three runs). The TLS 1.2 refusal is
+  the planned `{:tls_alert, {:protocol_version, _}}` shape. Restored only the
+  helpers these tests use (new `refused!/1`, `closed/2`); `broker/3` already
+  takes `tls`.
+- **Task 9.** `1001267` test(amqp): T2/T3/T4 passed on their first run
+  (5 tests, 0 failures; three runs). Restored the SASL aliases, `Limits`,
+  `Auth` alias, `@sasl`, `plain!/1`, `read_sasl!/1`, `broker!/3` and
+  `tls_listener/2` (`certificates, tls`; id `:tls`, port 0); `port/1` kept.
+- **Task 10.** `66f0f28` test(runtime): shared-file check of
+  `connection_input_test.exs` clean. AMQP T5: 5 tests, 0 failures (three
+  runs). MQTT T5: 8 tests, 0 failures (three runs) after two test
+  deviations, both diagnosed with throwaway instrumentation:
+  - **Blocked-Writer precondition strengthened.** A single stack sample
+    with an `SSL` frame catches an ordinary in-progress `SSL.send` (a
+    synchronous ex_ssl call): 500 ms after `fill_until_blocked` returned,
+    the Writer was idle in `gen_server:loop`, so the send_timeout case
+    failed (DOWN never arrived). `blocked_in_tls_send?/1` now requires the
+    Writer to be inside `SSL` on two samples 200 ms apart with its mailbox
+    not shrunk (deliveries keep arriving asynchronously, so it may grow).
+    Same predicate in the AMQP helpers. With it the Writer is genuinely
+    blocked (the server carrier reported `send_pend` > 0).
+  - **MQTT DISCONNECT assertion.** With a genuinely blocked Writer, the
+    planned "DOWN within 2 s (< send_timeout 3 s)" failed every run. This is
+    **not** an ex_ssl #161 regression: the carrier read the record
+    (`recv_oct` +24), ex_ssl decrypted it (read sequence 3) and delivered it,
+    the MQTT Connection stayed responsive, and `status/1` showed
+    `sessions: 0, connections: 1` 250 ms after the DISCONNECT. The broker
+    defers `{:mqtt_close, _}` while `connection.pending` holds unsettled sends
+    (`runtime/mqtt/broker.ex` `close_connection/5`, non-forced), on any
+    transport, so the Connection closes when the blocked write settles at
+    `send_timeout`. The test now asserts the #161 property: the session ends
+    within 2 s while the Writer is still blocked in `SSL` and the connection
+    is still counted, then DOWN within 4 s. No upstream routing (not a
+    blocker). The AMQP Close case passes as planned (no such deferral).
+  - Config accepted `max_writer_bytes: 8_388_608` and
+    `max_pending_bytes: 16_777_216` unchanged.
+- **Regressions.** Runtime `test/amqp10/{connection_input,connection,writer}_test.exs`
+  + `hell_handoff_test.exs` + `test/mqtt`: 108 tests, 0 failures. Umbrella
+  `mqtt_tls` + `amqp10_tls` + `mqtt_connection` + `amqp10_sasl`: 40 tests,
+  0 failures. No compile warnings in the touched test files.
+- **Hand-off to Tasks 11–12** (helpers still absent, add with their tests):
+  MQTT `import ExUnit.CaptureLog`, aliases `Disconnect`, `Unsuback`,
+  `Listener`; `tcp_connected/2`, `listener!/2`, `find_listener/2`,
+  `free_port/0`, and `tls_listener/4` (id/port; currently
+  `tls_listener(certificates, tls)`). AMQP `import ExUnit.CaptureLog`, alias
+  `Listener`; `listener!/2`, `find_listener/2`, `monitor!/1`, `free_port/0`,
+  `tls_listener` id/port and `port(broker, id)`. MQTT already has
+  `monitor!/1`, `closed/2`, `refused!/1`, `subscribe!/1`, `in_tls_send/1`;
+  T6 can reuse the strengthened blocked predicate.
