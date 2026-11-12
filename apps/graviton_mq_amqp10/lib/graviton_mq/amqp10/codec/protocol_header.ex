@@ -49,8 +49,10 @@ defmodule GravitonMQ.AMQP10.Codec.ProtocolHeader do
     end
   end
 
-  def recognize(_input, _accept),
+  def recognize(input, _accept) when is_binary(input),
     do: {:error, Error.new(:protocol_header, :invalid_value, :invalid_accept)}
+
+  def recognize(_input, _accept), do: magic_error()
 
   defp protocol_header(protocol_id, 1, 0, 0, rest, accept) when protocol_id in [0, 3] do
     if protocol_id in accept,

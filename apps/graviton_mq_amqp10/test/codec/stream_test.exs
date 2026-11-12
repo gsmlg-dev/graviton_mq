@@ -157,4 +157,35 @@ defmodule GravitonMQ.AMQP10.Codec.StreamTest do
     assert [{:protocol_header, %ProtocolHeader{protocol_id: 3}}, {:frame, %Frame{type: :sasl}}] =
              items
   end
+
+  test "each phase refuses the other layer's frame type" do
+    {:ok, amqp} = Stream.new(Limits.default(), accept: [0, 3])
+    {:ok, _, amqp, <<>>} = Stream.next(amqp, @header)
+
+    assert {:error, %Error{class: :unsupported, reason: :sasl_frame_not_supported, offset: 5}} =
+             Stream.next(amqp, @outcome_frame)
+
+    {:ok, sasl} = Stream.new(Limits.default(), accept: [0, 3])
+    {:ok, _, sasl, <<>>} = Stream.next(sasl, @sasl_header)
+
+    assert {:error, %Error{class: :malformed, reason: :amqp_frame_in_sasl_layer, offset: 5}} =
+             Stream.next(sasl, @heartbeat)
+  end
+
+  test "header re-entry is accepted only in the SASL frame phase" do
+    {:ok, stream} = Stream.new(Limits.default(), accept: [0, 3])
+    {:ok, _, amqp, <<>>} = Stream.next(stream, @header)
+
+    assert amqp.frame_type == :amqp
+
+    assert {:error, %Error{class: :invalid_value, reason: :invalid_stream}} =
+             Stream.expect_header(amqp, [0])
+  end
+
+  test "malformed option shapes are explicit errors" do
+    for options <- [%{accept: [0, 3]}, [:accept], :accept] do
+      assert {:error, %Error{class: :invalid_value, reason: :invalid_stream}} =
+               Stream.new(Limits.default(), options)
+    end
+  end
 end

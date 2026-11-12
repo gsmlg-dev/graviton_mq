@@ -41,7 +41,7 @@ defmodule GravitonMQ.AMQP10.Codec.Stream do
 
   @spec new(Limits.t(), keyword()) :: {:ok, t()} | {:error, Error.t()}
   def new(limits \\ Limits.default(), options \\ []) do
-    accept = Keyword.get(options, :accept, [0])
+    accept = Keyword.keyword?(options) && Keyword.get(options, :accept, [0])
 
     with {:ok, limits} <- Limits.validate(limits, :frame_decode) do
       if ProtocolHeader.accept?(accept),
@@ -50,9 +50,13 @@ defmodule GravitonMQ.AMQP10.Codec.Stream do
     end
   end
 
-  @doc "Re-enter the protocol-header phase after a SASL outcome; refuses a partial frame."
+  @doc """
+  Re-enter the protocol-header phase after a SASL outcome.
+
+  Accepted only in the SASL frame phase with no partial frame buffered.
+  """
   @spec expect_header(t(), ProtocolHeader.accept()) :: {:ok, t()} | {:error, Error.t()}
-  def expect_header(%__MODULE__{phase: :frames, buffer: <<>>} = stream, accept) do
+  def expect_header(%__MODULE__{phase: :frames, frame_type: :sasl, buffer: <<>>} = stream, accept) do
     if ProtocolHeader.accept?(accept),
       do: {:ok, %{stream | phase: :protocol_header, accept: accept, frame_type: :amqp}},
       else: invalid_stream()

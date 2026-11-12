@@ -99,4 +99,15 @@ defmodule GravitonMQ.AMQP10.Codec.ProtocolHeaderTest do
     assert ProtocolHeader.accept?([0, 3])
     refute ProtocolHeader.accept?([])
   end
+
+  test "recognize/1 keeps the historical magic error for a non-binary input" do
+    assert {:error,
+            %Error{
+              operation: :protocol_header,
+              class: :malformed,
+              reason: :invalid_protocol_magic,
+              offset: 0,
+              details: %{}
+            }} = ProtocolHeader.recognize(:x)
+  end
 end

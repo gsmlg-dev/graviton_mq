@@ -321,4 +321,51 @@ defmodule GravitonMQ.AMQP10.Codec.FrameEncodeTest do
                types: [:sasl]
              )
   end
+
+  test "the SASL encode bound is exactly 512 octets regardless of the AMQP frame limit" do
+    sasl = fn body_size ->
+      %AMQPFrame{
+        declared_size: 8 + body_size,
+        data_offset_words: 2,
+        type: :sasl,
+        channel: 0,
+        extended_header: <<>>,
+        body: :binary.copy(<<0>>, body_size)
+      }
+    end
+
+    small = %Limits{Limits.default() | max_frame_size: 64}
+
+    for limits <- [Limits.default(), small] do
+      assert {:ok, <<512::32, 2, 1, 0::16, _::binary-size(504)>>} =
+               Frame.encode(sasl.(504), limits, types: [:sasl])
+
+      assert_error(
+        Frame.encode(sasl.(505), limits, types: [:sasl]),
+        :limit_exceeded,
+        :frame_size_limit
+      )
+    end
+
+    extended = %{
+      sasl.(4)
+      | declared_size: 16,
+        data_offset_words: 3,
+        extended_header: <<0, 0, 0, 0>>
+    }
+
+    assert_error(
+      Frame.encode(extended, Limits.default(), types: [:sasl]),
+      :invalid_value,
+      :invalid_sasl_envelope
+    )
+
+    for options <- [%{types: [:sasl]}, [:sasl], :sasl] do
+      assert_error(
+        Frame.encode(sasl.(4), Limits.default(), options),
+        :invalid_value,
+        :invalid_frame_types
+      )
+    end
+  end
 end

@@ -44,7 +44,7 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
   end
 
   defp frame_type(options, operation) do
-    case Keyword.get(options, :types, [:amqp]) do
+    case Keyword.keyword?(options) && Keyword.get(options, :types, [:amqp]) do
       [:amqp] -> {:ok, :amqp}
       [:sasl] -> {:ok, :sasl}
       _other -> {:error, Error.new(operation, :invalid_value, :invalid_frame_types)}
@@ -100,7 +100,7 @@ defmodule GravitonMQ.AMQP10.Codec.Frame do
       frame.data_offset_words * 4 != header_size ->
         encode_error(:invalid_value, :data_offset_mismatch)
 
-      size > @max_wire_frame_size or size > limits.max_frame_size ->
+      size > @max_wire_frame_size or (type == :amqp and size > limits.max_frame_size) ->
         encode_error(:limit_exceeded, :frame_size_limit)
 
       frame.declared_size != size ->

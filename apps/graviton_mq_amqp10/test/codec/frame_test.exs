@@ -120,4 +120,23 @@ defmodule GravitonMQ.AMQP10.Codec.FrameTest do
     assert {:error, %Error{class: :invalid_value, reason: :invalid_frame_types}} =
              Frame.decode(sasl, Limits.default(), types: [:amqp, :sasl])
   end
+
+  test "a complete 511-octet SASL frame decodes and malformed option shapes are explicit" do
+    frame = <<511::32, 2, 1, 0::16>> <> :binary.copy(<<0>>, 503)
+
+    assert {:ok, %AMQPFrame{type: :sasl, declared_size: 511, body: body}, <<>>} =
+             Frame.decode(frame, Limits.default(), types: [:sasl])
+
+    assert byte_size(body) == 503
+
+    for options <- [%{types: [:sasl]}, [:sasl], :sasl] do
+      assert {:error,
+              %Error{
+                operation: :frame_decode,
+                class: :invalid_value,
+                reason: :invalid_frame_types
+              }} =
+               Frame.decode(frame, Limits.default(), options)
+    end
+  end
 end
