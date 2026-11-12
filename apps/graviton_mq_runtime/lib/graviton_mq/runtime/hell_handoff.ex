@@ -1,11 +1,13 @@
 defmodule GravitonMQ.Runtime.HellHandoff do
   @moduledoc false
-  # Hell owns plain-TCP accept only; a protocol Connection owns everything
-  # after it.
+  # Hell owns plain-TCP and TLS accept only (TLS: ex_ssl through
+  # `Hell.Transports.SSL`, handshaken in the handler before
+  # `handle_connection/2`; a failed handshake starts no Connection); a
+  # protocol Connection owns everything after it.
   #
   # Contract:
   #
-  #   * The listener process creates `table/0` and calls `start_link/3`. Once
+  #   * The listener process creates `table/0` and calls `start_link/4`. Once
   #     wired it calls `publish/2` with
   #     `%{connections: dynamic_supervisor, child: child_spec}`; until then
   #     it answers `GenServer.call(listener, :connection_spec, :infinity)`
@@ -14,11 +16,13 @@ defmodule GravitonMQ.Runtime.HellHandoff do
   #   * For each accepted socket the handler starts `child` under
   #     `connections`, transfers socket ownership to it and sends it
   #     `{:accepted, raw_socket}`. The child arms its own input
-  #     (`active: :once`) and keeps backpressure and close handling.
+  #     (`active: :once`) and keeps backpressure and close handling. A TLS
+  #     socket handed over is a `%SSL.Socket{}` the Connection owns; its exit
+  #     closes the TLS process through the owner monitor.
   #   * The handler monitors the child and lives exactly as long as it, so
   #     Hell's connection accounting and shutdown cover it. Hell closes the
   #     socket whenever the handler exits. A socket closed by a non-owner sends
-  #     the owner no `{:tcp_closed, socket}`, so a stopping or failing handler
+  #     the owner no `{:tcp_closed, _}`/`{:ssl_closed, _}`, so a stopping or failing handler
   #     stops its child itself.
   #   * Consequently a listener failure closes that listener's connections.
   #
@@ -40,6 +44,8 @@ defmodule GravitonMQ.Runtime.HellHandoff do
   #     most N x `owner_shutdown/0` (each listener's `stop/2` is bounded by
   #     the drain plus the residual `Hell.stop/2` wait).
   use Hell.Handler
+
+  alias GravitonMQ.Runtime.TLSOptions
 
   require Logger
 
@@ -89,34 +95,64 @@ defmodule GravitonMQ.Runtime.HellHandoff do
     :ok
   end
 
+  # `settings`: %{send_timeout:, handshake_timeout:, max_connections:}.
   # `options` exist for tests only; production uses the defaults above.
-  def start_link(listener, send_timeout, table, options \\ []) do
+  def start_link(listener, settings, table, options \\ []) do
     connection_stop = Keyword.get(options, :connection_stop, @connection_stop)
 
-    options = [
-      port: listener.port,
-      transport_module: Hell.Transports.TCP,
-      transport_options: [
-        ip: listener.ip,
-        backlog: listener.backlog,
-        reuseaddr: true,
-        buffer: 16_384,
-        recbuf: 32_768,
-        send_timeout: send_timeout,
-        send_timeout_close: true,
-        # Hell defaults nodelay to true; false preserves the pre-Hell
-        # :gen_tcp listener behaviour. Changing it is a separate decision.
-        nodelay: false
-      ],
-      handler_module: __MODULE__,
-      handler_options: {self(), table, connection_stop},
-      num_acceptors: @num_acceptors,
-      read_timeout: :infinity,
-      shutdown_timeout: @handler_shutdown
-    ]
+    options =
+      [
+        port: listener.port,
+        transport_module: transport_module(listener.transport),
+        transport_options: transport_options(listener, settings),
+        handler_module: __MODULE__,
+        handler_options: {self(), table, connection_stop},
+        num_acceptors: @num_acceptors,
+        read_timeout: :infinity,
+        # The TLS handshake runs in the handler before handle_connection/2;
+        # it also bounds the server flight write and sni_fun. A no-op for TCP.
+        handshake_timeout: settings.handshake_timeout,
+        shutdown_timeout: @handler_shutdown
+      ] ++ connection_limit(listener.transport, settings)
 
     start(options, System.monotonic_time(:millisecond) + @rebind_budget)
   end
+
+  defp transport_module(:tcp), do: Hell.Transports.TCP
+  defp transport_module(:tls), do: Hell.Transports.SSL
+
+  defp transport_options(listener, settings) do
+    carrier = [
+      ip: listener.ip,
+      backlog: listener.backlog,
+      reuseaddr: true,
+      buffer: 16_384,
+      recbuf: 32_768,
+      send_timeout: settings.send_timeout,
+      send_timeout_close: true,
+      # Hell defaults nodelay to true; false preserves the pre-Hell
+      # listener behaviour. Changing it is a separate decision.
+      nodelay: false
+    ]
+
+    case listener.transport do
+      :tcp ->
+        carrier
+
+      # Validated by TLSOptions in the protocol Config; passwords as closures.
+      # ex_ssl coalesces decrypted input; bounding each active-once delivery
+      # to the TCP `buffer` keeps the protocols' input limits unchanged
+      # (runtime-owned; rejected in user tls_options).
+      :tls ->
+        carrier ++ [active_chunk_size: 16_384] ++ TLSOptions.hell_options(listener.tls_options)
+    end
+  end
+
+  # A TLS connection costs a handler and an ex_ssl server process from accept,
+  # so the protocol's max_connections also bounds in-progress handshakes. TCP
+  # keeps Hell's default (S1a).
+  defp connection_limit(:tls, settings), do: [num_connections: settings.max_connections]
+  defp connection_limit(:tcp, _settings), do: []
 
   # Called by the listener that started `server`. Before publication,
   # handlers may be blocked in their `:connection_spec` call to this very

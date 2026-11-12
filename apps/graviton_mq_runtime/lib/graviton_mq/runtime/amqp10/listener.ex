@@ -54,7 +54,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
 
     result =
       case listener.transport do
-        :tcp -> HellHandoff.start_link(listener, config.send_timeout, handoff)
+        :tcp -> HellHandoff.start_link(listener, handoff_settings(config), handoff)
         :tls -> :ssl.listen(listener.port, options ++ listener.tls_options)
       end
 
@@ -211,4 +211,11 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
   @impl true
   def format_status(status),
     do: Map.merge(status, %{state: :redacted, message: :redacted, reason: :redacted, log: []})
+
+  defp handoff_settings(config),
+    do: %{
+      send_timeout: config.send_timeout,
+      handshake_timeout: config.connect_timeout,
+      max_connections: config.max_connections
+    }
 end
