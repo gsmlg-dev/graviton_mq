@@ -169,7 +169,12 @@ defmodule GravitonMQ.MQTT.Broker do
   end
 
   def transition(state, {:protocol_error, id, generation, reason, now}) do
-    code = if reason == {:limit_exceeded, :packet_too_large}, do: 0x95, else: 0x81
+    code =
+      case reason do
+        {:limit_exceeded, :packet_too_large} -> 0x95
+        {_class, :shared_subscription_no_local} -> 0x82
+        _ -> 0x81
+      end
 
     if current?(state, id, generation),
       do: disconnect(state, id, reason, code, now),

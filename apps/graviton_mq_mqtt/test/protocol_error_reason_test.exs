@@ -86,4 +86,34 @@ defmodule GravitonMQ.MQTT.ProtocolErrorReasonTest do
       assert Enum.any?(effects, &match?({:send, :peer, 1, _, %Disconnect{reason_code: 0x81}}, &1))
     end
   end
+
+  test "No Local on a shared subscription is a Protocol Error (MQTT-3.8.3-4)" do
+    # SUBSCRIBE id 1, no properties, filter "$share/g/t", options QoS1 + No Local.
+    filter = "$share/g/t"
+    body = <<0, 1, 0, byte_size(filter)::16, filter::binary, 0b0000_0101>>
+    wire = <<0x82, byte_size(body)>> <> body
+
+    assert {:error, %{class: :malformed, reason: :shared_subscription_no_local} = error} =
+             Packet.decode(wire, :v5)
+
+    {state, effects} =
+      Broker.transition(broker(), {:protocol_error, :peer, 1, {error.class, error.reason}, 2})
+
+    assert state.connections == %{}
+    assert Enum.any?(effects, &match?({:send, :peer, 1, _, %Disconnect{reason_code: 0x82}}, &1))
+  end
+
+  test "other subscription option violations on a shared filter stay Malformed (0x81)" do
+    filter = "$share/g/t"
+    body = <<0, 1, 0, byte_size(filter)::16, filter::binary, 0b0000_0111>>
+    wire = <<0x82, byte_size(body)>> <> body
+
+    assert {:error, %{class: :malformed, reason: :invalid_subscription_options} = error} =
+             Packet.decode(wire, :v5)
+
+    {_state, effects} =
+      Broker.transition(broker(), {:protocol_error, :peer, 1, {error.class, error.reason}, 2})
+
+    assert Enum.any?(effects, &match?({:send, :peer, 1, _, %Disconnect{reason_code: 0x81}}, &1))
+  end
 end

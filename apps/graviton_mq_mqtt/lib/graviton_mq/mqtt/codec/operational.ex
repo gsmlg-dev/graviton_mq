@@ -336,16 +336,22 @@ defmodule GravitonMQ.MQTT.Codec.Operational do
     retain_handling = flags >>> 4 &&& 3
     no_local = (flags &&& 4) != 0
 
-    if flags >>> 6 != 0 or qos == 3 or retain_handling == 3 or (no_local and shared?(filter)) do
-      Wire.error(context, Wire.value_class(context), :invalid_subscription_options)
-    else
-      {:ok,
-       %{
-         qos: qos,
-         no_local: no_local,
-         retain_as_published: (flags &&& 8) != 0,
-         retain_handling: retain_handling
-       }}
+    cond do
+      flags >>> 6 != 0 or qos == 3 or retain_handling == 3 ->
+        Wire.error(context, Wire.value_class(context), :invalid_subscription_options)
+
+      # MQTT-3.8.3-4: a Protocol Error, which the broker maps to DISCONNECT 0x82.
+      no_local and shared?(filter) ->
+        Wire.error(context, Wire.value_class(context), :shared_subscription_no_local)
+
+      true ->
+        {:ok,
+         %{
+           qos: qos,
+           no_local: no_local,
+           retain_as_published: (flags &&& 8) != 0,
+           retain_handling: retain_handling
+         }}
     end
   end
 
