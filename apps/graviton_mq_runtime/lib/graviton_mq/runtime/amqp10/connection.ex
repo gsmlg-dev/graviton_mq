@@ -165,6 +165,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
            route(%{state | read_armed: false}, {:transport_down, transport_reason(reason)})
          )
 
+  # ex_ssl sends no {:ssl_passive, _}; the :ssl_passive arm is unreachable for TLS.
   defp info({kind, socket}, %{socket: socket} = state)
        when kind in [:tcp_passive, :ssl_passive] and not is_nil(socket),
        do: continue(resume_input(%{state | read_armed: false}))
@@ -173,31 +174,23 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
     Process.cancel_timer(state.accept_timer)
     state = %{state | accept_timer: nil, accept_token: nil, socket: socket}
 
-    case handshake(state.transport, socket, state.config.connect_timeout) do
-      {:ok, socket} ->
-        state = %{state | socket: socket}
+    options = [
+      owner: self(),
+      generation: state.endpoint.generation,
+      socket: socket,
+      transport: state.transport,
+      max_frames: state.endpoint.options.max_write_frames,
+      max_bytes: state.endpoint.options.max_write_bytes
+    ]
 
-        options = [
-          owner: self(),
-          generation: state.endpoint.generation,
-          socket: socket,
-          transport: state.transport,
-          max_frames: state.endpoint.options.max_write_frames,
-          max_bytes: state.endpoint.options.max_write_bytes
-        ]
-
-        with :ok <- configure_socket(state),
-             {:ok, writer} <- Writer.start_link(options) do
-          state = %{state | writer: writer, writer_handle: Writer.handle(writer)}
-          # The broker writes nothing before the peer's protocol header.
-          state |> sasl_step(:start) |> arm_socket() |> continue()
-        else
-          {:error, reason} ->
-            continue(step(state, {:transport_down, {:transport, transport_reason(reason)}}))
-        end
-
+    with :ok <- configure_socket(state),
+         {:ok, writer} <- Writer.start_link(options) do
+      state = %{state | writer: writer, writer_handle: Writer.handle(writer)}
+      # The broker writes nothing before the peer's protocol header.
+      state |> sasl_step(:start) |> arm_socket() |> continue()
+    else
       {:error, reason} ->
-        continue(step(state, {:transport_down, {:handshake, transport_reason(reason)}}))
+        continue(step(state, {:transport_down, {:transport, transport_reason(reason)}}))
     end
   end
 
@@ -519,12 +512,12 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
     %{state | authentication: nil}
   end
 
-  # Broker TLS stays on OTP :ssl until S1b moves it to Hell.Socket.
+  # TLS peer facts come from ex_ssl; `peercert/1` only yields a chain-validated leaf.
   defp peer(state) do
     address =
       case state.transport do
         :tcp -> :inet.peername(state.socket)
-        :tls -> :ssl.peername(state.socket)
+        :tls -> SSL.peername(state.socket)
       end
 
     context =
@@ -535,7 +528,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
 
     certificate =
       if state.transport == :tls do
-        case :ssl.peercert(state.socket) do
+        case SSL.peercert(state.socket) do
           {:ok, der} -> der
           _ -> nil
         end
@@ -661,23 +654,29 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   defp frame_size(_size, _maximum),
     do: {:error, Error.new(:frame_encode, :limit_exceeded, :frame_size_limit)}
 
-  defp handshake(:tcp, socket, _timeout), do: {:ok, socket}
-  defp handshake(:tls, socket, timeout), do: :ssl.handshake(socket, timeout)
+  defp configure_socket(state),
+    do:
+      setopts(
+        state.transport,
+        state.socket,
+        socket_options(state.transport, state.config.send_timeout)
+      )
 
-  defp configure_socket(state) do
-    options = [
+  defp socket_options(:tcp, send_timeout),
+    do: [
       :binary,
       packet: :raw,
       active: false,
-      send_timeout: state.config.send_timeout,
+      send_timeout: send_timeout,
       send_timeout_close: true
     ]
 
-    setopts(state.transport, state.socket, options)
-  end
+  # ex_ssl's carrier is always binary raw; its setopts rejects :binary/packet.
+  defp socket_options(:tls, send_timeout),
+    do: [active: false, send_timeout: send_timeout, send_timeout_close: true]
 
   defp setopts(:tcp, socket, options), do: :inet.setopts(socket, options)
-  defp setopts(:tls, socket, options), do: :ssl.setopts(socket, options)
+  defp setopts(:tls, socket, options), do: SSL.setopts(socket, options)
   defp arm_socket(%{socket: nil} = state), do: state
   defp arm_socket(%{read_armed: true} = state), do: state
 
@@ -697,7 +696,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
     if state.socket do
       case state.transport do
         :tcp -> :gen_tcp.close(state.socket)
-        :tls -> :ssl.close(state.socket)
+        :tls -> SSL.close(state.socket)
       end
     end
 

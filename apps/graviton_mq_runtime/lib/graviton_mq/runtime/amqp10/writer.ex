@@ -108,7 +108,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Writer do
     do: Map.merge(status, %{state: :redacted, message: :redacted, reason: :redacted, log: []})
 
   defp socket_send(:tcp, socket, bytes), do: :gen_tcp.send(socket, bytes)
-  defp socket_send(:tls, socket, bytes), do: :ssl.send(socket, bytes)
+  defp socket_send(:tls, socket, bytes), do: SSL.send(socket, bytes)
 
   # Callback exceptions must not expose frame arguments through proc_lib or
   # the reader's linked EXIT. Retain the class and source locations only.

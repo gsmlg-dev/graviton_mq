@@ -3,12 +3,12 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
   use GenServer
 
   alias GravitonMQ.Runtime.AMQP10.{Authenticator, Broker, Connection}
-  alias GravitonMQ.Runtime.HellHandoff
+  alias GravitonMQ.Runtime.{HellHandoff, TLSOptions}
 
   def start_link(configuration), do: GenServer.start_link(__MODULE__, configuration)
 
   # TCP and TLS listeners share this shutdown; it exceeds the bounded
-  # Hell stop so the parent never kills a TCP listener mid-stop.
+  # Hell stop so the parent never kills a listener mid-stop.
   # The connection spec is published in a :protected ETS table that any
   # process can read, so only the keys the Connection uses are kept
   # (allowlist): future auth or credential options are never published.
@@ -36,39 +36,15 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
     Process.flag(:trap_exit, true)
     Process.flag(:sensitive, true)
     {config, listener, parent} = configuration.()
+    handoff = HellHandoff.table()
 
-    options = [
-      :binary,
-      ip: listener.ip,
-      packet: 0,
-      active: false,
-      reuseaddr: true,
-      backlog: listener.backlog,
-      buffer: 16_384,
-      recbuf: 32_768,
-      send_timeout: config.send_timeout,
-      send_timeout_close: true
-    ]
-
-    handoff = if listener.transport == :tcp, do: HellHandoff.table()
-
-    result =
-      case listener.transport do
-        :tcp -> HellHandoff.start_link(listener, handoff_settings(config), handoff)
-        :tls -> :ssl.listen(listener.port, options ++ listener.tls_options)
-      end
-
-    case result do
-      {:ok, socket} ->
-        {:ok, {ip, port}} =
-          case listener.transport do
-            :tcp -> Hell.listener_info(socket)
-            :tls -> :ssl.sockname(socket)
-          end
+    case HellHandoff.start_link(listener, handoff_settings(config), handoff) do
+      {:ok, server} ->
+        {:ok, {ip, port}} = Hell.listener_info(server)
 
         {:ok,
          %{
-           socket: socket,
+           socket: server,
            handoff: handoff,
            transport: listener.transport,
            parent: parent,
@@ -80,8 +56,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
                &Map.put(
                  &1,
                  :client_certificate_verified,
-                 listener.transport == :tls and
-                   Keyword.get(listener.tls_options, :verify, :verify_none) == :verify_peer
+                 listener.transport == :tls and TLSOptions.verify_peer?(listener.tls_options)
                )
              ),
            broker: nil,
@@ -101,7 +76,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
   # Wiring asks the protocol supervisor for the Broker and connections
   # without blocking: that supervisor may itself be stopping this listener's
   # supervisor, which only works while this process still serves its own
-  # parent's exit. Plain TCP accept runs in Hell meanwhile; handlers accepted
+  # parent's exit. Accept (TCP and TLS) runs in Hell meanwhile; handlers accepted
   # before wiring wait in `:connection_spec` and later read the published
   # value.
   # `:which_children` is the request `Supervisor.which_children/1` sends; OTP
@@ -114,10 +89,10 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
   @impl true
   def handle_call(:info, _from, state), do: {:reply, state.info, state}
 
-  def handle_call(:connection_spec, from, %{transport: :tcp, broker: nil} = state),
+  def handle_call(:connection_spec, from, %{broker: nil} = state),
     do: {:noreply, %{state | waiting: [from | state.waiting]}}
 
-  def handle_call(:connection_spec, _from, %{transport: :tcp} = state),
+  def handle_call(:connection_spec, _from, state),
     do: {:reply, connection_spec(state), state}
 
   @impl true
@@ -145,17 +120,11 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
           config: put_in(state.config, [:sasl, :authenticator], authenticator)
       }
 
-      case state.transport do
-        :tcp ->
-          :ok = HellHandoff.publish(state.handoff, connection_spec(state))
+      :ok = HellHandoff.publish(state.handoff, connection_spec(state))
 
-          state.waiting
-          |> Enum.reverse()
-          |> Enum.each(&GenServer.reply(&1, connection_spec(state)))
-
-        :tls ->
-          send(self(), :accept)
-      end
+      state.waiting
+      |> Enum.reverse()
+      |> Enum.each(&GenServer.reply(&1, connection_spec(state)))
 
       {:noreply, %{state | waiting: []}}
     else
@@ -163,50 +132,19 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
     end
   end
 
-  defp info({:EXIT, server, _reason}, %{transport: :tcp, socket: server} = state),
+  defp info({:EXIT, server, _reason}, %{socket: server} = state),
     do: {:stop, :listener_closed, state}
-
-  defp info(:accept, %{transport: :tls} = state) do
-    case :ssl.transport_accept(state.socket, 25) do
-      {:ok, socket} ->
-        case DynamicSupervisor.start_child(
-               state.connections,
-               {Connection, {state.config, state.broker, :tls}}
-             ) do
-          {:ok, connection} ->
-            if :ssl.controlling_process(socket, connection) == :ok do
-              send(connection, {:accepted, socket})
-            else
-              :ssl.close(socket)
-              DynamicSupervisor.terminate_child(state.connections, connection)
-            end
-
-          {:error, _} ->
-            :ssl.close(socket)
-        end
-
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, :timeout} ->
-        send(self(), :accept)
-        {:noreply, state}
-
-      {:error, _} ->
-        {:stop, :listener_closed, state}
-    end
-  end
 
   defp info(_stale, state), do: {:noreply, state}
 
   defp connection_spec(state),
-    do: %{connections: state.connections, child: {Connection, {state.config, state.broker, :tcp}}}
+    do: %{
+      connections: state.connections,
+      child: {Connection, {state.config, state.broker, state.transport}}
+    }
 
   @impl true
-  def terminate(_reason, %{transport: :tcp, socket: server, handoff: table}),
-    do: HellHandoff.stop(server, table)
-
-  def terminate(_reason, %{transport: :tls, socket: socket}), do: :ssl.close(socket)
+  def terminate(_reason, %{socket: server, handoff: table}), do: HellHandoff.stop(server, table)
 
   @impl true
   def format_status(status),

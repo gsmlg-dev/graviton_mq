@@ -1,3 +1,5 @@
+Code.require_file("../support/tls.exs", __DIR__)
+
 defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
   use ExUnit.Case, async: true
 
@@ -6,7 +8,9 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
   alias GravitonMQ.AMQP10.Frame, as: Envelope
   alias GravitonMQ.AMQP10.Performative.{Begin, Open}
   alias GravitonMQ.Runtime.AMQP10.{Config, Connection}
+  alias GravitonMQ.Runtime.Test.TLS
 
+  @compile {:no_warn_undefined, :ssl}
   @moduletag timeout: 10_000
   @header <<"AMQP", 0, 1, 0, 0>>
 
@@ -54,26 +58,12 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
   end
 
   test "a TLS connection is driven by active-once input" do
-    {listener, port} = tls_listener!()
-    {:ok, _} = Application.ensure_all_started(:ssl)
-
-    test = self()
-
-    # The connecting task hands its socket to the test before it exits.
-    client =
-      Task.async(fn ->
-        options = [:binary, active: false, verify: :verify_none]
-        {:ok, peer} = :ssl.connect({127, 0, 0, 1}, port, options, 2_000)
-        :ok = :ssl.controlling_process(peer, test)
-        {:ok, peer}
-      end)
-
-    {:ok, socket} = :ssl.transport_accept(listener, 2_000)
-    connection = start_supervised!({Connection, {config!([]), relay!(), :tls}}, id: make_ref())
-    :ok = :ssl.controlling_process(socket, connection)
-    send(connection, {:accepted, socket})
-    {:ok, peer} = Task.await(client)
+    {socket, peer} = TLS.server_pair!(TLS.certificates!())
     on_exit(fn -> :ssl.close(peer) end)
+    connection = start_supervised!({Connection, {config!([]), relay!(), :tls}}, id: make_ref())
+    # The ex_ssl server socket is owned by this test process (its handshaker).
+    :ok = SSL.controlling_process(socket, connection)
+    send(connection, {:accepted, socket})
     :ok = :ssl.send(peer, @header)
     assert {:ok, @header} = :ssl.recv(peer, 8, 1_000)
     {:ok, <<size::32, _::binary>> = frame_header} = :ssl.recv(peer, 8, 1_000)
@@ -84,6 +74,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "tls-peer"}}},
                    1_000
 
+    assert {:ok, [active: :once]} = SSL.getopts(data(connection).socket, [:active])
     assert idle_messages(connection, 200) == []
 
     monitor = Process.monitor(connection)
@@ -107,38 +98,6 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     after
       20 -> Enum.reverse(acc)
     end
-  end
-
-  defp tls_listener! do
-    directory =
-      Path.join(System.tmp_dir!(), "graviton-amqp-active-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(directory)
-    certificate = Path.join(directory, "certificate.pem")
-    key = Path.join(directory, "key.pem")
-    on_exit(fn -> File.rm_rf!(directory) end)
-
-    {_output, 0} =
-      System.cmd(
-        "openssl",
-        ~w(req -x509 -newkey rsa:2048 -nodes -keyout #{key} -out #{certificate} -days 1 -subj /CN=localhost),
-        stderr_to_stdout: true
-      )
-
-    {:ok, _} = Application.ensure_all_started(:ssl)
-
-    {:ok, listener} =
-      :ssl.listen(0, [
-        :binary,
-        ip: {127, 0, 0, 1},
-        active: false,
-        certfile: String.to_charlist(certificate),
-        keyfile: String.to_charlist(key)
-      ])
-
-    on_exit(fn -> :ssl.close(listener) end)
-    {:ok, {_, port}} = :ssl.sockname(listener)
-    {listener, port}
   end
 
   defp connected! do
