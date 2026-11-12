@@ -272,6 +272,7 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
       })
 
     assert disconnected?(effects, :pub, 0x95)
+    assert {:close, :pub, 1, :resolved_packet_too_large} in effects
   end
 
   defp publish_all(state, id, topics) do

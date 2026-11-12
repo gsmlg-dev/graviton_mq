@@ -8,7 +8,7 @@ defmodule GravitonMQ.MQTT.Broker do
   Effects describe memory admission. A persistent running owner synchronizes
   the durable projection before interpreting them; this machine does no I/O.
   """
-  alias GravitonMQ.MQTT.Codec.{Limits, Packet}
+  alias GravitonMQ.MQTT.Codec.{Error, Limits, Packet}
   alias GravitonMQ.MQTT.Packet.{Connect, Connack, Publish, Puback, Subscribe, Suback}
   alias GravitonMQ.MQTT.Packet.{Unsubscribe, Unsuback, Pingreq, Pingresp, Disconnect}
   alias GravitonMQ.MQTT.Packet.{Pubrec, Pubrel, Pubcomp}
@@ -415,9 +415,15 @@ defmodule GravitonMQ.MQTT.Broker do
       {:ok, aliases, resolved} ->
         state = put_conn(state, id, %{conn | aliases: aliases})
 
+        # The incoming packet already passed `valid_packet?/2`, and resolution
+        # only substitutes a previously validated topic, so exceeding Maximum
+        # Packet Size is the only reachable encode failure (D3).
         case Packet.encode(resolved, state.codec) do
-          {:ok, encoded} -> resolved_publish(state, id, resolved, encoded, now)
-          {:error, _} -> disconnect(state, id, :resolved_packet_too_large, 0x95, now)
+          {:ok, encoded} ->
+            resolved_publish(state, id, resolved, encoded, now)
+
+          {:error, %Error{class: :limit_exceeded, reason: :packet_too_large}} ->
+            disconnect(state, id, :resolved_packet_too_large, 0x95, now)
         end
     end
   end
