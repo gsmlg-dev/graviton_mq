@@ -154,26 +154,44 @@ defmodule GravitonMQ.AMQP10SASLTest do
         auth_options: [mode: :sleep]
       )
 
-    first = connect!(broker)
-    :ok = :gen_tcp.send(first, @sasl)
-    assert {:ok, @sasl} = :gen_tcp.recv(first, 8, 1_000)
-    assert %Mechanisms{} = read_sasl!(first)
-    :ok = :gen_tcp.send(first, sasl_frame(plain_init("graviton-user", "graviton-password")))
+    # Transport loss first, while the callback has only just started: the
+    # kill must arrive well inside auth_timeout (3 s, the maximum), so it is
+    # the loss, not the deadline, that ends the callback.
+    first = start_sleeping_auth!(broker)
     assert_receive {:authenticating, task, _credentials}, 1_000
-    eventually!(fn -> match?({:ok, %{authenticating: 1}}, GravitonMQ.amqp10_status(broker)) end)
+    started = System.monotonic_time(:millisecond)
+    monitor = Process.monitor(task)
+    :ok = :gen_tcp.close(first)
+    assert_receive {:DOWN, ^monitor, :process, ^task, :killed}, 2_000
+    assert System.monotonic_time(:millisecond) - started < 2_000
 
+    eventually!(fn ->
+      match?({:ok, %{authenticating: 0, connections: 0}}, GravitonMQ.amqp10_status(broker))
+    end)
+
+    # The single slot taken by a running callback refuses the next peer.
+    held = start_sleeping_auth!(broker)
+    assert_receive {:authenticating, _task, _credentials}, 1_000
+    eventually!(fn -> match?({:ok, %{authenticating: 1}}, GravitonMQ.amqp10_status(broker)) end)
     second = connect!(broker)
 
     assert %Outcome{code: %Value{value: 4}} =
              negotiate!(second, plain_init("graviton-user", "graviton-password"))
 
-    monitor = Process.monitor(task)
-    :ok = :gen_tcp.close(first)
-    assert_receive {:DOWN, ^monitor, :process, ^task, :killed}, 2_000
+    :ok = :gen_tcp.close(held)
 
     eventually!(fn ->
-      match?({:ok, %{authenticating: 0, connections: 0}}, GravitonMQ.amqp10_status(broker))
+      match?({:ok, %{authenticating: 0}}, GravitonMQ.amqp10_status(broker))
     end)
+  end
+
+  defp start_sleeping_auth!(broker) do
+    socket = connect!(broker)
+    :ok = :gen_tcp.send(socket, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(socket, 8, 1_000)
+    assert %Mechanisms{} = read_sasl!(socket)
+    :ok = :gen_tcp.send(socket, sasl_frame(plain_init("graviton-user", "graviton-password")))
+    socket
   end
 
   test "a required policy refuses no-SASL peers and unoffered ANONYMOUS" do
