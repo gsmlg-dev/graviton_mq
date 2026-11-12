@@ -189,4 +189,25 @@ defmodule GravitonMQ.MQTT.ClientAliasTest do
 
     assert [%Publish{topic: "a", dup: true} | _] = sends(effects)
   end
+
+  # Maximum Packet Size bounds the wire packet only (§3.1.2.11.4): restoring the
+  # full topic may exceed the client's receive limit.
+  test "a resolved publication larger than the receive limit is delivered" do
+    limits = %GravitonMQ.MQTT.Codec.Limits{max_packet_size: 100}
+    {state, _} = online([], topic_alias_maximum: 2, limits: limits)
+    {state, _} = Client.transition(state, {:demand, 5, 2})
+    topic = String.duplicate("t", 40)
+    payload = String.duplicate("p", 60)
+
+    {state, _, _} =
+      deliver(state, %Publish{topic: topic, payload: "", properties: [topic_alias: 1]}, 3)
+
+    aliased = %Publish{topic: "", payload: payload, properties: [topic_alias: 1]}
+    {:ok, wire} = GravitonMQ.MQTT.Codec.Packet.encode(aliased)
+    assert byte_size(wire) == 68
+    {state, [delivered], effects} = deliver(state, aliased, 4)
+    assert state.phase == :connected
+    refute Enum.any?(effects, &match?({:send, %Disconnect{}, _}, &1))
+    assert {delivered.topic, delivered.payload, delivered.properties} == {topic, payload, []}
+  end
 end

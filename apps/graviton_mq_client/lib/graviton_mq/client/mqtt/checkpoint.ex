@@ -190,8 +190,12 @@ defmodule GravitonMQ.Client.MQTT.Checkpoint do
     do: not Map.has_key?(entry, :qos2_phase) and not Map.has_key?(entry, :release_order)
 
   defp delivery?(entry, fresh) do
+    # A delivery may be a resolved aliased publication: Maximum Packet Size
+    # bounds wire packets only, so the protocol maximum applies here.
+    relaxed = %{fresh | limits: %{fresh.limits | max_packet_size: 268_435_460}}
+
     exact?(entry, [:packet, :delivered, :ack_pending, :ack_sent, :received_at, :qos2_phase]) and
-      packet?(entry.packet, :publish, fresh) and
+      packet?(entry.packet, :publish, relaxed) and
       Enum.all?([entry.delivered, entry.ack_pending, entry.ack_sent], &is_boolean/1) and
       is_integer(entry.received_at) and
       (not entry.ack_sent or entry.ack_pending) and

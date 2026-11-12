@@ -360,8 +360,14 @@ defmodule GravitonMQ.MQTT.Client do
         {:ok, aliases, resolved} ->
           state = %{state | aliases: aliases}
 
+          # Maximum Packet Size bounds the wire packet only (§3.1.2.11.4): the
+          # resolved form is checked under the protocol maximum, never the
+          # receive limit. Only a resolution beyond the protocol maximum fails.
           cond do
-            not valid_packet?(resolved, state) ->
+            not match?(
+              {:ok, _},
+              Packet.encode(resolved, %{state.limits | max_packet_size: 268_435_460})
+            ) ->
               terminal(state, :resolved_packet_too_large, 0x95)
 
             Keyword.get(resolved.properties, :payload_format_indicator, 0) == 1 and

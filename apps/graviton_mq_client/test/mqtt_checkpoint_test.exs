@@ -288,4 +288,35 @@ defmodule GravitonMQ.MQTTClient.CheckpointTest do
     machine = %{fresh | outbound: %{1 => entry}, next_order: 2}
     assert {:error, :invalid_checkpoint_schema} = Checkpoint.capture(machine, meta, 0, 1_000)
   end
+
+  test "a stored resolved delivery larger than the receive limit is valid checkpoint content" do
+    limits = %GravitonMQ.MQTT.Codec.Limits{max_packet_size: 100}
+
+    {:ok, fresh} =
+      Machine.new(%Connect{version: :v5, clean_start: true, client_id: "one"}, limits: limits)
+
+    packet = %Publish{
+      qos: 0,
+      topic: String.duplicate("t", 40),
+      payload: String.duplicate("p", 60)
+    }
+
+    {:ok, encoded} = GravitonMQ.MQTT.Codec.Packet.encode(packet)
+    assert byte_size(encoded) > 100
+
+    entry = %{
+      packet: packet,
+      delivered: false,
+      ack_pending: false,
+      ack_sent: false,
+      received_at: 1,
+      qos2_phase: nil
+    }
+
+    machine = %{fresh | deliveries: %{1 => entry}, next_delivery_id: 2}
+    meta = %{next_operation: 1, deadlines: %{}, results: %{}}
+    assert {:ok, snapshot} = Checkpoint.capture(machine, meta, 0, 1_000)
+    assert {:ok, recovered, _} = Checkpoint.restore(snapshot, fresh, 0, 1_000)
+    assert recovered.deliveries[1].packet == packet
+  end
 end
