@@ -67,12 +67,29 @@ defmodule GravitonMQ.Architecture do
     ThousandIsland
   ]
 
-  @transport_namespace_prefixes [
+  # Owned network packages (`hell`, `ex_ssl`) and the only applications that may
+  # reference them. Protocol apps reject them through the transport rule, so
+  # their roots are also transport namespaces.
+  @owned_transport_allowed %{
+    "Elixir.Hell" => [:graviton_mq_runtime],
+    "Elixir.SSL" => [:graviton_mq_runtime, :graviton_mq_client]
+  }
+
+  # OTP modules an application must not reference even though other
+  # applications may: the independent client uses the owned `SSL` package.
+  # `release_test` pins the client's application list, so
+  # `extra_applications: [:ssl]` cannot silently return.
+  @forbidden_otp_transport_by_app %{graviton_mq_client: [:ssl]}
+
+  @third_party_transport_prefixes [
     "Elixir.Bandit",
     "Elixir.Ranch",
     "Elixir.Socket",
     "Elixir.ThousandIsland"
   ]
+
+  @transport_namespace_prefixes @third_party_transport_prefixes ++
+                                  Map.keys(@owned_transport_allowed)
 
   @process_modules [
     GenServer,
@@ -93,6 +110,8 @@ defmodule GravitonMQ.Architecture do
   @type violation ::
           {:forbidden_application_dependency, map()}
           | {:forbidden_transport_dependency, map()}
+          | {:forbidden_owned_transport_dependency, map()}
+          | {:forbidden_otp_transport_dependency, map()}
           | {:forbidden_process_dependency, map()}
           | {:forbidden_clock_dependency, map()}
           | {:application_cycle, [atom()]}
@@ -160,6 +179,18 @@ defmodule GravitonMQ.Architecture do
       inspect(reference.target_module)
   end
 
+  def format_violation({:forbidden_owned_transport_dependency, reference}) do
+    allowed = owned_transport_rule(reference.target_module)
+
+    "#{location(reference)}: #{reference.source_app} may not reference #{inspect(reference.target_module)} " <>
+      "(owned transport allowed only in #{Enum.join(allowed, ", ")})"
+  end
+
+  def format_violation({:forbidden_otp_transport_dependency, reference}) do
+    "#{location(reference)}: #{reference.source_app} may not reference #{inspect(reference.target_module)} " <>
+      "(use the owned SSL package)"
+  end
+
   def format_violation({:forbidden_process_dependency, reference}) do
     "#{location(reference)}: pure #{protocol_name(reference)} source references process module " <>
       inspect(reference.target_module)
@@ -176,7 +207,10 @@ defmodule GravitonMQ.Architecture do
 
   defp reference_violations(%Reference{} = reference) do
     application_violation(reference) ++
-      transport_violation(reference) ++ process_violation(reference) ++ clock_violation(reference)
+      transport_violation(reference) ++
+      owned_transport_violation(reference) ++
+      otp_transport_violation(reference) ++
+      process_violation(reference) ++ clock_violation(reference)
   end
 
   defp application_violation(%Reference{target_app: nil}), do: []
@@ -203,6 +237,43 @@ defmodule GravitonMQ.Architecture do
   end
 
   defp transport_violation(_reference), do: []
+
+  defp owned_transport_violation(%Reference{source_app: source_app})
+       when source_app in @protocol_apps,
+       do: []
+
+  defp owned_transport_violation(
+         %Reference{source_app: source_app, target_module: target} = reference
+       )
+       when is_atom(target) do
+    case owned_transport_rule(target) do
+      nil ->
+        []
+
+      allowed ->
+        if source_app in allowed,
+          do: [],
+          else: [{:forbidden_owned_transport_dependency, violation_details(reference)}]
+    end
+  end
+
+  defp owned_transport_violation(_reference), do: []
+
+  defp otp_transport_violation(
+         %Reference{source_app: source_app, target_module: target} = reference
+       ) do
+    if target in Map.get(@forbidden_otp_transport_by_app, source_app, []),
+      do: [{:forbidden_otp_transport_dependency, violation_details(reference)}],
+      else: []
+  end
+
+  defp owned_transport_rule(target) do
+    name = Atom.to_string(target)
+
+    Enum.find_value(@owned_transport_allowed, fn {root, allowed} ->
+      if in_namespace?(name, root), do: allowed
+    end)
+  end
 
   defp process_violation(
          %Reference{source_app: source_app, target_module: target_module} = reference
