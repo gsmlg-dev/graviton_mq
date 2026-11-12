@@ -22,7 +22,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Auth do
   (passwords, tokens or the policy options): return an identity such as
   `{:user, username}`. Until a Connection reports its principal, Link
   admission is denied without calling `authorize/3`; the atom
-  `:unauthenticated` is reserved for that state and is always denied.
+  `:unauthenticated` is reserved for that state and is always denied; a
+  callback returning `{:ok, :unauthenticated}` is an invalid return and is
+  refused at SASL with outcome `sys`.
 
   The broker waits for the peer's protocol header under every `sasl` mode,
   bounded by `sasl_timeout` (default 5_000 ms); `sasl: :disabled` uses the
@@ -36,6 +38,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Auth do
   @spec invoke(module(), keyword(), map()) :: {:ok, term()} | {:error, :auth | :sys}
   def invoke(module, options, credentials) do
     case module.authenticate(credentials, options) do
+      # `:unauthenticated` is the reserved deny-only principal: admitting it
+      # would succeed SASL and then silently deny every Link.
+      {:ok, :unauthenticated} -> {:error, :sys}
       {:ok, principal} -> {:ok, principal}
       {:error, _reason} -> {:error, :auth}
       _invalid -> {:error, :sys}

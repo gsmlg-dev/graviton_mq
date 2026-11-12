@@ -25,6 +25,9 @@ defmodule GravitonMQ.AMQP10SASLTest.Auth do
 
       :anonymous ->
         {:ok, {:anonymous_peer, credentials.peer.port}}
+
+      :reserved ->
+        {:ok, :unauthenticated}
     end
   end
 end
@@ -129,7 +132,9 @@ defmodule GravitonMQ.AMQP10SASLTest do
   end
 
   test "callback exceptions and invalid returns map to sys, deadlines to sys-temp" do
-    for {mode, code} <- [raise: 2, invalid: 2, sleep: 4] do
+    # `reserved` returns the deny-only principal `:unauthenticated`, which is
+    # refused at SASL instead of admitted and then denying every Link.
+    for {mode, code} <- [raise: 2, invalid: 2, reserved: 2, sleep: 4] do
       broker = plain_broker!(auth_timeout: 50, auth_options: [mode: mode])
       socket = connect!(broker)
 

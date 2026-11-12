@@ -14,6 +14,7 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthTest do
     def authenticate(%{password: "exit"}, _options), do: exit(:boom)
     def authenticate(%{password: "throw"}, _options), do: throw(:boom)
     def authenticate(%{password: "invalid"}, _options), do: :yes
+    def authenticate(%{password: "reserved"}, _options), do: {:ok, :unauthenticated}
     def authenticate(_credentials, _options), do: {:error, :denied}
   end
 
@@ -21,9 +22,15 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthTest do
     assert Auth.invoke(Policy, [tag: 1], %{password: "good"}) == {:ok, {:principal, 1}}
     assert Auth.invoke(Policy, [], %{password: "bad"}) == {:error, :auth}
 
-    for password <- ["raise", "exit", "throw", "invalid"] do
+    for password <- ["raise", "exit", "throw", "invalid", "reserved"] do
       assert Auth.invoke(Policy, [], %{password: password}) == {:error, :sys}
     end
+  end
+
+  test "the reserved deny-only principal is refused at SASL instead of admitted" do
+    # `:unauthenticated` would otherwise succeed SASL and then silently deny
+    # every Link; it is an invalid callback return (`sys`).
+    assert Auth.invoke(Policy, [], %{password: "reserved"}) == {:error, :sys}
   end
 
   test "the watcher kills a callback at its deadline or when its caller dies" do
