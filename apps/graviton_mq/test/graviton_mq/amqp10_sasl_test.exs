@@ -40,6 +40,7 @@ defmodule GravitonMQ.AMQP10SASLTest do
   alias GravitonMQ.AMQP10.Performative.{Attach, Begin, Detach, Open}
   alias GravitonMQ.AMQP10.SASL.{Init, Mechanisms, Outcome, Plain}
   alias GravitonMQ.AMQP10.Terminus.{Source, Target}
+  alias GravitonMQ.AMQP10Client, as: Client
   alias GravitonMQ.AMQP10SASLTest.Auth
 
   @moduletag timeout: 15_000
@@ -291,6 +292,66 @@ defmodule GravitonMQ.AMQP10SASLTest do
 
     assert {:ok, %{authenticating: 0, sasl_failures: %{auth: 0, sys: 0, sys_temp: 0}}} =
              GravitonMQ.amqp10_status(broker)
+  end
+
+  test "our PLAIN client reaches our broker and its principal authorizes a Link" do
+    test = self()
+
+    authorize = fn principal, action, address ->
+      send(test, {:authorized, principal, action, address})
+      :allow
+    end
+
+    broker = plain_broker!(authorize: authorize)
+    assert {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.amqp10_status(broker)
+
+    client =
+      sasl_client!(port,
+        sasl: {:plain, "graviton-user", "graviton-password"},
+        allow_insecure_plain: true
+      )
+
+    assert_receive {:graviton_mq, ^client, {:connected, _}}, 2_000
+    assert {:ok, operation} = Client.open_session(client, 0)
+    assert_receive {:graviton_mq, ^client, {:operation, ^operation, {:ok, 0}}}, 2_000
+
+    assert {:ok, attach} =
+             Client.attach(client, 0, "self-sender", :sender, address: Value.string("orders"))
+
+    assert_receive {:authorized, {:user, "graviton-user"}, :send, "orders"}, 2_000
+    assert_receive {:graviton_mq, ^client, {:operation, ^attach, {:ok, _identity}}}, 2_000
+  end
+
+  test "our client is refused with an auth outcome and our anonymous client uses the default" do
+    broker = plain_broker!()
+    assert {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.amqp10_status(broker)
+
+    client =
+      sasl_client!(port, sasl: {:plain, "graviton-user", "wrong"}, allow_insecure_plain: true)
+
+    assert_receive {:graviton_mq, ^client, {:disconnected, {:sasl, :auth}}}, 2_000
+    refute_received {:graviton_mq, ^client, {:connected, _}}
+
+    anonymous = broker!([])
+    assert {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.amqp10_status(anonymous)
+    client = sasl_client!(port, sasl: :anonymous)
+    assert_receive {:graviton_mq, ^client, {:connected, _}}, 2_000
+  end
+
+  defp sasl_client!(port, options) do
+    start_supervised!(
+      {Client,
+       Keyword.merge(
+         [
+           host: {127, 0, 0, 1},
+           port: port,
+           container_id: "sasl-client-#{System.unique_integer([:positive])}",
+           max_frame_size: 512
+         ],
+         options
+       )},
+      id: make_ref()
+    )
   end
 
   # Minor 6: the Broker's record default is a deny-only principal.
