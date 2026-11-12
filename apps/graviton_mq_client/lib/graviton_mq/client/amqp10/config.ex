@@ -24,7 +24,8 @@ defmodule GravitonMQ.Client.AMQP10.Config do
           :max_input_bytes,
           :sasl,
           :allow_insecure_plain,
-          :sasl_timeout
+          :sasl_timeout,
+          :reconnect
         ] ++ @endpoint_keys
 
   def build(options) when is_list(options) do
@@ -57,6 +58,7 @@ defmodule GravitonMQ.Client.AMQP10.Config do
 
     frame_size = Keyword.get(options, :max_frame_size, 65_536)
     sasl = sasl(Keyword.get(options, :sasl, :none))
+    reconnect = reconnect(Keyword.get(options, :reconnect, []))
 
     valid =
       transport in [:tcp, :tls] and valid_host?(config.host) and
@@ -78,7 +80,8 @@ defmodule GravitonMQ.Client.AMQP10.Config do
         is_boolean(config.allow_insecure_plain) and
         is_integer(config.sasl_timeout) and config.sasl_timeout in 1..10_000 and
         sasl != :invalid and plain_transport?(sasl, transport, config.allow_insecure_plain) and
-        encodable?(sasl, Keyword.get(options, :hostname), config.sasl_timeout)
+        encodable?(sasl, Keyword.get(options, :hostname), config.sasl_timeout) and
+        reconnect != :invalid
 
     if valid do
       endpoint =
@@ -92,7 +95,8 @@ defmodule GravitonMQ.Client.AMQP10.Config do
        config
        |> Map.put(:endpoint_options, endpoint)
        |> Map.put(:limits, %Limits{max_frame_size: frame_size})
-       |> Map.put(:sasl, sasl)}
+       |> Map.put(:sasl, sasl)
+       |> Map.put(:reconnect, reconnect)}
     else
       {:error, :invalid_options}
     end
@@ -130,6 +134,32 @@ defmodule GravitonMQ.Client.AMQP10.Config do
   end
 
   defp sasl(_sasl), do: :invalid
+
+  # Mirrors the MQTT client's reconnect policy (owner Q3): 0..100 attempts
+  # (0 = one connection, the historical behaviour), exponential delay from
+  # `delay` capped at `max_delay`, no jitter, no infinity. Unlike the MQTT
+  # config, an invalid policy is reported as the AMQP config's single
+  # `{:error, :invalid_options}`.
+  defp reconnect(options) when is_list(options) do
+    if Keyword.keyword?(options) and
+         Enum.all?(Keyword.keys(options), &(&1 in [:max_attempts, :delay, :max_delay])) do
+      policy = %{
+        max_attempts: Keyword.get(options, :max_attempts, 0),
+        delay: Keyword.get(options, :delay, 250),
+        max_delay: Keyword.get(options, :max_delay, 5_000)
+      }
+
+      if is_integer(policy.max_attempts) and policy.max_attempts in 0..100 and
+           is_integer(policy.delay) and policy.delay in 1..60_000 and
+           is_integer(policy.max_delay) and policy.max_delay in policy.delay..60_000,
+         do: policy,
+         else: :invalid
+    else
+      :invalid
+    end
+  end
+
+  defp reconnect(_options), do: :invalid
 
   defp plain_transport?({:plain, _, _, _}, :tcp, allow_insecure_plain),
     do: allow_insecure_plain == true
