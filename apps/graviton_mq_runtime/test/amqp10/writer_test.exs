@@ -171,6 +171,9 @@ defmodule GravitonMQ.Runtime.AMQP10.WriterTest do
     reader = lifetime!()
     {writer, handle} = writer!(context, lifetime_owner: reader)
     monitor = Process.monitor(writer)
+    # The writer stops on the reader's DOWN, a signal from another sender;
+    # a synchronous call first guarantees the writer has installed our monitor.
+    _ = :sys.get_state(writer)
     send(reader, :finish)
     assert_receive {:DOWN, ^monitor, :process, ^writer, :normal}
     assert {:error, :closed} = Writer.enqueue(handle, :late, "later")
