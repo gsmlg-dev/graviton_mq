@@ -30,7 +30,7 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
   alias GravitonMQ.AMQP10.{Frame, SASL, Value}
   alias GravitonMQ.AMQP10.Codec.{Error, ProtocolHeader}
   alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
-  alias GravitonMQ.AMQP10.SASL.{Anonymous, Init, Mechanisms, Outcome, Plain}
+  alias GravitonMQ.AMQP10.SASL.{Anonymous, Challenge, Init, Mechanisms, Outcome, Plain}
 
   @sasl_header <<"AMQP", 3, 1, 0, 0>>
   @amqp_header <<"AMQP", 0, 1, 0, 0>>
@@ -91,6 +91,25 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
       not is_boolean(state.authenticate) -> {:error, :invalid_options}
       state.mode != :disabled and not mechanisms_valid?(state) -> {:error, :invalid_options}
       true -> {:ok, state}
+    end
+  end
+
+  defp build(%{role: :client} = options) do
+    state = %__MODULE__{
+      role: :client,
+      mode: :required,
+      credentials: Map.get(options, :credentials),
+      hostname: Map.get(options, :hostname),
+      timeout_ms: Map.get(options, :timeout_ms),
+      generation: Map.get(options, :generation, 0)
+    }
+
+    with true <- common_valid?(state),
+         {:ok, init} <- client_init(state),
+         {:ok, _frame} <- SASLCodec.encode_frame(init) do
+      {:ok, state}
+    else
+      _invalid -> {:error, :invalid_options}
     end
   end
 
@@ -211,6 +230,42 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
     {%{state | phase: :done}, cancel ++ [{:start_endpoint, header}]}
   end
 
+  # Client role.
+  defp dispatch(%{role: :client, phase: :new} = state, :start) do
+    {state, wake} = set_deadline(state)
+    {state, _id, sent} = send_bytes(state, @sasl_header)
+    {%{state | phase: :await_header}, wake ++ sent}
+  end
+
+  defp dispatch(
+         %{role: :client, phase: :await_header} = state,
+         {:header, %ProtocolHeader{protocol_id: 3}}
+       ),
+       do: {%{state | phase: :await_mechanisms}, []}
+
+  defp dispatch(
+         %{role: :client, phase: :await_header} = state,
+         {:header, %ProtocolHeader{protocol_id: 0}}
+       ),
+       do: close(state, :sasl_not_offered)
+
+  defp dispatch(
+         %{role: :client, phase: :await_header} = state,
+         {:decode_error, %Error{operation: :protocol_header}}
+       ),
+       do: close(state, :unsupported_protocol_header)
+
+  defp dispatch(%{role: :client, phase: phase} = state, {:frame, %Frame{type: :sasl, body: body}})
+       when phase in [:await_mechanisms, :await_outcome] do
+    case {phase, SASLCodec.decode(body)} do
+      {:await_mechanisms, {:ok, %Mechanisms{} = mechanisms}} -> choose(state, mechanisms)
+      {:await_outcome, {:ok, %Outcome{code: %Value{value: code}}}} -> outcome(state, code)
+      {_phase, {:ok, %Challenge{}}} -> close(state, :sasl_protocol_error)
+      {_phase, {:ok, _other}} -> close(state, :sasl_protocol_error)
+      {_phase, {:error, %Error{reason: reason}}} -> close(state, {:decode_error, reason})
+    end
+  end
+
   # Fallbacks shared by both roles.
   defp dispatch(state, :start), do: {state, []}
   defp dispatch(state, {:auth_result, _ref, _result}), do: {state, []}
@@ -223,6 +278,67 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
     do: close(state, {:decode_error, reason})
 
   defp dispatch(state, _event), do: close(state, :sasl_protocol_error)
+
+  defp choose(state, mechanisms) do
+    {:ok, %Init{mechanism: %Value{value: name}} = init} = client_init(state)
+
+    if name in Mechanisms.names(mechanisms) do
+      case SASLCodec.encode_frame(init) do
+        {:ok, frame} ->
+          {state, _id, sent} =
+            send_bytes(%{state | credentials: nil, phase: :await_outcome}, frame)
+
+          {state, sent}
+
+        {:error, _error} ->
+          close(state, :invalid_sasl_credentials)
+      end
+    else
+      close(state, :sasl_mechanism_not_offered)
+    end
+  end
+
+  defp outcome(state, 0) do
+    {state, cancel} = cancel_deadline(state)
+    {%{state | phase: :done}, cancel ++ [{:expect_header, [0]}, {:start_endpoint, nil}]}
+  end
+
+  defp outcome(state, code), do: close(state, {:sasl, SASL.code_name(code)})
+
+  defp client_init(%{credentials: credentials, hostname: hostname}) do
+    with true <-
+           is_nil(hostname) or
+             (is_binary(hostname) and byte_size(hostname) in 1..255 and String.valid?(hostname)),
+         {:ok, name, response} <- credential_response(credentials) do
+      {:ok,
+       %Init{
+         mechanism: Value.symbol(name),
+         initial_response: response,
+         hostname: hostname && Value.string(hostname)
+       }}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp credential_response(:anonymous), do: {:ok, SASL.anonymous(), nil}
+
+  defp credential_response({:anonymous, trace}) do
+    case Anonymous.parse(trace) do
+      {:ok, nil} -> {:ok, SASL.anonymous(), nil}
+      {:ok, trace} -> {:ok, SASL.anonymous(), Value.binary(trace)}
+      {:error, _reason} -> :error
+    end
+  end
+
+  defp credential_response(%Plain{} = plain) do
+    case Plain.encode(plain) do
+      {:ok, message} -> {:ok, SASL.plain(), Value.binary(message)}
+      {:error, _reason} -> :error
+    end
+  end
+
+  defp credential_response(_credentials), do: :error
 
   defp init(state, %Init{mechanism: %Value{value: name}} = init) do
     cond do

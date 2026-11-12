@@ -257,6 +257,157 @@ defmodule GravitonMQ.AMQP10.SASL.MachineTest do
     end
   end
 
+  describe "client" do
+    test "start sends the SASL header and arms the negotiation deadline" do
+      {:ok, machine} = Machine.new(role: :client, credentials: :anonymous, timeout_ms: 500)
+      {machine, effects} = step(machine, :start, 10)
+
+      assert [{:wake_at, 0, :sasl_negotiation, 0, 510}, {:send_bytes, 0, {:sasl, 0}, @sasl}] =
+               effects
+
+      assert Machine.active?(machine)
+    end
+
+    test "PLAIN is selected from the server list and credentials leave the machine with sasl-init" do
+      {:ok, plain} = Plain.new("graviton-user", "sentinel-password", "admin")
+      machine = client!(credentials: plain, hostname: "broker.example")
+      {machine, []} = step(machine, {:header, header(3)})
+      offered = Value.array(:symbol, [Value.symbol("SCRAM-SHA-256"), Value.symbol("PLAIN")])
+
+      {machine, effects} =
+        step(machine, {:frame, sasl_frame(%Mechanisms{server_mechanisms: offered})})
+
+      assert [{:send_bytes, 0, {:sasl, 1}, init}] = effects
+
+      assert %Init{
+               mechanism: %Value{type: :symbol, value: "PLAIN"},
+               initial_response: %Value{type: :binary, value: response},
+               hostname: %Value{type: :string, value: "broker.example"}
+             } = decode_sasl(init)
+
+      assert {:ok, ^plain} = Plain.parse(response)
+      assert machine.credentials == nil
+      refute_retained(machine, ["sentinel-password", "graviton-user"])
+
+      {machine, effects} = step(machine, {:frame, sasl_frame(%Outcome{code: Value.ubyte(0)})})
+
+      assert [
+               {:cancel_wake, 0, :sasl_negotiation, 0},
+               {:expect_header, [0]},
+               {:start_endpoint, nil}
+             ] = effects
+
+      refute Machine.active?(machine)
+      refute_retained(machine, ["sentinel-password", "graviton-user"])
+    end
+
+    test "credentials are dropped when negotiation ends before sasl-init" do
+      {:ok, plain} = Plain.new("graviton-user", "sentinel-password")
+
+      for event <- [
+            {:header, header(0)},
+            {:timeout, :sasl_negotiation, 0},
+            {:transport_down, :closed}
+          ] do
+        {machine, _effects} = step(client!(credentials: plain), event)
+        refute Machine.active?(machine)
+        refute_retained(machine, ["sentinel-password", "graviton-user"])
+      end
+
+      {machine, []} = step(client!(credentials: plain), {:header, header(3)})
+
+      {machine, [_, {:close, :sasl_mechanism_not_offered}]} =
+        step(
+          machine,
+          {:frame, sasl_frame(%Mechanisms{server_mechanisms: Value.symbol("ANONYMOUS")})}
+        )
+
+      refute_retained(machine, ["sentinel-password", "graviton-user"])
+    end
+
+    test "ANONYMOUS sends its optional trace" do
+      machine = client!(credentials: {:anonymous, "sirhc"})
+      {machine, []} = step(machine, {:header, header(3)})
+
+      {_machine, [{:send_bytes, 0, _, init}]} =
+        step(
+          machine,
+          {:frame, sasl_frame(%Mechanisms{server_mechanisms: Value.symbol("ANONYMOUS")})}
+        )
+
+      assert %Init{initial_response: %Value{value: "sirhc"}, hostname: nil} = decode_sasl(init)
+    end
+
+    test "failure outcomes, refusals and challenges close with exact reasons" do
+      for {code, reason} <- [
+            {1, :auth},
+            {2, :sys},
+            {3, :sys_perm},
+            {4, :sys_temp},
+            {9, {:unknown, 9}}
+          ] do
+        machine = awaiting_outcome!()
+
+        assert {_, [_, {:close, {:sasl, ^reason}}]} =
+                 step(machine, {:frame, sasl_frame(%Outcome{code: Value.ubyte(code)})})
+      end
+
+      machine = client!(credentials: :anonymous)
+      assert {_, [_, {:close, :sasl_not_offered}]} = step(machine, {:header, header(0)})
+
+      {machine, []} = step(client!(credentials: :anonymous), {:header, header(3)})
+
+      assert {_, [_, {:close, :sasl_mechanism_not_offered}]} =
+               step(
+                 machine,
+                 {:frame, sasl_frame(%Mechanisms{server_mechanisms: Value.symbol("PLAIN")})}
+               )
+
+      challenge = %GravitonMQ.AMQP10.SASL.Challenge{challenge: Value.binary(<<>>)}
+
+      assert {_, [_, {:close, :sasl_protocol_error}]} =
+               step(awaiting_outcome!(), {:frame, sasl_frame(challenge)})
+
+      assert {_, [{:close, :sasl_timeout}]} =
+               step(awaiting_outcome!(), {:timeout, :sasl_negotiation, 0})
+    end
+
+    test "credentials whose sasl-init cannot fit a 512-octet frame are refused" do
+      long = String.duplicate("a", 255)
+      {:ok, plain} = Plain.new(long, long, long)
+
+      assert {:error, :invalid_options} =
+               Machine.new(role: :client, credentials: plain, timeout_ms: 10)
+
+      assert {:error, :invalid_options} =
+               Machine.new(role: :client, credentials: {:anonymous, <<0xFF>>}, timeout_ms: 10)
+
+      assert {:error, :invalid_options} =
+               Machine.new(role: :client, credentials: :token, timeout_ms: 10)
+
+      assert {:error, :invalid_options} =
+               Machine.new(role: :client, credentials: :anonymous, hostname: 7, timeout_ms: 10)
+    end
+  end
+
+  defp client!(options) do
+    {:ok, machine} = Machine.new(Keyword.merge([role: :client, timeout_ms: 1_000], options))
+    {machine, _effects} = step(machine, :start)
+    machine
+  end
+
+  defp awaiting_outcome! do
+    {machine, []} = step(client!(credentials: :anonymous), {:header, header(3)})
+
+    {machine, [{:send_bytes, _, _, _}]} =
+      step(
+        machine,
+        {:frame, sasl_frame(%Mechanisms{server_mechanisms: Value.symbol("ANONYMOUS")})}
+      )
+
+    machine
+  end
+
   # The whole machine term, including what `inspect/1` would hide, holds none of
   # the secrets.
   defp refute_retained(machine, secrets) do
