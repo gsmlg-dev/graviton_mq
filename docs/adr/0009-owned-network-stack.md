@@ -39,9 +39,9 @@ A throwaway spike (`hell`/`ex_ssl` `1.0.0-rc.13`, telemetry 1.4.2, Elixir
 
 `hell` and `ex_ssl` are owner-authorized infrastructure, like OTP networking.
 They are the first third-party dependencies and are pinned exactly:
-`graviton_mq_runtime` declares `{:hell, "== 1.0.0-rc.14"}` (bringing `ex_ssl`
+`graviton_mq_runtime` declares `{:hell, "== 1.0.0-rc.17"}` (bringing `ex_ssl`
 and telemetry 1.4.2 transitively); `graviton_mq_client` declares
-`{:ex_ssl, "== 1.0.0-rc.14"}`. The umbrella now has a `mix.lock`. The
+`{:ex_ssl, "== 1.0.0-rc.17"}`. The umbrella now has a `mix.lock`. The
 Ranch/Bandit/Phoenix/Ra/Khepri exclusion is unchanged for everything else.
 Dependency policy tests pin this exact external set.
 
@@ -65,7 +65,15 @@ S1 is split:
   client sends) delivered the client bytes and answered `setopts` promptly in
   3/3 runs, where rc.13 delivered nothing within 5 s. #162 was fixed in
   `hell` 1.0.0-rc.14 (`{:pause, state}`, `pause_input/1`, `resume_input/1`);
-  the accept-only layout does not use it. S1b still requires the TLS interop
+  the accept-only layout does not use it.
+  Pins moved to rc.17 on 2026-11-13 for two S1b prerequisites, both verified
+  by a throwaway behavioural test before the update:
+  gsmlg-dev/http_fetch#168 (Hell redacts `password`, `key`, `sni_fun` and
+  nested `certs_keys`/`sni_hosts` secrets from listener telemetry; a known key
+  password was absent from `[:hell, :listener, :start]` metadata) and
+  gsmlg-dev/http_fetch#169 (ex_ssl server option `active_chunk_size` bounds
+  each active-once delivery; with 16 KiB every delivery was ≤ 16,384 bytes and
+  the byte stream was exact, while without it one delivery was 470,016 bytes). S1b still requires the TLS interop
   suites to pass. Once S1b lands the broker is TLS 1.3-only (ex_ssl
   has no TLS 1.2 server); that is a documented breaking change.
 

@@ -25,8 +25,8 @@ defmodule GravitonMQ.DependencyGraphTest do
     graviton_mq_storage: [],
     graviton_mq_amqp10: [],
     graviton_mq_mqtt: [],
-    graviton_mq_client: [{:ex_ssl, "== 1.0.0-rc.14"}],
-    graviton_mq_runtime: [{:hell, "== 1.0.0-rc.14"}],
+    graviton_mq_client: [{:ex_ssl, "== 1.0.0-rc.17"}],
+    graviton_mq_runtime: [{:hell, "== 1.0.0-rc.17"}],
     graviton_mq: []
   }
 

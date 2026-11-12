@@ -20,8 +20,8 @@ defmodule GravitonMQ.ReleaseTest do
 
   # ADR 0009: owner-authorized third-party packages, in mix.exs declaration order.
   @external_dependencies %{
-    graviton_mq_client: [{:ex_ssl, "== 1.0.0-rc.14"}],
-    graviton_mq_runtime: [{:hell, "== 1.0.0-rc.14"}]
+    graviton_mq_client: [{:ex_ssl, "== 1.0.0-rc.17"}],
+    graviton_mq_runtime: [{:hell, "== 1.0.0-rc.17"}]
   }
 
   test "version updates accept prereleases and reject malformed input before writing", %{
