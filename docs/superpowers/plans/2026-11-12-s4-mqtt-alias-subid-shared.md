@@ -113,7 +113,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 - Create: `apps/graviton_mq_mqtt/test/fixtures/broker_checkpoint_v1.etf`
 - Create (scratch, not committed): `/tmp/gmq-s4-tmp/gen_v1.exs`
 
-- [ ] **Step 1: Create isolated directories and record the baseline commit**
+- [x] **Step 1: Create isolated directories and record the baseline commit**
 
 ```bash
 mkdir -p /tmp/gmq-build-s4 /tmp/gmq-s4-tmp
@@ -122,7 +122,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq && git rev-parse --short HEAD && gi
 
 Expected: `8a31f2a` (the commit that approved the S2/S4 designs) or a later S2 commit, and only untracked plan documents. Write the hash down as `BASE`; it is quoted in the fixture test and in Tasks 19–20.
 
-- [ ] **Step 2: Baseline the MQTT test files in the isolated build**
+- [x] **Step 2: Baseline the MQTT test files in the isolated build**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -130,7 +130,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures` and `ls /tmp/gmq-build-s4/test/lib` lists `graviton_mq_mqtt`. Nothing new appears under `ROOT/_build`.
 
-- [ ] **Step 3: Write the fixture generator (pre-S4 code, unmodified tree)**
+- [x] **Step 3: Write the fixture generator (pre-S4 code, unmodified tree)**
 
 Create `/tmp/gmq-s4-tmp/gen_v1.exs`:
 
@@ -202,7 +202,7 @@ File.write!(System.fetch_env!("FIXTURE"), bytes)
 IO.puts("wrote #{byte_size(bytes)} bytes")
 ```
 
-- [ ] **Step 4: Generate the fixture with the unmodified pre-S4 code**
+- [x] **Step 4: Generate the fixture with the unmodified pre-S4 code**
 
 ```bash
 mkdir -p /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt/test/fixtures
@@ -211,7 +211,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `wrote <n> bytes` with `n` below 4,000. Run `git diff --stat -- apps/graviton_mq_mqtt/lib` and confirm it is empty (the fixture must come from pre-S4 code).
 
-- [ ] **Step 5: Commit the fixture**
+- [x] **Step 5: Commit the fixture**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq
@@ -227,7 +227,7 @@ git commit -m "test(mqtt): add pre-S4 v1 broker checkpoint fixture" -- apps/grav
 - Modify: `apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/topic.ex`
 - Test: `apps/graviton_mq_mqtt/test/topic_test.exs`
 
-- [ ] **Step 1: Write the failing tests** (append inside `GravitonMQ.MQTT.TopicTest`)
+- [x] **Step 1: Write the failing tests** (append inside `GravitonMQ.MQTT.TopicTest`)
 
 ```elixir
   test "subscription filters parse shared and ordinary forms through one grammar" do
@@ -267,7 +267,7 @@ git commit -m "test(mqtt): add pre-S4 v1 broker checkpoint fixture" -- apps/grav
   end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/topic_test.exs
@@ -275,7 +275,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL with `UndefinedFunctionError ... Topic.parse_filter/1 is undefined`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace the moduledoc and `valid_filter?/1` clauses of `topic.ex` with:
 
@@ -329,7 +329,7 @@ and
 
 Keep `valid_name?/1`, `matches?/2` and the private helpers unchanged.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -337,7 +337,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures` (existing "reject shared subscriptions" vectors still hold).
 
-- [ ] **Step 5: Format, compile, commit**
+- [x] **Step 5: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/topic.ex apps/graviton_mq_mqtt/test/topic_test.exs
@@ -353,7 +353,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq && git commit -m "feat(mqtt): parse
 - Create: `apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/topic_alias.ex`
 - Test: `apps/graviton_mq_mqtt/test/topic_alias_test.exs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```elixir
 defmodule GravitonMQ.MQTT.TopicAliasTest do
@@ -438,7 +438,7 @@ defmodule GravitonMQ.MQTT.TopicAliasTest do
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/topic_alias_test.exs
@@ -446,7 +446,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL with `module GravitonMQ.MQTT.TopicAlias is not available`.
 
-- [ ] **Step 3: Implement `topic_alias.ex`**
+- [x] **Step 3: Implement `topic_alias.ex`**
 
 ```elixir
 defmodule GravitonMQ.MQTT.TopicAlias do
@@ -527,7 +527,7 @@ defmodule GravitonMQ.MQTT.TopicAlias do
 end
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/topic_alias_test.exs
@@ -535,7 +535,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `7 tests, 0 failures`.
 
-- [ ] **Step 5: Format, compile, architecture check, commit**
+- [x] **Step 5: Format, compile, architecture check, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/topic_alias.ex apps/graviton_mq_mqtt/test/topic_alias_test.exs
@@ -558,7 +558,7 @@ Expected: architecture check prints no violation. (If it fails to compile an S2 
 - Modify: `apps/graviton_mq_runtime/lib/graviton_mq/runtime/mqtt/config.ex`
 - Test: `apps/graviton_mq_runtime/test/mqtt/config_test.exs`
 
-- [ ] **Step 1: Create `broker_alias_test.exs` with helpers and failing limit tests**
+- [x] **Step 1: Create `broker_alias_test.exs` with helpers and failing limit tests**
 
 The alias list already names modules first used in Tasks 4–5 (`Checkpoint`, `Packet`, `Disconnect`, `Publish`, `Puback`) and helpers used later (`packet/4`, `subscribe/3`, `publishes/2`, `disconnected?/3`); the resulting "unused" test warnings disappear in Task 5. `mix compile --warnings-as-errors` does not compile test files, so it is unaffected.
 
@@ -656,7 +656,7 @@ defmodule GravitonMQ.MQTT.BrokerAliasTest do
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/broker_alias_test.exs
@@ -664,7 +664,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL (`topic_alias_maximum` is 0; unknown option keys return `{:error, :invalid_options}` for valid inputs).
 
-- [ ] **Step 3: Implement in `broker.ex`**
+- [x] **Step 3: Implement in `broker.ex`**
 
 1. Aliases: change line 15 to `alias GravitonMQ.MQTT.{Topic, TopicAlias}`.
 2. Add to `@defaults` (after `dispatch_retry_interval: 1_000`):
@@ -716,11 +716,11 @@ Expected: FAIL (`topic_alias_maximum` is 0; unknown option keys return `{:error,
 
 6. In the CONNACK `properties` list replace `topic_alias_maximum: 0,` with `topic_alias_maximum: state.limits.topic_alias_maximum,`.
 
-- [ ] **Step 4: Update the historical CONNACK assertion**
+- [x] **Step 4: Update the historical CONNACK assertion**
 
 In `apps/graviton_mq_mqtt/test/broker_test.exs` line 87 replace `assert properties[:topic_alias_maximum] == 0` with `assert properties[:topic_alias_maximum] == 10`.
 
-- [ ] **Step 5: Run MQTT tests**
+- [x] **Step 5: Run MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -728,7 +728,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures`.
 
-- [ ] **Step 6: Failing runtime config tests** (append to `R/test/mqtt/config_test.exs`)
+- [x] **Step 6: Failing runtime config tests** (append to `R/test/mqtt/config_test.exs`)
 
 ```elixir
   test "Topic Alias limits pass through and are validated by the machine" do
@@ -764,7 +764,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_runtime && env MIX
 
 Expected: FAIL (`typo`-style rejection of the new keys).
 
-- [ ] **Step 7: Implement in `R/lib/graviton_mq/runtime/mqtt/config.ex`**
+- [x] **Step 7: Implement in `R/lib/graviton_mq/runtime/mqtt/config.ex`**
 
 1. Append `topic_alias_maximum max_outbound_topic_aliases max_alias_bytes` to `@machine_keys` (before the closing `)a`).
 2. Add the alias import: `alias GravitonMQ.MQTT.Broker, as: Machine` (below the existing `alias GravitonMQ.MQTT.Codec.Limits`).
@@ -782,7 +782,7 @@ Expected: FAIL (`typo`-style rejection of the new keys).
            match?({:ok, _}, Machine.new(config.machine_options)),
 ```
 
-- [ ] **Step 8: Run runtime MQTT tests**
+- [x] **Step 8: Run runtime MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_runtime && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/mqtt
@@ -790,7 +790,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_runtime && env MIX
 
 Expected: `0 failures`.
 
-- [ ] **Step 9: Format, compile, commit**
+- [x] **Step 9: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex apps/graviton_mq_mqtt/test/broker_alias_test.exs apps/graviton_mq_mqtt/test/broker_test.exs apps/graviton_mq_runtime/lib/graviton_mq/runtime/mqtt/config.ex apps/graviton_mq_runtime/test/mqtt/config_test.exs
@@ -807,7 +807,7 @@ git commit -m "feat(mqtt): advertise configurable broker topic alias maximum" --
 - Modify: `apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex` (`incoming_publish/5`)
 - Test: `apps/graviton_mq_mqtt/test/broker_alias_test.exs`
 
-- [ ] **Step 1: Append failing tests to `broker_alias_test.exs`**
+- [x] **Step 1: Append failing tests to `broker_alias_test.exs`**
 
 ```elixir
   test "inbound aliases resolve before every PUBLISH check and never reach subscribers" do
@@ -937,7 +937,7 @@ git commit -m "feat(mqtt): advertise configurable broker topic alias maximum" --
   end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/broker_alias_test.exs
@@ -945,7 +945,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: the new tests FAIL (every alias currently disconnects with 0x94).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Rename the existing `defp incoming_publish(state, id, packet, bytes, now)` to `defp resolved_publish(state, id, packet, bytes, now)` and delete its first `cond` branch (`Keyword.has_key?(packet.properties, :topic_alias) -> disconnect(... 0x94 ...)`). Insert above it:
 
@@ -977,7 +977,7 @@ Rename the existing `defp incoming_publish(state, id, packet, bytes, now)` to `d
   end
 ```
 
-- [ ] **Step 4: Run all MQTT tests**
+- [x] **Step 4: Run all MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -985,7 +985,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures`.
 
-- [ ] **Step 5: Format, compile, commit**
+- [x] **Step 5: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex apps/graviton_mq_mqtt/test/broker_alias_test.exs
@@ -1001,7 +1001,7 @@ git commit -m "feat(mqtt): resolve inbound topic aliases in the broker" -- apps/
 - Modify: `apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex` (`deliver_authorized/4` network clause)
 - Test: `apps/graviton_mq_mqtt/test/broker_alias_test.exs`
 
-- [ ] **Step 1: Append failing tests**
+- [x] **Step 1: Append failing tests**
 
 ```elixir
   defp publish_all(state, id, topics) do
@@ -1080,7 +1080,7 @@ git commit -m "feat(mqtt): resolve inbound topic aliases in the broker" -- apps/
   end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/broker_alias_test.exs
@@ -1088,7 +1088,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL on the first and third new tests (no alias is ever sent).
 
-- [ ] **Step 3: Implement in `deliver_authorized/4` (network clause, `true ->` branch)**
+- [x] **Step 3: Implement in `deliver_authorized/4` (network clause, `true ->` branch)**
 
 Replace the block from `packet = recipient_packet(entry, packet_id, now)` to the end of the `if outbound_fits?` success branch with:
 
@@ -1126,7 +1126,7 @@ Replace the block from `packet = recipient_packet(entry, packet_id, now)` to the
 
 and keep the following `state = put_session(state, op.recipient, %{session | next_packet_id: ...})`, `pump_recipient` and `else` branches unchanged. (The former `state = if entry.qos > 0, do: put_conn(... send_quota - 1), else: state` is replaced by the two lines above.)
 
-- [ ] **Step 4: Run all MQTT tests**
+- [x] **Step 4: Run all MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -1134,7 +1134,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures`.
 
-- [ ] **Step 5: Format, compile, commit**
+- [x] **Step 5: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex apps/graviton_mq_mqtt/test/broker_alias_test.exs
@@ -1152,7 +1152,7 @@ git commit -m "feat(mqtt): assign bounded outbound topic aliases in the broker" 
 - Modify: `apps/graviton_mq_mqtt/test/broker_checkpoint_test.exs:210-211`
 - Modify: `apps/graviton_mq_runtime/test/mqtt/persistence_test.exs`
 
-- [ ] **Step 1: Write failing pure tests** (append to `broker_checkpoint_test.exs`; replace `BASE` with the hash from Task 0 Step 1)
+- [x] **Step 1: Write failing pure tests** (append to `broker_checkpoint_test.exs`; replace `BASE` with the hash from Task 0 Step 1)
 
 ```elixir
   # Written by Checkpoint v1 at commit BASE (Task 0 of the S4 plan).
@@ -1192,7 +1192,7 @@ git commit -m "feat(mqtt): assign bounded outbound topic aliases in the broker" 
 
 In the existing test "rejects schema corruption ..." change `%{snapshot | version: 2}` to `%{snapshot | version: 3}`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/broker_checkpoint_test.exs
@@ -1200,7 +1200,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL (restored subscription lacks `:subscription_identifier`; capture version is 1).
 
-- [ ] **Step 3: Machine record shape in `broker.ex`**
+- [x] **Step 3: Machine record shape in `broker.ex`**
 
 In `commit_subscribe_snapshot/3` replace `sub = %{id: state.next_id, options: %{opts | qos: code}}` with:
 
@@ -1221,7 +1221,7 @@ In `install_targets/2` add to the `entry` map (after `retry_at: nil`):
         shared: Map.get(target, :shared)
 ```
 
-- [ ] **Step 4: Checkpoint v2 in `checkpoint.ex`**
+- [x] **Step 4: Checkpoint v2 in `checkpoint.ex`**
 
 1. Replace `@delivery` and add the new attributes:
 
@@ -1326,7 +1326,7 @@ and replace `delivery?/3` with:
   defp subscription_identifier?(value), do: is_integer(value) and value in 1..268_435_455
 ```
 
-- [ ] **Step 5: Run MQTT tests**
+- [x] **Step 5: Run MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -1334,7 +1334,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures`.
 
-- [ ] **Step 6: Failing runtime v1 WAL-record recovery test** (append to `R/test/mqtt/persistence_test.exs`)
+- [x] **Step 6: Failing runtime v1 WAL-record recovery test** (append to `R/test/mqtt/persistence_test.exs`)
 
 ```elixir
   @v1_fixture Path.expand(
@@ -1383,7 +1383,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_runtime && env MIX
 
 Expected: PASS already (the pure upgrade landed in Step 4). If it fails, the failure is a real regression: fix `checkpoint.ex`, not the test. The test is the explicit "v1 written by the current code recovers under v2" evidence at the WAL boundary (same record type `"mqtt-broker-snapshot/v1"`).
 
-- [ ] **Step 7: Format, compile, commit**
+- [x] **Step 7: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker/checkpoint.ex apps/graviton_mq_mqtt/test/broker_checkpoint_test.exs apps/graviton_mq_runtime/test/mqtt/persistence_test.exs
@@ -1402,7 +1402,7 @@ git commit -m "feat(mqtt): write broker snapshot v2 and upgrade v1 at read time"
 - Create: `apps/graviton_mq_mqtt/test/broker_subscription_identifier_test.exs`
 - Modify: `apps/graviton_mq_runtime/lib/graviton_mq/runtime/mqtt/config.ex`, `apps/graviton_mq_runtime/test/mqtt/config_test.exs`
 
-- [ ] **Step 1: Create the failing test file**
+- [x] **Step 1: Create the failing test file**
 
 ```elixir
 defmodule GravitonMQ.MQTT.BrokerSubscriptionIdentifierTest do
@@ -1560,7 +1560,7 @@ defmodule GravitonMQ.MQTT.BrokerSubscriptionIdentifierTest do
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/broker_subscription_identifier_test.exs
@@ -1568,7 +1568,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL (`subscription_identifiers` is an unknown option; SUBSCRIBE with ID disconnects 0xA1).
 
-- [ ] **Step 3: Implement in `broker.ex`**
+- [x] **Step 3: Implement in `broker.ex`**
 
 1. `@defaults`: add `subscription_identifiers: 1,`. In `new/1` add `and limits.subscription_identifiers in 0..1` to the inner condition.
 2. CONNACK: `subscription_identifier_available: state.limits.subscription_identifiers,`.
@@ -1604,7 +1604,7 @@ and add to the op data map passed to `prepare/4` (after `retained: retained,`):
     do: subscriptions |> Enum.map(& &1.subscription_identifier) |> Enum.reject(&is_nil/1)
 ```
 
-- [ ] **Step 4: Capability mismatch in `checkpoint.ex`**
+- [x] **Step 4: Capability mismatch in `checkpoint.ex`**
 
 In `restore/4` add after `:ok <- validate(snapshot, template),`:
 
@@ -1629,11 +1629,11 @@ and add:
   end
 ```
 
-- [ ] **Step 5: Update the historical CONNACK assertion**
+- [x] **Step 5: Update the historical CONNACK assertion**
 
 `broker_test.exs` line 86: `assert properties[:subscription_identifier_available] == 1`.
 
-- [ ] **Step 6: Run MQTT tests**
+- [x] **Step 6: Run MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -1641,7 +1641,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures`.
 
-- [ ] **Step 7: Runtime switch — failing test** (append to `R/test/mqtt/config_test.exs`)
+- [x] **Step 7: Runtime switch — failing test** (append to `R/test/mqtt/config_test.exs`)
 
 ```elixir
   test "feature switches are booleans mapped to machine availability flags" do
@@ -1657,7 +1657,7 @@ Expected: `0 failures`.
   end
 ```
 
-- [ ] **Step 8: Implement in `config.ex`**
+- [x] **Step 8: Implement in `config.ex`**
 
 1. Append `subscription_identifiers` to `@machine_keys`; add `@flag_keys ~w(subscription_identifiers)a` below `@machine_keys`.
 2. In `valid_machine_limits?/1` add before the alias clause: `{:ok, value} when key in @flag_keys -> is_boolean(value)`.
@@ -1678,7 +1678,7 @@ and add:
   defp machine_flag(option), do: option
 ```
 
-- [ ] **Step 9: Run runtime MQTT tests, format, compile, commit**
+- [x] **Step 9: Run runtime MQTT tests, format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_runtime && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/mqtt
@@ -1702,7 +1702,7 @@ Expected: `0 failures` before formatting.
 - Modify: `apps/graviton_mq_runtime/lib/graviton_mq/runtime/mqtt/config.ex`, `apps/graviton_mq_runtime/test/mqtt/config_test.exs`
 - Modify: `apps/graviton_mq/test/graviton_mq/mqtt_paho_test.exs` (SHARED_OFF keeps its meaning with the switch off)
 
-- [ ] **Step 1: Create the failing test file**
+- [x] **Step 1: Create the failing test file**
 
 ```elixir
 defmodule GravitonMQ.MQTT.BrokerSharedTest do
@@ -1903,7 +1903,7 @@ defmodule GravitonMQ.MQTT.BrokerSharedTest do
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/broker_shared_test.exs
@@ -1911,7 +1911,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL (`shared_subscriptions` unknown option; shared SUBSCRIBE disconnects 0x9E).
 
-- [ ] **Step 3: Implement in `broker.ex`**
+- [x] **Step 3: Implement in `broker.ex`**
 
 1. `@defaults`: add `shared_subscriptions: 1,`; `new/1`: add `and limits.shared_subscriptions in 0..1`.
 2. `defstruct`: add `share_cursor: %{},` and `shared_discarded: 0,` (transient; never captured).
@@ -2062,7 +2062,7 @@ Expected: FAIL (`shared_subscriptions` unknown option; shared SUBSCRIBE disconne
 
 9. Remove the now-unused `defp route(state, message)` head (it is replaced by `route/3`).
 
-- [ ] **Step 4: Capability clause in `checkpoint.ex`**
+- [x] **Step 4: Capability clause in `checkpoint.ex`**
 
 Replace `capabilities/2`'s final `if` with:
 
@@ -2082,11 +2082,11 @@ Replace `capabilities/2`'s final `if` with:
     end
 ```
 
-- [ ] **Step 5: Update historical broker tests**
+- [x] **Step 5: Update historical broker tests**
 
 `broker_test.exs` line 85: `assert properties[:shared_subscription_available] == 1`. In the test "a shared subscription after advertising unavailable disconnects before authorization" (line 598) change `attach(new(), :one, 1, ...)` to `attach(new(shared_subscriptions: 0), :one, 1, ...)`.
 
-- [ ] **Step 6: Run MQTT tests**
+- [x] **Step 6: Run MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -2094,7 +2094,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures`.
 
-- [ ] **Step 7: Runtime switch**
+- [x] **Step 7: Runtime switch**
 
 In `R/.../mqtt/config.ex` append `shared_subscriptions` to `@machine_keys` and change `@flag_keys` to `~w(subscription_identifiers shared_subscriptions)a`. Append to the config test from Task 7:
 
@@ -2104,7 +2104,7 @@ In `R/.../mqtt/config.ex` append `shared_subscriptions` to `@machine_keys` and c
     assert {:error, :invalid_mqtt_options} = Config.build(auth: :anonymous, shared_subscriptions: 0)
 ```
 
-- [ ] **Step 8: Keep the Paho SHARED_OFF test meaningful (CI only)**
+- [x] **Step 8: Keep the Paho SHARED_OFF test meaningful (CI only)**
 
 In `apps/graviton_mq/test/graviton_mq/mqtt_paho_test.exs` change `defp broker do` to
 
@@ -2127,7 +2127,7 @@ In `apps/graviton_mq/test/graviton_mq/mqtt_paho_test.exs` change `defp broker do
 
 and in the 0x9E test use `instance = broker(shared_subscriptions: false)`.
 
-- [ ] **Step 9: Run, format, compile, commit**
+- [x] **Step 9: Run, format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_runtime && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/mqtt
@@ -2147,7 +2147,7 @@ Expected: runtime tests `0 failures`; `apps/graviton_mq` compiles (its MQTT test
 - Modify: `apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex` (`end_session/3`, `down_existing/4`, `commit_unsubscribe/4`, new `redistribute/4`, `reroute/5`, `movable?/2`)
 - Create: `apps/graviton_mq_mqtt/test/broker_shared_redistribution_test.exs`
 
-- [ ] **Step 1: Create the failing test file**
+- [x] **Step 1: Create the failing test file**
 
 ```elixir
 defmodule GravitonMQ.MQTT.BrokerSharedRedistributionTest do
@@ -2327,7 +2327,7 @@ end
 
 Trigger walk-through (for reviewers): with m1 expiry 60, connection loss first moves the never-sent `x3`; the later session end (tick expiry or clean-start reconnect) moves the sent QoS1 `x1`. With expiry 0 (loss or takeover) both move at session end.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/broker_shared_redistribution_test.exs
@@ -2335,7 +2335,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: the fixture test passes; redistribution tests FAIL (entries stay with or vanish with m1).
 
-- [ ] **Step 3: Implement redistribution in `broker.ex`**
+- [x] **Step 3: Implement redistribution in `broker.ex`**
 
 Add after `end_session/3`:
 
@@ -2460,7 +2460,7 @@ Wire it in:
   end
 ```
 
-- [ ] **Step 4: Run all MQTT tests**
+- [x] **Step 4: Run all MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -2468,7 +2468,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures`, including `broker_checkpoint_test.exs` (restore's `{machine, []} = Broker.transition(...)` loss replay must remain effect-free) and `broker_connect_hold_test.exs` (takeover paths).
 
-- [ ] **Step 5: Format, compile, commit**
+- [x] **Step 5: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex apps/graviton_mq_mqtt/test/broker_shared_redistribution_test.exs
@@ -2486,7 +2486,7 @@ git commit -m "feat(mqtt): redistribute shared subscription responsibility" -- a
 - Modify: `apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex` (`transition/2` `:protocol_error` clause)
 - Test: `apps/graviton_mq_mqtt/test/protocol_error_reason_test.exs`
 
-- [ ] **Step 1: Failing test** (append to `protocol_error_reason_test.exs`)
+- [x] **Step 1: Failing test** (append to `protocol_error_reason_test.exs`)
 
 ```elixir
   test "No Local on a shared subscription is a Protocol Error (MQTT-3.8.3-4)" do
@@ -2514,7 +2514,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL (`reason: :invalid_subscription_options`).
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `operational.ex` `decode_options/3` replace the `if ... do ... else` head with:
 
@@ -2548,7 +2548,7 @@ In `broker.ex` `transition(state, {:protocol_error, ...})`:
       end
 ```
 
-- [ ] **Step 3: Run all MQTT tests (including codec suites)**
+- [x] **Step 3: Run all MQTT tests (including codec suites)**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -2556,7 +2556,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures` (the 0..255 option-octet vector uses filter `"t"` and is unchanged; the encode-side shared No Local rejection stays `:invalid_value`).
 
-- [ ] **Step 4: Format, compile, commit**
+- [x] **Step 4: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/codec/operational.ex apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/broker.ex apps/graviton_mq_mqtt/test/protocol_error_reason_test.exs
@@ -2572,7 +2572,7 @@ git commit -m "fix(mqtt): report No Local on shared filters as a protocol error"
 - Modify: `apps/graviton_mq_runtime/lib/graviton_mq/runtime/mqtt/broker.ex` (`call(:status, ...)`)
 - Test: covered by Task 12 `mqtt_feature_test.exs` "status reports groups, discards and alias tables"
 
-- [ ] **Step 1: Implement** (the failing test is written in Task 12 Step 1; write it first if executing tasks out of order)
+- [x] **Step 1: Implement** (the failing test is written in Task 12 Step 1; write it first if executing tasks out of order)
 
 In `call(:status, _from, state)` add to the `status` map (after `prepared:`):
 
@@ -2593,7 +2593,7 @@ In `call(:status, _from, state)` add to the `status` map (after `prepared:`):
       },
 ```
 
-- [ ] **Step 2: Compile**
+- [x] **Step 2: Compile**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_runtime/lib/graviton_mq/runtime/mqtt/broker.ex
@@ -2610,7 +2610,7 @@ Commit together with Task 12 (the test lives there).
 - Create: `apps/graviton_mq/test/graviton_mq/mqtt_feature_test.exs`
 - Create: `apps/graviton_mq/test/graviton_mq/mqtt_feature_persistence_test.exs`
 
-- [ ] **Step 1: Create `mqtt_feature_test.exs`** (untagged: runs locally)
+- [x] **Step 1: Create `mqtt_feature_test.exs`** (untagged: runs locally)
 
 ```elixir
 defmodule GravitonMQ.MQTTBroker.FeatureTest do
@@ -2802,7 +2802,7 @@ defmodule GravitonMQ.MQTTBroker.FeatureTest do
 end
 ```
 
-- [ ] **Step 2: Create `mqtt_feature_persistence_test.exs`**
+- [x] **Step 2: Create `mqtt_feature_persistence_test.exs`**
 
 ```elixir
 defmodule GravitonMQ.MQTTBroker.FeaturePersistenceTest do
@@ -2924,7 +2924,7 @@ defmodule GravitonMQ.MQTTBroker.FeaturePersistenceTest do
 end
 ```
 
-- [ ] **Step 3: Run**
+- [x] **Step 3: Run**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/graviton_mq/mqtt_feature_test.exs test/graviton_mq/mqtt_feature_persistence_test.exs
@@ -2932,7 +2932,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq && env MIX_BUILD_R
 
 Expected: `8 tests, 0 failures` (if run before Task 11, the status test fails with a `MatchError` on `shared_groups`). On a contended disk the persistence test can take tens of seconds (ADR 0009 notes 57–418 ms synchronous writes); the 120 s module timeout covers it.
 
-- [ ] **Step 4: Format, compile, commit (Tasks 11 + 12)**
+- [x] **Step 4: Format, compile, commit (Tasks 11 + 12)**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq/test/graviton_mq/mqtt_feature_test.exs apps/graviton_mq/test/graviton_mq/mqtt_feature_persistence_test.exs apps/graviton_mq_runtime/lib/graviton_mq/runtime/mqtt/broker.ex
@@ -2950,7 +2950,7 @@ git commit -m "feat(runtime): report MQTT shared groups and alias tables in stat
 - Modify: `apps/graviton_mq_mqtt/test/client_test.exs:364`
 - Create: `apps/graviton_mq_mqtt/test/client_alias_test.exs`
 
-- [ ] **Step 1: Create the failing test file**
+- [x] **Step 1: Create the failing test file**
 
 ```elixir
 defmodule GravitonMQ.MQTT.ClientAliasTest do
@@ -3089,7 +3089,7 @@ defmodule GravitonMQ.MQTT.ClientAliasTest do
 end
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/client_alias_test.exs
@@ -3097,7 +3097,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: FAIL (`Client.new(connect(topic_alias_maximum: 1))` returns `:topic_aliases_unsupported`; no aliases are sent).
 
-- [ ] **Step 3: Implement in `client.ex`**
+- [x] **Step 3: Implement in `client.ex`**
 
 1. Aliases: `alias GravitonMQ.MQTT.TopicAlias` (after the codec alias). Add struct fields: `topic_alias_maximum: 0, max_outbound_topic_aliases: 0, aliases: %TopicAlias{},`.
 2. `new/2`: after `receive_maximum = ...` add
@@ -3223,7 +3223,7 @@ and change the condition to `if values_valid? and aliases_valid? and is_integer(
 
 12. Update `client_test.exs` line 364: `assert {:ok, _} = Client.new(connect(topic_alias_maximum: 1))`.
 
-- [ ] **Step 4: Run all MQTT tests**
+- [x] **Step 4: Run all MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test
@@ -3231,7 +3231,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_mqtt && env MIX_BU
 
 Expected: `0 failures` (the historical "inbound aliases ... disconnect explicitly" vector keeps 0x94 because the default inbound maximum is 0).
 
-- [ ] **Step 5: Format, compile, commit**
+- [x] **Step 5: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_mqtt/lib/graviton_mq/mqtt/client.ex apps/graviton_mq_mqtt/test/client_alias_test.exs apps/graviton_mq_mqtt/test/client_test.exs
@@ -3251,7 +3251,7 @@ git commit -m "feat(mqtt): support topic aliases in the pure client" -- apps/gra
 - Modify: `apps/graviton_mq_client/test/mqtt_shared_subscription_test.exs`
 - Modify: `apps/graviton_mq_client/test/mqtt_checkpoint_test.exs`
 
-- [ ] **Step 1: Replace the first test of `mqtt_shared_subscription_test.exs`** and add Sub-ID / alias option tests
+- [x] **Step 1: Replace the first test of `mqtt_shared_subscription_test.exs`** and add Sub-ID / alias option tests
 
 ```elixir
   test "persistent shared subscriptions are captured, recovered and reported on session loss",
@@ -3321,7 +3321,7 @@ git commit -m "feat(mqtt): support topic aliases in the pure client" -- apps/gra
 
 Delete the old first test ("persistent shared subscriptions reject before admission ..."). The `connected/1` helper already merges options, so `id:` reaches the child spec.
 
-- [ ] **Step 2: Add checkpoint tests** (append to `mqtt_checkpoint_test.exs`)
+- [x] **Step 2: Add checkpoint tests** (append to `mqtt_checkpoint_test.exs`)
 
 ```elixir
   test "shared subscription filters are valid checkpoint content" do
@@ -3344,7 +3344,7 @@ Delete the old first test ("persistent shared subscriptions reject before admiss
   end
 ```
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_client && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/mqtt_shared_subscription_test.exs test/mqtt_checkpoint_test.exs
@@ -3352,7 +3352,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_client && env MIX_
 
 Expected: FAIL (`:shared_subscription_persistence_unsupported`; `:subscription_identifier` is an invalid option; `topic_alias_maximum` is an unknown key; shared filters are invalid checkpoint content).
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 `config.ex`:
 1. Append `topic_alias_maximum max_outbound_topic_aliases` to `@keys`.
@@ -3406,7 +3406,7 @@ Expected: FAIL (`:shared_subscription_persistence_unsupported`; `:subscription_i
 
 The checkpoint version stays 1 (spec §6: schema unchanged, accepted values widen; a pre-S4 binary reading a shared filter fails closed with `:invalid_checkpoint_schema`).
 
-- [ ] **Step 5: Run client MQTT tests**
+- [x] **Step 5: Run client MQTT tests**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_client && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/mqtt_shared_subscription_test.exs test/mqtt_checkpoint_test.exs test/mqtt_client_test.exs test/mqtt_store_test.exs test/privacy_test.exs test/mqtt_persistence_fault_test.exs
@@ -3414,7 +3414,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_client && env MIX_
 
 Expected: `0 failures`.
 
-- [ ] **Step 6: Format, compile, commit**
+- [x] **Step 6: Format, compile, commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_client/lib/graviton_mq/client/mqtt.ex apps/graviton_mq_client/lib/graviton_mq/client/mqtt/config.ex apps/graviton_mq_client/lib/graviton_mq/client/mqtt/checkpoint.ex apps/graviton_mq_client/test/mqtt_shared_subscription_test.exs apps/graviton_mq_client/test/mqtt_checkpoint_test.exs
@@ -3430,7 +3430,7 @@ git commit -m "feat(client): persist shared subscriptions and expose alias and S
 - Create: `apps/graviton_mq_client/test/support/mqtt_wire_tap.exs`
 - Create: `apps/graviton_mq_client/test/mqtt_peer_capabilities_test.exs`
 
-- [ ] **Step 1: Create the wire tap**
+- [x] **Step 1: Create the wire tap**
 
 ```elixir
 defmodule GravitonMQ.Client.Test.MQTTWireTap do
@@ -3624,7 +3624,7 @@ defmodule GravitonMQ.Client.Test.MQTTWireTap do
 end
 ```
 
-- [ ] **Step 2: Create the T0 probe test (Mosquitto 2.1.2)**
+- [x] **Step 2: Create the T0 probe test (Mosquitto 2.1.2)**
 
 ```elixir
 Code.require_file("support/mosquitto.exs", __DIR__)
@@ -3676,7 +3676,7 @@ defmodule GravitonMQ.MQTTClient.PeerCapabilitiesTest do
 end
 ```
 
-- [ ] **Step 3: Verify locally that the files compile and are excluded**
+- [x] **Step 3: Verify locally that the files compile and are excluded**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_client && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/mqtt_peer_capabilities_test.exs
@@ -3684,7 +3684,7 @@ cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_client && env MIX_
 
 Expected: `2 tests, 0 failures, 2 excluded` (no `GRAVITON_MOSQUITTO_BIN` locally). The real outcome is recorded from CI in Task 20.
 
-- [ ] **Step 4: Format and commit**
+- [x] **Step 4: Format and commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq_client/test/support/mqtt_wire_tap.exs apps/graviton_mq_client/test/mqtt_peer_capabilities_test.exs
@@ -3701,7 +3701,7 @@ git commit -m "test(mqtt): add wire tap and pinned peer capability probes" -- ap
 - Create: `apps/graviton_mq/test/graviton_mq/mqtt_feature_paho_test.exs`
 - Create: `apps/graviton_mq/test/graviton_mq/mqtt_feature_mosquitto_test.exs`
 
-- [ ] **Step 1: Create the Paho peer**
+- [x] **Step 1: Create the Paho peer**
 
 ```python
 """Fixed-version independent MQTT5 peer for S4 features; never imported by production code."""
@@ -4040,7 +4040,7 @@ if __name__ == "__main__":
         MODES[arguments.mode](arguments.port)
 ```
 
-- [ ] **Step 2: Create the Paho ExUnit driver**
+- [x] **Step 2: Create the Paho ExUnit driver**
 
 ```elixir
 Code.require_file("../../../graviton_mq_client/test/support/mosquitto.exs", __DIR__)
@@ -4114,7 +4114,7 @@ defmodule GravitonMQ.MQTTBroker.FeaturePahoTest do
 end
 ```
 
-- [ ] **Step 3: Create the mosquitto_pub/sub → broker driver**
+- [x] **Step 3: Create the mosquitto_pub/sub → broker driver**
 
 ```elixir
 Code.require_file("../../../graviton_mq_client/test/support/mosquitto.exs", __DIR__)
@@ -4202,7 +4202,7 @@ defmodule GravitonMQ.MQTTBroker.FeatureMosquittoTest do
 end
 ```
 
-- [ ] **Step 4: Verify local compile and exclusion**
+- [x] **Step 4: Verify local compile and exclusion**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/graviton_mq/mqtt_feature_paho_test.exs test/graviton_mq/mqtt_feature_mosquitto_test.exs test/graviton_mq/mqtt_paho_test.exs
@@ -4211,7 +4211,7 @@ python3 -m py_compile apps/graviton_mq/test/support/mqtt_feature_peer.py 2>/dev/
 
 Expected: all tests `excluded`, `0 failures`; `py_compile` prints nothing. Delete any generated `__pycache__` only if it did not exist before (`apps/graviton_mq/test/support/__pycache__` already exists and is untracked).
 
-- [ ] **Step 5: Format and commit**
+- [x] **Step 5: Format and commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 mix format apps/graviton_mq/test/graviton_mq/mqtt_feature_paho_test.exs apps/graviton_mq/test/graviton_mq/mqtt_feature_mosquitto_test.exs
@@ -4226,7 +4226,7 @@ git commit -m "test(mqtt): qualify broker aliases, Sub-IDs and shared groups wit
 **Files:**
 - Create: `apps/graviton_mq_client/test/mqtt_feature_mosquitto_test.exs`
 
-- [ ] **Step 1: Create the test file**
+- [x] **Step 1: Create the test file**
 
 ```elixir
 Code.require_file("support/mosquitto.exs", __DIR__)
@@ -4387,7 +4387,7 @@ defmodule GravitonMQ.MQTTClient.FeatureMosquittoTest do
 end
 ```
 
-- [ ] **Step 2: Verify local compile and exclusion; format; commit**
+- [x] **Step 2: Verify local compile and exclusion; format; commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq/apps/graviton_mq_client && env MIX_BUILD_ROOT=/tmp/gmq-build-s4 TMPDIR=/tmp/gmq-s4-tmp mix test test/mqtt_feature_mosquitto_test.exs
@@ -4407,7 +4407,7 @@ Expected: `4 tests, 0 failures, 4 excluded`.
 - Modify: `docs/MQTT_CLIENT.md` (lines 95–100, 128–137, 140–145)
 - Modify: `apps/graviton_mq_client/lib/graviton_mq/mqtt_client.ex` (moduledoc lines 33–35)
 
-- [ ] **Step 1: `MQTT_BROKER.md`** — replace "Retain/wildcards are available, shared subscriptions and Subscription Identifiers unavailable, and inbound Topic Alias Maximum=0. Publications/Wills above the configured QoS, enhanced authentication, shared subscriptions and unsupported property use follow explicit rejection paths." with:
+- [x] **Step 1: `MQTT_BROKER.md`** — replace "Retain/wildcards are available, shared subscriptions and Subscription Identifiers unavailable, and inbound Topic Alias Maximum=0. Publications/Wills above the configured QoS, enhanced authentication, shared subscriptions and unsupported property use follow explicit rejection paths." with:
 
 ```markdown
 Retain, wildcards, shared subscriptions and Subscription Identifiers are
@@ -4472,7 +4472,7 @@ a copy of the data directory if a rollback may be needed. Restarting with
 snapshot holds that state stops startup with `:checkpoint_capability_mismatch`.
 ```
 
-- [ ] **Step 2: `MQTT_CLIENT.md`**
+- [x] **Step 2: `MQTT_CLIENT.md`**
 
 Replace "the client advertises Receive Maximum and Topic Alias Maximum=0." with "the client advertises Receive Maximum and its `:topic_alias_maximum` (default 0)." and replace "It rejects aliases because Topic Alias Maximum is zero." with "Inbound aliases above the advertised maximum terminate with 0x94 and unknown aliases with 0x82; deliveries carry the resolved topic without the `topic_alias` property."
 
@@ -4489,7 +4489,7 @@ version stays 1; a client release before S4 rejects such a checkpoint with
 `:invalid_checkpoint_schema`.
 ```
 
-- [ ] **Step 3: `mqtt_client.ex` moduledoc** — replace
+- [x] **Step 3: `mqtt_client.ex` moduledoc** — replace
 
 ```text
   Shared subscriptions are outside this persistence profile: `subscribe/3`
@@ -4504,7 +4504,7 @@ with
   advertises them; a lost session reports them in `{:subscriptions_lost, map}`.
 ```
 
-- [ ] **Step 4: Verify nothing references the removed error and commit**
+- [x] **Step 4: Verify nothing references the removed error and commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && grep -rn "shared_subscription_persistence_unsupported" apps docs/MQTT_CLIENT.md docs/MQTT_BROKER.md | grep -v "/tmp/" ; echo "exit=$?"
@@ -4520,7 +4520,7 @@ Expected: `grep` prints nothing (`exit=1`). `docs/releases/0.2.1.md` keeps its h
 
 Run only after S2 has stopped writing (coordinator decision). This is the AGENTS.md sequence with build isolation; `mix format` here is umbrella-wide by design.
 
-- [ ] **Step 1: Confirm no interop/workflow change is needed**
+- [x] **Step 1: Confirm no interop/workflow change is needed**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq && git diff --stat BASE -- scripts/interop .github/workflows
@@ -4529,7 +4529,7 @@ grep -n "mix test" .github/workflows/ci.yml
 
 Expected: no **S4** change under `scripts/interop`/`.github/workflows` (S2 may legitimately change `run.py`; that diff belongs to S2); CI's interoperability job runs `run.py ... -- mix test`, which includes the new `:interop`/`:paho_interop` files because `run.py` exports `GRAVITON_MOSQUITTO_BIN` and `GRAVITON_PAHO_PYTHON`.
 
-- [ ] **Step 2: Required sequence**
+- [x] **Step 2: Required sequence**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq
@@ -4546,7 +4546,7 @@ mix xref graph --format cycles --fail-above 0
 
 Expected: no formatting diff outside S2/S4 files (`git status --short` shows no new modification from `mix format`), zero warnings, `0 failures` (peer-tagged tests excluded locally), architecture check clean, `No cycles found`. `mix deps.get` must leave `mix.lock` unchanged (`git diff --quiet mix.lock`).
 
-- [ ] **Step 3: Inspect the integrated S4 diff**
+- [x] **Step 3: Inspect the integrated S4 diff**
 
 ```bash
 git log --oneline BASE..HEAD
@@ -4561,7 +4561,7 @@ The range also contains S2 commits; inspect only S4 commits (conventional scopes
 
 Run after the coordinator pushes and the CI run for the pushed `HEAD` finishes.
 
-- [ ] **Step 1: Identify the run**
+- [x] **Step 1: Identify the run**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq
@@ -4570,7 +4570,7 @@ gh run list --workflow ci.yml --branch main --limit 1 --json databaseId,headSha,
 
 Record `RUN_ID`, `HEAD_SHA` and `conclusion`. If `conclusion` is not `success`, open the logs (`gh run view RUN_ID --log-failed`), diagnose, and fix S4 failures in a new S4 task before any document claims them; do not write PASS.
 
-- [ ] **Step 2: Apply the T0 outcome**
+- [x] **Step 2: Apply the T0 outcome**
 
 From the CI log, read `mqtt_peer_capabilities_test.exs` and the Paho probe:
 
@@ -4580,7 +4580,7 @@ From the CI log, read `mqtt_peer_capabilities_test.exs` and the Paho probe:
 
 Commit any such change as `test(mqtt): record pinned peer capabilities from CI run RUN_ID` with its explicit paths, and have the coordinator rerun CI.
 
-- [ ] **Step 3: Record T0 in the spec** — in `docs/superpowers/specs/2026-11-12-s4-mqtt-alias-subid-shared-design.md` §1 "Peer capabilities", append:
+- [x] **Step 3: Record T0 in the spec** — in `docs/superpowers/specs/2026-11-12-s4-mqtt-alias-subid-shared-design.md` §1 "Peer capabilities", append:
 
 ```markdown
 T0 re-verification (CI run RUN_ID, HEAD_SHA): Mosquitto 2.1.2
@@ -4591,7 +4591,7 @@ publish topic-alias 1` sends <full topic then alias-only|observed list>; Paho
 
 choosing each bracketed value from the CI log (no bracket may remain).
 
-- [ ] **Step 4: `docs/CAPABILITIES.md`** — in the "Independently qualified network roles" table append to the MQTT5 client and broker rows' evidence column (keep existing text):
+- [x] **Step 4: `docs/CAPABILITIES.md`** — in the "Independently qualified network roles" table append to the MQTT5 client and broker rows' evidence column (keep existing text):
 
 Broker row: `2026-11-12 S4 (RUN_ID, HEAD_SHA): Topic Alias inbound (TAM 10 default) and optional outbound, Subscription Identifiers, shared subscriptions with round-robin tiers and §4.8.2 redistribution; snapshot v2 with v1 read-time upgrade (`broker_checkpoint_test.exs`, `mqtt/persistence_test.exs`); raw-socket and owner-restart tests (`mqtt_feature_test.exs`, `mqtt_feature_persistence_test.exs`); Paho 2.1.0 and mosquitto_pub/sub peers (`mqtt_feature_paho_test.exs`, `mqtt_feature_mosquitto_test.exs`) PASS.` Change its limits cell "aliases, shared subscriptions and Subscription Identifiers negotiated off" to "Topic Alias inbound on (10), outbound off by default; shared subscriptions and Subscription Identifiers on, each with a switch".
 
@@ -4599,7 +4599,7 @@ Client row: `2026-11-12 S4 (RUN_ID, HEAD_SHA): optional inbound/outbound Topic A
 
 If Step 2 recorded a peer limitation, state it in the same cell (for example "Mosquitto→client aliases: peer lacks `max_topic_alias_broker`; raw-socket evidence only").
 
-- [ ] **Step 5: Ledger amendments** — append to `docs/qualification/2026-10-30-mqtt5-requirement-inventory.md` after the 2026-11-08 amendment and to `docs/qualification/2026-10-30-mqtt5-clause-audit.md` before "## Evidence boundaries":
+- [x] **Step 5: Ledger amendments** — append to `docs/qualification/2026-10-30-mqtt5-requirement-inventory.md` after the 2026-11-08 amendment and to `docs/qualification/2026-10-30-mqtt5-clause-audit.md` before "## Evidence boundaries":
 
 ```markdown
 ## Maintenance amendment — 2026-11-12 (S4)
@@ -4623,7 +4623,7 @@ independent peers in CI run RUN_ID (`mqtt_feature_paho_test.exs`,
 
 (Use `COMMITTED_LOCAL_PASS_INTEROP_PENDING` and omit the CI clause if no passing run exists yet.) The JSON inventory is not edited (D10).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/gao/Workspace/gsmlg-dev/graviton_mq
@@ -4653,3 +4653,18 @@ git commit -m "docs(mqtt): record S4 qualification evidence" -- docs/CAPABILITIE
 | Q14 0x82 | 10 |
 | Durable compatibility: v1 written by pre-S4 code recovers; disabled feature → `:checkpoint_capability_mismatch` | 0, 6, 7, 8, 12 |
 | CAPABILITIES / ledgers with executed evidence only | 20 |
+
+---
+
+## Execution log
+
+### 2026-11-12 — Tasks 0–20
+
+- **BASE** = `4d694e9` (the parent of the fixture commit `b5ff822`). S4 commits are interleaved with S2 in `4d694e9..4967d89`.
+- **Pure layer.** Fixture `b5ff822`; `Topic` shared parsing `a3bd8c0`; `TopicAlias` `7091e79`, `f35cd84`; broker aliases `ebbe094`, `57fe3f6`, `7a7f2cd`, `da71a12`, `1701d03`, `c49fb6f`, `cdd1218`, `0363117`, `fdbed88`; snapshot v2 `e1dbe30`; Sub-IDs `3aa8771`; shared routing/redistribution `6e06f0c`, `9ab02f7`, `48807a9`, `b4a8dd3`, `e96628c`, `4af2b24`; Q14 `2f30787`; client aliases `b41dfcc`, `0d3cbcf`.
+- **Runtime and client.** Status, raw-socket and owner-restart tests `e541940` (Tasks 11–12 together), `85e63e2`; client owner options and persistent shared subscriptions `1451f3f`; test infrastructure `1dee852`, `12df09b`.
+- **Peers and docs.** Wire tap and T0 probes `64ef3c3`; Paho/mosquitto → broker `72cceef`; client → Mosquitto `368633c`; MQTT docs `ba6e2bf`, corrected by `b497eb0`.
+- **Deviations from the plan's decisions.** *D3 revised* (`4d74fd9`, `98ced4d`): Maximum Packet Size limits only the wire packet. A resolved aliased publication is bounded by the protocol maximum (268,435,460 bytes), not by the receiver's limit. Only a resolved packet beyond that maximum gets 0x95. *D4 revised* (`1701d03`): an omitted `max_alias_bytes` is derived as the static worst case (83,884,800 bytes with the defaults), not fixed at 128 MiB. An explicit smaller value fails startup with `:alias_bytes_exceeded`. *Alias 0* (`b497eb0`): the properties codec rejects an inbound Topic Alias of 0 as an invalid value, which gives DISCONNECT 0x81. Spec §3.1 U-055 expects 0x94. This is recorded as a known deviation in both MQTT ledgers, not as a pass.
+- **Task 19.** Not re-run by the documentation task. The coordinator reported that the full AGENTS.md sequence passed on the combined S2+S4 tree: 1,536 tests, 0 failures, 138 peer-tagged tests excluded locally; architecture check 7,736 references; no cycles.
+- **Task 20.** Run 43177284736 (CI, both jobs success) and 43177284490 (Tests, success) for `4967d89`; all peers enabled. The interoperability job's `mix test` ran 1,536 tests with 0 failures and no "missing pinned peer capability" message. The 300 s four-role soak passed. Step 2: both Mosquitto probes and the Paho probe passed, so no test change. Step 3: T0 recorded in spec §1 (`659c93a`). Step 4: CAPABILITIES MQTT rows (`659c93a`) and current status (`8785366`). *Deviation:* the 0.2.1 sentence "rejects shared subscriptions before persistent MQTT-client admission" describes that release and is kept; a parenthetical notes that S4 lifts the rejection. Step 5: per-requirement amendment tables in both Markdown ledgers (`659c93a`), not the plan's single paragraph. `U-055` (alias 0) is marked as a deviation. `MQTT-4.8.2-4/5/6` have pure and raw-socket evidence only, with no peer case (D9). The JSON ledger is not edited (D10). Step 6: this plan is committed separately with the S2 plan.
+- `0774f46` (test-only Writer monitor ordering) landed after `4967d89` and is not covered by run 43177284736.
