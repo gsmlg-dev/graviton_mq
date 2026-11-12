@@ -17,7 +17,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
     :send_timeout,
     :max_input_bytes,
     :max_input_frames_per_turn,
-    :endpoint_options
+    :endpoint_options,
+    # Non-secret SASL settings; the authentication policy is never in it.
+    :sasl
   ]
 
   def child_spec(options),
@@ -70,7 +72,18 @@ defmodule GravitonMQ.Runtime.AMQP10.Listener do
            handoff: handoff,
            transport: listener.transport,
            parent: parent,
-           config: Map.take(config, @connection_keys),
+           config:
+             config
+             |> Map.take(@connection_keys)
+             |> Map.update!(
+               :sasl,
+               &Map.put(
+                 &1,
+                 :client_certificate_verified,
+                 listener.transport == :tls and
+                   Keyword.get(listener.tls_options, :verify, :verify_none) == :verify_peer
+               )
+             ),
            broker: nil,
            connections: nil,
            wiring: nil,

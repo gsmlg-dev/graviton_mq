@@ -6,7 +6,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   alias GravitonMQ.AMQP10.Codec.{Error, Performative, Stream}
   alias GravitonMQ.AMQP10.Codec.Frame, as: FrameCodec
   alias GravitonMQ.AMQP10.Performative.Close
-  alias GravitonMQ.Runtime.AMQP10.Writer
+  alias GravitonMQ.AMQP10.SASL.Machine
+  alias GravitonMQ.Runtime.AMQP10.{Authenticator, Writer}
 
   def start_link(configuration) when is_function(configuration, 0),
     do: GenServer.start_link(__MODULE__, configuration)
@@ -44,7 +45,16 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
     Process.flag(:sensitive, true)
 
     with {:ok, endpoint} <- Endpoint.new(config.endpoint_options),
-         {:ok, stream} <- Stream.new(endpoint.limits) do
+         {:ok, stream} <- Stream.new(endpoint.limits, accept: [0, 3]),
+         {:ok, sasl} <-
+           Machine.new(
+             role: :server,
+             mode: config.sasl.mode,
+             mechanisms: config.sasl.mechanisms,
+             authenticate: config.sasl.authenticate,
+             timeout_ms: config.sasl.timeout,
+             generation: endpoint.generation
+           ) do
       accept_token = make_ref()
 
       accept_timer =
@@ -59,6 +69,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
         broker_monitor: Process.monitor(broker),
         endpoint: endpoint,
         stream: stream,
+        sasl: sasl,
+        principal: :none,
+        authentication: nil,
         transport: transport,
         socket: nil,
         writer: nil,
@@ -116,7 +129,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   defp cast(:pump_ack, state), do: {:noreply, %{state | ready_pending: false}}
 
   defp cast({:close, reason}, state),
-    do: continue(step(state, {:transport_down, transport_reason(reason)}))
+    do: continue(route(state, {:transport_down, transport_reason(reason)}))
 
   defp cast(_message, state), do: {:noreply, state}
 
@@ -143,12 +156,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
 
   defp info({kind, socket}, %{socket: socket} = state)
        when kind in [:tcp_closed, :ssl_closed] and not is_nil(socket),
-       do: continue(step(%{state | read_armed: false}, {:transport_down, :closed}))
+       do: continue(route(%{state | read_armed: false}, {:transport_down, :closed}))
 
   defp info({kind, socket, reason}, %{socket: socket} = state)
        when kind in [:tcp_error, :ssl_error] and not is_nil(socket),
        do:
-         continue(step(%{state | read_armed: false}, {:transport_down, transport_reason(reason)}))
+         continue(
+           route(%{state | read_armed: false}, {:transport_down, transport_reason(reason)})
+         )
 
   defp info({kind, socket}, %{socket: socket} = state)
        when kind in [:tcp_passive, :ssl_passive] and not is_nil(socket),
@@ -174,7 +189,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
         with :ok <- configure_socket(state),
              {:ok, writer} <- Writer.start_link(options) do
           state = %{state | writer: writer, writer_handle: Writer.handle(writer)}
-          state |> step(:start) |> arm_socket() |> continue()
+          # The broker writes nothing before the peer's protocol header.
+          state |> sasl_step(:start) |> arm_socket() |> continue()
         else
           {:error, reason} ->
             continue(step(state, {:transport_down, {:transport, transport_reason(reason)}}))
@@ -186,7 +202,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   end
 
   defp info({:accept_timeout, token}, %{accept_token: token} = state) when not is_nil(token),
-    do: continue(step(state, {:transport_down, :accept_timeout}))
+    do: continue(route(state, {:transport_down, :accept_timeout}))
+
+  defp info({:amqp10_write, generation, {:sasl, _} = id, result}, state) do
+    if generation == state.endpoint.generation,
+      do: continue(resume_input(sasl_step(state, {:write_result, id, sanitize_result(result)}))),
+      else: {:noreply, state}
+  end
 
   defp info({:amqp10_write, generation, id, result}, state) do
     if generation == state.endpoint.generation do
@@ -214,7 +236,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   defp info({:wake, generation, key, token}, state) do
     case Map.get(state.timers, key) do
       {_timer, ^generation, ^token} ->
-        continue(step(%{state | timers: Map.delete(state.timers, key)}, {:timeout, key, token}))
+        state = %{state | timers: Map.delete(state.timers, key)}
+        event = {:timeout, key, token}
+
+        continue(
+          if key == Machine.deadline_key(),
+            do: resume_input(sasl_step(state, event)),
+            else: step(state, event)
+        )
 
       _ ->
         {:noreply, state}
@@ -231,10 +260,54 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   end
 
   defp info({:EXIT, writer, _reason}, %{writer: writer} = state) when not is_nil(writer),
-    do: continue(state |> step({:transport_down, :writer_stopped}) |> close_socket())
+    do: continue(state |> route({:transport_down, :writer_stopped}) |> close_socket())
 
   defp info({:DOWN, monitor, :process, _pid, _reason}, %{broker_monitor: monitor} = state),
-    do: continue(step(state, {:transport_down, :broker_stopped}))
+    do: continue(route(state, {:transport_down, :broker_stopped}))
+
+  # Only the current authentication may decide; stale or late results (an
+  # earlier reference, or one already finished or cancelled) are dropped.
+  defp info(
+         {:amqp10_sasl_result, reference, result},
+         %{authentication: %{reference: reference} = job} = state
+       ) do
+    state = finish_authentication(state, job)
+
+    {state, result} =
+      case result do
+        {:ok, principal} -> {%{state | principal: {:ok, principal}}, :ok}
+        {:error, code} when code in [:auth, :sys, :sys_temp] -> {state, {:error, code}}
+        _other -> {state, {:error, :sys}}
+      end
+
+    continue(resume_input(sasl_step(state, {:auth_result, reference, result})))
+  end
+
+  defp info({:amqp10_sasl_result, _reference, _result}, state), do: {:noreply, state}
+
+  defp info({:amqp10_sasl_unavailable, reference}, %{authentication: nil} = state),
+    do: continue(resume_input(sasl_step(state, {:auth_result, reference, {:error, :sys_temp}})))
+
+  # The Connection's own absolute deadline decides a missed auth_timeout.
+  defp info(
+         {:amqp10_sasl_deadline, reference},
+         %{authentication: %{reference: reference} = job} = state
+       ) do
+    Process.exit(job.pid, :kill)
+    state = finish_authentication(state, job)
+    continue(resume_input(sasl_step(state, {:auth_result, reference, {:error, :sys_temp}})))
+  end
+
+  # A callback killed by the Authenticator's backstop watcher also missed
+  # its deadline; any other exit without a result is a system error.
+  defp info(
+         {:DOWN, monitor, :process, _pid, reason},
+         %{authentication: %{monitor: monitor} = job} = state
+       ) do
+    state = finish_authentication(state, job)
+    code = if reason == :killed, do: :sys_temp, else: :sys
+    continue(resume_input(sasl_step(state, {:auth_result, job.reference, {:error, code}})))
+  end
 
   defp info(_message, state), do: {:noreply, state}
 
@@ -253,7 +326,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
       error = Error.new(:frame_decode, :limit_exceeded, :input_buffer_limit)
 
       continue(
-        step(
+        route(
           %{state | input: <<>>, stream: %{state.stream | buffer: <<>>}},
           {:decode_error, error}
         )
@@ -271,6 +344,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   defp drain(state, 0), do: state
 
   defp drain(state, remaining) do
+    # A pipelined AMQP header held during authentication (or a refusal being
+    # flushed) pauses input: following bytes stay untouched until the SASL
+    # machine starts the Endpoint or closes.
+    if Machine.input_paused?(state.sasl), do: state, else: next_item(state, remaining)
+  end
+
+  defp next_item(state, remaining) do
     case Stream.next(state.stream, state.input) do
       {:ok, item, stream, rest} ->
         event =
@@ -279,19 +359,20 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
             {:frame, frame} -> {:frame, frame}
           end
 
-        state |> Map.merge(%{stream: stream, input: rest}) |> step(event) |> drain(remaining - 1)
+        state |> Map.merge(%{stream: stream, input: rest}) |> route(event) |> drain(remaining - 1)
 
       {:more, stream} ->
         %{state | stream: stream, input: <<>>}
 
-      {:error, %Error{operation: :protocol_header, class: :unsupported, reason: reason}} ->
-        step(
-          %{state | input: <<>>, stream: %{state.stream | buffer: <<>>}},
-          {:transport_down, reason}
-        )
+      {:error, %Error{operation: :protocol_header, class: :unsupported, reason: reason} = error} ->
+        state = %{state | input: <<>>, stream: %{state.stream | buffer: <<>>}}
+
+        if Machine.active?(state.sasl),
+          do: sasl_step(state, {:decode_error, error}),
+          else: step(state, {:transport_down, reason})
 
       {:error, error} ->
-        step(
+        route(
           %{state | input: <<>>, stream: %{state.stream | buffer: <<>>}},
           {:decode_error, error}
         )
@@ -303,9 +384,15 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
   defp resume_input(%{input: <<>>} = state), do: arm_socket(state)
   defp resume_input(%{drain_pending: true} = state), do: state
 
+  # Paused input keeps reading (transport loss stays visible) while
+  # max_input_bytes bounds the held bytes; nothing is drained.
   defp resume_input(state) do
-    send(self(), {:drain, state.endpoint.generation})
-    %{state | drain_pending: true}
+    if Machine.input_paused?(state.sasl) do
+      arm_socket(state)
+    else
+      send(self(), {:drain, state.endpoint.generation})
+      %{state | drain_pending: true}
+    end
   end
 
   defp step(state, event) do
@@ -318,6 +405,140 @@ defmodule GravitonMQ.Runtime.AMQP10.Connection do
 
     state = Enum.reduce(effects, %{state | endpoint: endpoint}, &effect/2)
     ready(state)
+  end
+
+  # Input belongs to the SASL machine until it starts the Endpoint or closes.
+  defp route(state, event),
+    do: if(Machine.active?(state.sasl), do: sasl_step(state, event), else: step(state, event))
+
+  defp sasl_step(state, event) do
+    {sasl, effects} =
+      Machine.step(state.sasl, %{
+        generation: state.endpoint.generation,
+        now_ms: now(),
+        event: event
+      })
+
+    Enum.reduce(effects, %{state | sasl: sasl}, &sasl_effect/2)
+  end
+
+  defp sasl_effect({:send_bytes, generation, id, bytes}, state),
+    do: write(state, generation, id, {:ok, bytes})
+
+  defp sasl_effect({:wake_at, _, _, _, _} = wake, state), do: effect(wake, state)
+  defp sasl_effect({:cancel_wake, _, _, _} = cancel, state), do: effect(cancel, state)
+
+  defp sasl_effect({:expect_header, accept}, state) do
+    case Stream.expect_header(state.stream, accept) do
+      {:ok, stream} -> %{state | stream: stream}
+      {:error, error} -> route(state, {:decode_error, error})
+    end
+  end
+
+  defp sasl_effect({:authenticate, reference, credentials}, state),
+    do: authenticate(state, reference, credentials)
+
+  defp sasl_effect({:cancel_authentication, reference}, state),
+    do: cancel_authentication(state, reference)
+
+  defp sasl_effect({:outcome, :ok}, state), do: state
+
+  defp sasl_effect({:outcome, code}, state) do
+    send(state.broker, {:amqp10_sasl_failure, self(), code})
+    state
+  end
+
+  # Sent before the Endpoint starts, so it precedes every Link event.
+  defp sasl_effect({:established, _how}, state) do
+    principal =
+      case state.principal do
+        {:ok, principal} -> principal
+        :none -> :anonymous
+      end
+
+    send(state.broker, {:amqp10_principal, self(), principal})
+    %{state | principal: :none}
+  end
+
+  defp sasl_effect({:start_endpoint, nil}, state), do: step(state, :start)
+
+  defp sasl_effect({:start_endpoint, header}, state),
+    do: state |> step(:start) |> step({:header, header})
+
+  defp sasl_effect({:close, reason}, state), do: step(state, {:transport_down, reason})
+
+  # One absolute deadline: this Connection's timer decides (sys-temp); the
+  # Authenticator's watcher only backstops it slightly later.
+  defp authenticate(state, reference, credentials) do
+    deadline = now() + state.config.sasl.auth_timeout
+    credentials = Map.put(credentials, :peer, peer(state))
+    authenticator = Map.get(state.config.sasl, :authenticator)
+
+    case Authenticator.start(authenticator, credentials, self(), reference, deadline) do
+      {:ok, pid} ->
+        send(state.broker, {:amqp10_sasl_authenticating, self(), true})
+
+        timer =
+          Process.send_after(self(), {:amqp10_sasl_deadline, reference}, deadline, abs: true)
+
+        %{
+          state
+          | authentication: %{
+              reference: reference,
+              pid: pid,
+              monitor: Process.monitor(pid),
+              timer: timer
+            }
+        }
+
+      {:error, _reason} ->
+        # Concurrency exhausted or no Authenticator: refuse with sys-temp.
+        send(self(), {:amqp10_sasl_unavailable, reference})
+        state
+    end
+  end
+
+  defp cancel_authentication(%{authentication: %{reference: reference} = job} = state, reference) do
+    Process.exit(job.pid, :kill)
+    finish_authentication(state, job)
+  end
+
+  defp cancel_authentication(state, _reference), do: state
+
+  defp finish_authentication(state, job) do
+    Process.cancel_timer(job.timer)
+    Process.demonitor(job.monitor, [:flush])
+    send(state.broker, {:amqp10_sasl_authenticating, self(), false})
+    %{state | authentication: nil}
+  end
+
+  # Broker TLS stays on OTP :ssl until S1b moves it to Hell.Socket.
+  defp peer(state) do
+    address =
+      case state.transport do
+        :tcp -> :inet.peername(state.socket)
+        :tls -> :ssl.peername(state.socket)
+      end
+
+    context =
+      case address do
+        {:ok, {ip, port}} -> %{ip: ip, port: port, transport: state.transport}
+        _ -> %{transport: state.transport}
+      end
+
+    certificate =
+      if state.transport == :tls do
+        case :ssl.peercert(state.socket) do
+          {:ok, der} -> der
+          _ -> nil
+        end
+      end
+
+    Map.merge(context, %{
+      certificate: certificate,
+      certificate_verified:
+        certificate != nil and Map.get(state.config.sasl, :client_certificate_verified, false)
+    })
   end
 
   defp ready(%{ready_pending: true} = state), do: state

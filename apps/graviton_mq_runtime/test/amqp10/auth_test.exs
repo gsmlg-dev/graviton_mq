@@ -40,4 +40,21 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthTest do
     send(caller, :stop)
     assert_receive {:DOWN, ^monitor, :process, ^callback, :killed}, 1_000
   end
+
+  test "the watcher exits as soon as its callback finishes" do
+    test = self()
+    callback = spawn(fn -> receive do: (:finish -> :ok) end)
+    caller = spawn(fn -> receive do: (:stop -> :ok) end)
+
+    watcher =
+      spawn(fn -> Auth.watch(callback, caller, System.monotonic_time(:millisecond) + 60_000) end)
+
+    watcher_monitor = Process.monitor(watcher)
+    send(callback, :finish)
+    assert_receive {:DOWN, ^watcher_monitor, :process, ^watcher, :normal}, 1_000
+    # Neither the caller nor the test was touched.
+    assert Process.alive?(caller)
+    assert Process.alive?(test)
+    send(caller, :stop)
+  end
 end

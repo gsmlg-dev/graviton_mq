@@ -74,11 +74,12 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     send(connection, {:accepted, socket})
     {:ok, peer} = Task.await(client)
     on_exit(fn -> :ssl.close(peer) end)
+    :ok = :ssl.send(peer, @header)
     assert {:ok, @header} = :ssl.recv(peer, 8, 1_000)
     {:ok, <<size::32, _::binary>> = frame_header} = :ssl.recv(peer, 8, 1_000)
     {:ok, _} = :ssl.recv(peer, size - byte_size(frame_header), 1_000)
 
-    :ok = :ssl.send(peer, @header <> wire(%Open{container_id: Value.string("tls-peer")}))
+    :ok = :ssl.send(peer, wire(%Open{container_id: Value.string("tls-peer")}))
 
     assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "tls-peer"}}},
                    1_000
@@ -151,6 +152,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     connection = start_supervised!({Connection, {config!([]), relay!(), :tcp}}, id: make_ref())
     :ok = :gen_tcp.controlling_process(socket, connection)
     send(connection, {:accepted, socket})
+    :ok = :gen_tcp.send(peer, @header)
     assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
     {:ok, <<size::32, _::binary>>} = :gen_tcp.recv(peer, 8, 1000)
     {:ok, _} = :gen_tcp.recv(peer, size - 8, 1000)
@@ -213,8 +215,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionInputTest do
     config
   end
 
-  defp peer_open(peer),
-    do: :gen_tcp.send(peer, @header <> wire(%Open{container_id: Value.string("peer")}))
+  defp peer_open(peer), do: :gen_tcp.send(peer, wire(%Open{container_id: Value.string("peer")}))
 
   defp heartbeat, do: <<8::32, 2, 0, 0::16>>
 

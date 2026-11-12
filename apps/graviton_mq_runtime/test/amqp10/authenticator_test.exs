@@ -31,7 +31,13 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
       reference = make_ref()
 
       assert {:ok, task} =
-               Authenticator.start(authenticator, %{password: password}, self(), reference, 1_000)
+               Authenticator.start(
+                 authenticator,
+                 %{password: password},
+                 self(),
+                 reference,
+                 deadline(1_000)
+               )
 
       assert is_pid(task)
       assert_receive {:amqp10_sasl_result, ^reference, ^expected}, 1_000
@@ -41,12 +47,32 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
   test "concurrency, deadlines and caller loss are bounded" do
     authenticator = authenticator!({Policy, []}, 1)
     credentials = %{password: "sleep", test: self()}
-    assert {:ok, task} = Authenticator.start(authenticator, credentials, self(), make_ref(), 100)
+
+    # The occupying task cannot expire during the :busy check: its deadline
+    # is far away and the test waits until it is running.
+    assert {:ok, task} =
+             Authenticator.start(authenticator, credentials, self(), make_ref(), deadline(60_000))
+
     assert_receive {:sleeping, ^task}, 1_000
 
     assert {:error, :busy} =
-             Authenticator.start(authenticator, %{password: "good"}, self(), make_ref(), 100)
+             Authenticator.start(
+               authenticator,
+               %{password: "good"},
+               self(),
+               make_ref(),
+               deadline(60_000)
+             )
 
+    Process.exit(task, :kill)
+
+    # The watcher backstops a missed deadline (deadline plus a short grace).
+    authenticator = authenticator!({Policy, []}, 1)
+
+    assert {:ok, task} =
+             Authenticator.start(authenticator, credentials, self(), make_ref(), deadline(20))
+
+    assert_receive {:sleeping, ^task}, 1_000
     monitor = Process.monitor(task)
     assert_receive {:DOWN, ^monitor, :process, ^task, :killed}, 1_000
 
@@ -55,7 +81,7 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
     caller = spawn(fn -> receive do: (:stop -> :ok) end)
 
     assert {:ok, task} =
-             Authenticator.start(authenticator, credentials, caller, make_ref(), 60_000)
+             Authenticator.start(authenticator, credentials, caller, make_ref(), deadline(60_000))
 
     assert_receive {:sleeping, ^task}, 1_000
     monitor = Process.monitor(task)
@@ -65,9 +91,16 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
 
   test "an anonymous policy or a missing authenticator never starts a callback" do
     assert {:error, :unavailable} =
-             Authenticator.start(authenticator!(:anonymous, 1), %{}, self(), make_ref(), 100)
+             Authenticator.start(
+               authenticator!(:anonymous, 1),
+               %{},
+               self(),
+               make_ref(),
+               deadline(100)
+             )
 
-    assert {:error, :unavailable} = Authenticator.start(nil, %{}, self(), make_ref(), 100)
+    assert {:error, :unavailable} =
+             Authenticator.start(nil, %{}, self(), make_ref(), deadline(100))
   end
 
   test "status and logs never contain policy options or credentials" do
@@ -83,7 +116,7 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
             %{password: "raise-sentinel"},
             self(),
             reference,
-            1_000
+            deadline(1_000)
           )
 
         assert_receive {:amqp10_sasl_result, ^reference, {:error, :sys}}, 1_000
@@ -98,7 +131,7 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
     credentials = %{password: "sleep-password-sentinel", test: self()}
 
     assert {:ok, task} =
-             Authenticator.start(authenticator, credentials, self(), make_ref(), 5_000)
+             Authenticator.start(authenticator, credentials, self(), make_ref(), deadline(5_000))
 
     assert_receive {:sleeping, ^task}, 1_000
 
@@ -197,6 +230,8 @@ defmodule GravitonMQ.Runtime.AMQP10.AuthenticatorTest do
       _other -> []
     end)
   end
+
+  defp deadline(milliseconds), do: System.monotonic_time(:millisecond) + milliseconds
 
   defp printed(term), do: inspect(term, limit: :infinity, printable_limit: :infinity)
 

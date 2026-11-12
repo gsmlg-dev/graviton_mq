@@ -7,15 +7,40 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
   alias GravitonMQ.AMQP10.Frame, as: Envelope
   alias GravitonMQ.AMQP10.Performative.{Open, Begin, Attach, Close, Flow, Transfer, Disposition}
   alias GravitonMQ.AMQP10.Terminus.{Source, Target}
-  alias GravitonMQ.Runtime.AMQP10.{Config, Connection}
+  alias GravitonMQ.Runtime.AMQP10.{Authenticator, Config, Connection}
+  alias GravitonMQ.AMQP10.Codec.Limits
+  alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
+  alias GravitonMQ.AMQP10.SASL.{Init, Mechanisms, Outcome, Plain}
 
   @moduletag timeout: 10_000
+
+  defmodule Policy do
+    @moduledoc false
+    @behaviour GravitonMQ.Runtime.AMQP10.Auth
+
+    @impl true
+    def authenticate(_credentials, options) do
+      send(Keyword.fetch!(options, :test), {:authenticating, self()})
+
+      case Keyword.fetch!(options, :mode) do
+        :sleep ->
+          Process.sleep(:infinity)
+
+        :gate ->
+          receive do
+            {:release, result} -> result
+          end
+      end
+    end
+  end
+
   @header <<"AMQP", 0, 1, 0, 0>>
+  @sasl <<"AMQP", 3, 1, 0, 0>>
 
   test "split header and coalesced Open/heartbeats drain under a one-frame turn budget" do
-    {connection, peer} = connected!(max_input_frames_per_turn: 1)
+    {connection, peer} = accepted!(max_input_frames_per_turn: 1)
     assert :ok = :gen_tcp.send(peer, <<"AM">>)
-    refute_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, _}}}, 20
+    assert {:error, :timeout} = :gen_tcp.recv(peer, 1, 20)
 
     assert :ok =
              :gen_tcp.send(
@@ -24,6 +49,8 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
                  wire(%Open{container_id: Value.string("peer")}) <> heartbeat() <> heartbeat()
              )
 
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Open{} = read_pdu(peer)
     assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "peer"}}}
     assert %{messages: 0, bytes: 0} = Connection.capacity(connection, 0, {"missing", :sender})
     assert Process.alive?(connection)
@@ -401,15 +428,17 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
   end
 
-  test "SASL protocol header is explicitly rejected" do
-    {connection, peer} = connected!()
+  test "sasl: :disabled answers a SASL header with the AMQP header and keeps its reason" do
+    {connection, peer} = accepted!(sasl: :disabled)
     monitor = Process.monitor(connection)
-    :ok = :gen_tcp.send(peer, <<"AMQP", 3, 1, 0, 0>>)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
 
     assert_receive {:amqp10_endpoint_event, ^connection,
                     {:event, {:disconnected, :sasl_not_supported}}}
 
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
   end
 
   test "unsupported versions and protocol IDs receive the supported header then close the socket" do
@@ -419,21 +448,22 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
           <<"AMQP", 0, 2, 0, 0>>,
           <<"AMQP", 4, 1, 0, 0>>
         ] do
-      # connected! reads and verifies the broker's own valid protocol header.
-      {connection, peer} = connected!()
+      {connection, peer} = accepted!()
       monitor = Process.monitor(connection)
       assert :ok = :gen_tcp.send(peer, header)
+      # The reply follows the peer header and precedes the close (TR-2.2).
+      assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
       assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
       assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
       refute_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, _}}}, 10
     end
   end
 
-  test "malformed protocol magic retains the supported header and bounded socket teardown" do
-    {connection, peer} = connected!(endpoint_options: [close_timeout_ms: 40])
+  test "malformed protocol magic receives the supported header before bounded teardown" do
+    {connection, peer} = accepted!()
     monitor = Process.monitor(connection)
     assert :ok = :gen_tcp.send(peer, "HTTP/1.1")
-    assert %Close{error: %{}} = read_pdu(peer)
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
     assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
     assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
     refute_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, _}}}, 10
@@ -509,7 +539,7 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     private = "private-amqp-#{System.unique_integer([:positive])}"
     :sys.log(connection, true)
     assert :ok = Connection.command(connection, :private_command, {:unsupported, private})
-    :ok = :gen_tcp.send(peer, @header <> wire(%Open{container_id: Value.string(private)}))
+    :ok = :gen_tcp.send(peer, wire(%Open{container_id: Value.string(private)}))
     assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, ^private}}}
     refute inspect(:sys.get_status(connection)) =~ private
     monitor = Process.monitor(connection)
@@ -532,7 +562,237 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     refute log =~ private
   end
 
-  defp connected!(options \\ [], broker \\ self()) do
+  test "the default anonymous policy negotiates SASL ANONYMOUS before the AMQP layer" do
+    {connection, peer} = accepted!()
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = mechanisms = read_sasl(peer)
+    assert Mechanisms.names(mechanisms) == ["ANONYMOUS"]
+    :ok = :gen_tcp.send(peer, sasl_wire(%Init{mechanism: Value.symbol("ANONYMOUS")}))
+    assert %Outcome{code: %Value{type: :ubyte, value: 0}} = read_sasl(peer)
+    assert_receive {:amqp10_principal, ^connection, :anonymous}
+    assert {:error, :timeout} = :gen_tcp.recv(peer, 1, 20)
+    :ok = :gen_tcp.send(peer, @header <> wire(%Open{container_id: Value.string("peer")}))
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Open{} = read_pdu(peer)
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "peer"}}}
+  end
+
+  test "a no-SASL peer under the default policy records the anonymous principal" do
+    {connection, _peer} = connected!()
+    assert_receive {:amqp10_principal, ^connection, :anonymous}
+  end
+
+  test "ANONYMOUS with an invalid trace is refused with an auth outcome and counted" do
+    {connection, peer} = accepted!()
+    monitor = Process.monitor(connection)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+
+    :ok =
+      :gen_tcp.send(
+        peer,
+        sasl_wire(%Init{
+          mechanism: Value.symbol("ANONYMOUS"),
+          initial_response: Value.binary(<<0xFF>>)
+        })
+      )
+
+    assert %Outcome{code: %Value{value: 1}} = read_sasl(peer)
+    assert_receive {:amqp10_sasl_failure, ^connection, :auth}
+
+    assert_receive {:amqp10_endpoint_event, ^connection,
+                    {:event, {:disconnected, {:sasl, :auth}}}}
+
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+  end
+
+  test "required SASL answers a no-SASL header with the SASL header and no Open" do
+    {connection, peer} = accepted!(sasl: :required)
+    monitor = Process.monitor(connection)
+    :ok = :gen_tcp.send(peer, @header)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+
+    assert_receive {:amqp10_endpoint_event, ^connection,
+                    {:event, {:disconnected, :sasl_required}}}
+
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+  end
+
+  test "a silent peer is closed by the SASL negotiation deadline" do
+    {connection, peer} = accepted!(sasl_timeout: 30)
+    monitor = Process.monitor(connection)
+
+    assert_receive {:amqp10_endpoint_event, ^connection,
+                    {:event, {:disconnected, :sasl_timeout}}},
+                   1000
+
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+  end
+
+  test "a protocol violation during SASL closes without an outcome" do
+    {connection, peer} = accepted!()
+    monitor = Process.monitor(connection)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    # An AMQP-typed frame in the SASL layer.
+    :ok = :gen_tcp.send(peer, heartbeat())
+
+    assert_receive {:amqp10_endpoint_event, ^connection,
+                    {:event, {:disconnected, {:decode_error, :amqp_frame_in_sasl_layer}}}}
+
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}
+    assert {:error, :closed} = :gen_tcp.recv(peer, 0, 1000)
+  end
+
+  # Spec §5.2: a missed auth_timeout is sys-temp. The Connection owns the one
+  # absolute deadline; the Authenticator watcher is only a later backstop.
+  test "a callback that misses auth_timeout is always refused with sys-temp" do
+    for _attempt <- 1..5 do
+      {connection, peer} = authenticated!([mode: :sleep], auth_timeout: 30)
+      monitor = Process.monitor(connection)
+      plain_init!(peer, "graviton-password")
+      assert_receive {:authenticating, task}, 1000
+      task_monitor = Process.monitor(task)
+      assert %Outcome{code: %Value{value: 4}} = read_sasl(peer)
+      assert_receive {:amqp10_sasl_failure, ^connection, :sys_temp}
+      refute_received {:amqp10_sasl_failure, ^connection, _other}
+
+      assert_receive {:amqp10_endpoint_event, ^connection,
+                      {:event, {:disconnected, {:sasl, :sys_temp}}}}
+
+      assert_receive {:DOWN, ^task_monitor, :process, ^task, :killed}, 1000
+      assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+    end
+  end
+
+  test "a killed callback is sys-temp and any other callback exit is sys" do
+    for {reason, code, value} <- [{:kill, :sys_temp, 4}, {:callback_crashed, :sys, 2}] do
+      {connection, peer} = authenticated!(mode: :gate)
+      plain_init!(peer, "graviton-password")
+      assert_receive {:authenticating, task}, 1000
+
+      capture_log(fn ->
+        Process.exit(task, reason)
+        assert %Outcome{code: %Value{value: ^value}} = read_sasl(peer)
+      end)
+
+      assert_receive {:amqp10_sasl_failure, ^connection, ^code}
+    end
+  end
+
+  test "stale and late authentication results are ignored" do
+    {connection, peer} = authenticated!(mode: :gate)
+    plain_init!(peer, "graviton-password")
+    assert_receive {:authenticating, task}, 1000
+
+    # A result whose reference is not the current authentication.
+    send(connection, {:amqp10_sasl_result, {:sasl_auth, 41}, {:ok, :forged}})
+    send(connection, {:amqp10_sasl_result, make_ref(), {:error, :auth}})
+    assert {:error, :timeout} = :gen_tcp.recv(peer, 1, 30)
+    assert_receive {:amqp10_sasl_authenticating, ^connection, true}
+    refute_received {:amqp10_sasl_authenticating, ^connection, false}
+
+    send(task, {:release, {:ok, {:user, "graviton-user"}}})
+    assert %Outcome{code: %Value{value: 0}} = read_sasl(peer)
+    assert_receive {:amqp10_principal, ^connection, {:user, "graviton-user"}}
+    assert_receive {:amqp10_sasl_authenticating, ^connection, false}
+
+    # A late result for the finished authentication changes nothing.
+    send(connection, {:amqp10_sasl_result, {:sasl_auth, 0}, {:error, :auth}})
+    :ok = :gen_tcp.send(peer, @header <> wire(%Open{container_id: Value.string("peer")}))
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Open{} = read_pdu(peer)
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "peer"}}}
+    refute_received {:amqp10_principal, ^connection, :forged}
+    refute_received {:amqp10_sasl_failure, ^connection, _code}
+  end
+
+  test "a pipelined header and Open wait, untouched, for the authentication result" do
+    {connection, peer} = authenticated!(mode: :gate)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: "secret"})
+    init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
+
+    :ok =
+      :gen_tcp.send(
+        peer,
+        sasl_wire(init) <> @header <> wire(%Open{container_id: Value.string("peer")})
+      )
+
+    assert_receive {:authenticating, task}, 1000
+    # Paused: neither the held header nor the Open reaches the Endpoint.
+    assert {:error, :timeout} = :gen_tcp.recv(peer, 1, 30)
+    assert data(connection).endpoint.phase == :new
+    send(task, {:release, {:ok, :pipelined}})
+    assert %Outcome{code: %Value{value: 0}} = read_sasl(peer)
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Open{} = read_pdu(peer)
+    assert_receive {:amqp10_principal, ^connection, :pipelined}
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:connected, "peer"}}}
+  end
+
+  test "transport loss while input is paused cancels the running callback" do
+    {connection, peer} = authenticated!(mode: :gate)
+    monitor = Process.monitor(connection)
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: "secret"})
+    init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
+    :ok = :gen_tcp.send(peer, sasl_wire(init) <> @header)
+    assert_receive {:authenticating, task}, 1000
+    task_monitor = Process.monitor(task)
+    :gen_tcp.close(peer)
+    assert_receive {:DOWN, ^task_monitor, :process, ^task, :killed}, 1000
+    assert_receive {:amqp10_endpoint_event, ^connection, {:event, {:disconnected, :closed}}}
+    assert_receive {:amqp10_sasl_authenticating, ^connection, false}
+    assert_receive {:DOWN, ^monitor, :process, ^connection, :normal}, 1000
+  end
+
+  test "credentials never reach Connection state or status during or after authentication" do
+    password = "connection-password-#{System.unique_integer([:positive])}"
+
+    log =
+      capture_log(fn ->
+        for result <- [{:ok, {:user, "graviton-user"}}, {:error, {:denied, password}}] do
+          {connection, peer} = authenticated!(mode: :gate)
+          monitor = Process.monitor(connection)
+          plain_init!(peer, password)
+          assert_receive {:authenticating, task}, 1000
+
+          # Mid-authentication.
+          refute_secret(connection, password)
+
+          send(task, {:release, result})
+          assert %Outcome{code: %Value{value: code}} = read_sasl(peer)
+
+          case code do
+            0 ->
+              assert_receive {:amqp10_principal, ^connection, _principal}
+              refute_secret(connection, password)
+              Connection.close(connection, :test_finished)
+
+            1 ->
+              :ok
+          end
+
+          assert_receive {:DOWN, ^monitor, :process, ^connection, reason}, 1000
+          refute inspect(reason) =~ password
+        end
+      end)
+
+    refute log =~ password
+  end
+
+  defp accepted!(options \\ [], broker \\ self()) do
     {:ok, listener} =
       :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
 
@@ -544,10 +804,79 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     connection = start_supervised!({Connection, {config!(options), broker, :tcp}}, id: make_ref())
     :ok = :gen_tcp.controlling_process(socket, connection)
     send(connection, {:accepted, socket})
-    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
-    assert %Open{} = read_pdu(peer)
     on_exit(fn -> :gen_tcp.close(peer) end)
     {connection, peer}
+  end
+
+  # The broker sends nothing until the peer's protocol header (owner Q7).
+  defp connected!(options \\ [], broker \\ self()) do
+    {connection, peer} = accepted!(options, broker)
+    assert {:error, :timeout} = :gen_tcp.recv(peer, 1, 20)
+    :ok = :gen_tcp.send(peer, @header)
+    assert {:ok, @header} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Open{} = read_pdu(peer)
+    {connection, peer}
+  end
+
+  defp read_sasl(peer) do
+    {:ok, <<size::32, _::binary>> = header} = :gen_tcp.recv(peer, 8, 1000)
+    {:ok, body} = :gen_tcp.recv(peer, size - 8, 1000)
+
+    {:ok, %Envelope{type: :sasl} = frame, <<>>} =
+      Frame.decode(header <> body, Limits.default(), types: [:sasl])
+
+    {:ok, decoded} = SASLCodec.decode(frame.body)
+    decoded
+  end
+
+  defp sasl_wire(body) do
+    {:ok, bytes} = SASLCodec.encode_frame(body)
+    bytes
+  end
+
+  defp authenticated!(policy_options, options \\ []) do
+    parent =
+      start_supervised!(
+        %{
+          id: make_ref(),
+          type: :supervisor,
+          start:
+            {Supervisor, :start_link,
+             [
+               [Supervisor.child_spec({Task.Supervisor, max_children: 4}, id: :sasl_tasks)],
+               [strategy: :one_for_one]
+             ]}
+        },
+        id: make_ref()
+      )
+
+    policy = {Policy, [test: self()] ++ policy_options}
+    {:ok, authenticator} = Supervisor.start_child(parent, {Authenticator, {policy, parent}})
+
+    accepted!([auth: policy, allow_insecure_plain: true, authenticator: authenticator] ++ options)
+  end
+
+  defp plain_init!(peer, password) do
+    :ok = :gen_tcp.send(peer, @sasl)
+    assert {:ok, @sasl} = :gen_tcp.recv(peer, 8, 1000)
+    assert %Mechanisms{} = read_sasl(peer)
+    {:ok, message} = Plain.encode(%Plain{username: "graviton-user", password: password})
+
+    :ok =
+      :gen_tcp.send(
+        peer,
+        sasl_wire(%Init{
+          mechanism: Value.symbol("PLAIN"),
+          initial_response: Value.binary(message)
+        })
+      )
+  end
+
+  defp refute_secret(connection, secret) do
+    state = data(connection)
+    refute inspect(state, limit: :infinity, printable_limit: :infinity) =~ secret
+    refute :binary.match(:erlang.term_to_binary(state), secret) != :nomatch
+    refute inspect(:sys.get_status(connection), limit: :infinity) =~ secret
   end
 
   defp relay! do
@@ -591,17 +920,21 @@ defmodule GravitonMQ.Runtime.AMQP10.ConnectionTest do
     end
   end
 
+  # Mirrors the runtime: the policy stays with the Authenticator, and a
+  # Listener publishes the Authenticator pid in the SASL map.
   defp config!(options) do
+    {authenticator, options} = Keyword.pop(options, :authenticator)
+
     {:ok, config} =
       Config.build(
         Keyword.merge([container_id: "broker", queues: ["q"], auth: :anonymous], options)
       )
 
-    config
+    config = Map.delete(config, :auth)
+    if authenticator, do: put_in(config, [:sasl, :authenticator], authenticator), else: config
   end
 
-  defp peer_open(peer),
-    do: :gen_tcp.send(peer, @header <> wire(%Open{container_id: Value.string("peer")}))
+  defp peer_open(peer), do: :gen_tcp.send(peer, wire(%Open{container_id: Value.string("peer")}))
 
   defp peer_begin,
     do: %Begin{
