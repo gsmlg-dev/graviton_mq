@@ -64,6 +64,132 @@ run!.(["compile", "--warnings-as-errors"], consumer)
 
 version = Path.expand("../VERSION", __DIR__) |> File.read!() |> String.trim()
 
+tls_directory = Path.join(staging, "tls")
+File.mkdir!(tls_directory)
+tls = fn name -> Path.join(tls_directory, name) end
+
+openssl! = fn arguments ->
+  {output, status} = System.cmd("openssl", arguments, stderr_to_stdout: true)
+  if status != 0, do: raise("openssl #{Enum.join(arguments, " ")} failed: #{output}")
+end
+
+openssl!.(~w(req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=archive-ca
+  -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign
+  -keyout) ++ [tls.("ca.key"), "-out", tls.("ca.pem")])
+
+openssl!.(
+  ~w(req -new -newkey rsa:2048 -nodes -subj /CN=localhost -keyout) ++
+    [tls.("server.key"), "-out", tls.("server.csr")]
+)
+
+File.write!(tls.("server.ext"), """
+basicConstraints=critical,CA:FALSE
+subjectAltName=DNS:localhost
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+""")
+
+openssl!.([
+  "x509",
+  "-req",
+  "-in",
+  tls.("server.csr"),
+  "-CA",
+  tls.("ca.pem"),
+  "-CAkey",
+  tls.("ca.key"),
+  "-set_serial",
+  "1",
+  "-days",
+  "1",
+  "-extfile",
+  tls.("server.ext"),
+  "-out",
+  tls.("server.pem")
+])
+
+tls_smoke =
+  quote do
+    fn ->
+      {:ok, instance} =
+        GravitonMQ.start_link(
+          name: :hex_tls_smoke,
+          runtime_supervisor_name: :hex_tls_smoke_runtime,
+          mqtt: [
+            auth: :anonymous,
+            host_principal: :archive_host,
+            listeners: [
+              [
+                transport: :tls,
+                ip: {127, 0, 0, 1},
+                port: 0,
+                tls_options: [
+                  certfile: unquote(tls.("server.pem")),
+                  keyfile: unquote(tls.("server.key"))
+                ]
+              ]
+            ]
+          ]
+        )
+
+      {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.status(instance)
+
+      {:ok, socket} =
+        SSL.connect(
+          ~c"localhost",
+          port,
+          [
+            :binary,
+            active: false,
+            verify: :verify_peer,
+            cacertfile: unquote(tls.("ca.pem")),
+            server_name_indication: ~c"localhost",
+            versions: [:"tlsv1.3"]
+          ],
+          5_000
+        )
+
+      :ok = SSL.send(socket, <<0x10, 0x0E, 0, 4, "MQTT", 5, 2, 0, 60, 0, 0, 1, "c">>)
+      {:ok, <<0x20, _connack::binary>>} = SSL.recv(socket, 0, 5_000)
+      :ok = SSL.send(socket, <<0xC0, 0>>)
+      {:ok, <<0xD0, 0>>} = SSL.recv(socket, 2, 5_000)
+      :ok = SSL.close(socket)
+      :ok = Supervisor.stop(instance)
+
+      false =
+        Enum.any?(Application.started_applications(), fn {app, _, _} -> app == :ssl end)
+
+      IO.puts("Broker TLS 1.3 listener round trip PASS; OTP :ssl not started")
+      :ok
+    end
+  end
+
+# Mix and Hex start OTP :ssl before any `mix run` code executes, so the TLS
+# smoke runs in a separate VM with only the consumer's compiled applications
+# on the code path (no Mix, no Hex) and starts the broker runtime itself.
+tls_vm_smoke =
+  quote do
+    {:ok, _} = Application.ensure_all_started(:graviton_mq_runtime)
+    check_tls = unquote(tls_smoke)
+    :ok = check_tls.()
+  end
+
+run_tls_smoke! = fn directory ->
+  paths = directory |> Path.join("_build/lib/*/ebin") |> Path.wildcard()
+  if paths == [], do: raise("no compiled applications in #{directory}/_build/lib")
+
+  {_, status} =
+    System.cmd(
+      "elixir",
+      Enum.flat_map(paths, &["-pa", &1]) ++ ["-e", Macro.to_string(tls_vm_smoke)],
+      cd: directory,
+      into: IO.stream(),
+      stderr_to_stdout: true
+    )
+
+  if status != 0, do: raise("installed broker TLS smoke failed in #{directory}")
+end
+
 broker_smoke =
   quote do
     fn instance ->
@@ -240,6 +366,7 @@ smoke =
   end
 
 run!.(["run", "--no-compile", "-e", Macro.to_string(smoke)], consumer)
+run_tls_smoke!.(consumer)
 durable_broker_script = Path.expand("interop/installed_broker_durable.exs", __DIR__)
 run!.(["run", "--no-compile", durable_broker_script], consumer)
 
@@ -342,6 +469,8 @@ embedding_smoke =
   end
 
 run!.(["run", "--no-compile", "-e", Macro.to_string(embedding_smoke)], embedding_consumer)
+# No client package here: ex_ssl arrives only through hell.
+run_tls_smoke!.(embedding_consumer)
 run!.(["run", "--no-compile", durable_broker_script], embedding_consumer)
 
 # The client is installed from its own archive and its actual dependency closure.
