@@ -293,6 +293,69 @@ Status `COMMITTED_LINUX_LOCAL_PASS_INTEROP_PENDING`: the Linux-only persistence
 tests passed for `696dca0` on a local Linux host; independent-peer
 requalification of these rows is pending.
 
+## Maintenance amendment — 2026-11-12 (S4)
+
+The ledger rows above were not re-run. S4 (`4d694e9..4967d89`, unreleased
+on `main`) supersedes the profile paragraph's "Topic Alias Maximum is zero" and
+"Shared Subscriptions and Subscription Identifiers unavailable" statements and
+the clause-group rows for §§3.1.2.11.5/3.2.2.3.8/3.3.2.3.4 (aliases),
+§§3.2.2.3.12–.13/4.8.2 (shared subscriptions/IDs), §4.7 (shared syntax no longer
+refused), §3.3.2.3 metadata forwarding (the broker now appends the
+recipient's own identifiers after stripping hop-local alias/IDs) and
+§§3.1.2.11.2/4.1–4.2 (snapshot v2 with Sub-IDs, shared memberships and shared
+delivery entries; v1 upgraded in memory; restarting with a feature disabled
+while state holds it fails with `:checkpoint_capability_mismatch`). Inbound
+aliases resolve after the malformed-packet and size checks and before every
+PUBLISH-semantic check; a resolved packet is bounded by the protocol maximum,
+not the receiver's Maximum Packet Size (which limits the wire packet only).
+Independent evidence: hosted CI run 43177284736 for `4967d89`. Per-requirement dispositions:
+
+| ID | 2026-10-30 | 2026-11-12 (S4) disposition | T (local) | I (CI run 43177284736) |
+| --- | --- | --- | --- | --- |
+| `MQTT-3.1.2-26`, `MQTT-3.1.2-27`, `MQTT-3.3.2-11` | `NOT_EMITTED` | `SOURCE_AND_REGRESSION`: broker outbound aliases off by default (`max_outbound_topic_aliases: 0`); when enabled bounded by min(client CONNECT maximum, cap), none if the client sends 0/absent | `M/test/{broker_alias,topic_alias}_test.exs`; `P/mqtt_feature_test.exs` outbound | Paho `alias-outbound` (bounded by 3) |
+| `MQTT-3.2.2-17`, `MQTT-3.2.2-18`, `MQTT-3.3.2-9` | `NOT_EMITTED` | `SOURCE_AND_REGRESSION`: client outbound aliases off by default; when enabled bounded by min(CONNACK maximum, cap), none if 0/absent | `M/test/client_alias_test.exs` | `C/mqtt_feature_mosquitto_test.exs` outbound aliases bounded by Mosquitto's maximum (wire tap) |
+| `MQTT-3.3.2-7` | `CONDITION_INACTIVE` | `SOURCE_AND_REGRESSION`: alias tables are per Network Connection in both roles, never persisted or checkpointed | `M/test/{broker_alias,client_alias}_test.exs`; `P/mqtt_feature_test.exs` reconnect | Paho `alias-reconnect`; Mosquitto → client aliases reset on reconnect |
+| `MQTT-3.3.2-8` | `SOURCE_AND_REGRESSION` | unchanged: codec rejects alias 0; assignment starts at 1 | `M/test/{topic_alias,codec/operational_packets}_test.exs` | — |
+| `MQTT-3.3.2-10` | `CONDITION_INACTIVE` | `SOURCE_AND_REGRESSION`: the client accepts every alias 1..its advertised maximum (default 0) | `M/test/{topic_alias,client_alias}_test.exs` | Mosquitto `max_topic_alias_broker` → client (`C/mqtt_feature_mosquitto_test.exs`) |
+| `MQTT-3.3.2-12` | `CONDITION_INACTIVE` | `SOURCE_AND_REGRESSION`: the broker advertises 10 by default and accepts every alias 1..N; memory is bounded statically by `max_alias_bytes`, never by refusing an alias | `M/test/{topic_alias,broker_alias}_test.exs`; `P/mqtt_feature_test.exs` | Paho `alias-inbound`; `mosquitto_pub` topic-alias (`P/mqtt_feature_mosquitto_test.exs`) |
+| `MQTT-3.3.4-3`, `MQTT-3.3.4-4` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: one copy carries the identifiers of every matching subscription (repeats kept) | `M/test/broker_subscription_identifier_test.exs`; `P/mqtt_feature_test.exs` | Paho `subid` (overlap, removal, retained); Mosquitto → client Sub-IDs |
+| `MQTT-3.3.4-5` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: a shared copy carries only the receiving member's identifier; an overlapping ordinary subscription gets its own copy | `M/test/broker_shared_test.exs` | no dedicated peer case |
+| `MQTT-3.3.4-6` | `SOURCE_AND_REGRESSION` | unchanged: inbound PUBLISH with an identifier → broker DISCONNECT 0x82; the client does not enforce it on receipt (Q13) | `M/test/broker_subscription_identifier_test.exs` | — |
+| `MQTT-3.8.3-4` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: No Local on a shared filter → DISCONNECT 0x82 (was 0x81); other option violations stay 0x81 | `M/test/protocol_error_reason_test.exs`; `P/mqtt_feature_test.exs` | Paho `shared-nolocal` |
+| `MQTT-4.8.2-1`, `MQTT-4.8.2-2` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: `Topic.parse_filter/1` shared grammar reused by codec, broker, checkpoints and client | `M/test/{topic,broker_shared}_test.exs` | Paho `shared`; two `mosquitto_sub` members; client members in a Mosquitto group |
+| `MQTT-4.8.2-3` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: grant = min(requested, Maximum QoS) per member | `M/test/broker_shared_test.exs` | Paho `shared` |
+| `MQTT-4.8.2-4` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: a sent QoS2 entry stays with its member and resumes with DUP on reconnect | `M/test/broker_shared_redistribution_test.exs` | none (plan D9: Paho QoS2 timing not controllable); pure tests only |
+| `MQTT-4.8.2-5` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: sent QoS2 entries are discarded at session end and counted, never moved | `M/test/broker_shared_redistribution_test.exs` | none (D9) |
+| `MQTT-4.8.2-6` | `OPTIONAL_REJECTED` | `SOURCE_AND_REGRESSION`: a negative PUBACK/PUBREC discards the entry; it is never re-routed | `M/test/broker_shared_redistribution_test.exs` | none |
+| `U-012`, `U-034` | `SOURCE_AND_REGRESSION` | unchanged codec; the client now advertises its configured maximum, the broker its configured maximum (default 10) | `M/test/{client_alias,broker_alias}_test.exs` | — |
+| `U-038`, `U-040` | `SOURCE_AND_REGRESSION` | broker advertises 1 when enabled (default) and 0 with its switch off | `P/mqtt_feature_test.exs` CONNACK capabilities | Paho/Mosquitto feature cases |
+| `U-039` | `SOURCE_AND_REGRESSION` | DISCONNECT 0xA1 only with `subscription_identifiers: false` | `M/test/broker_subscription_identifier_test.exs`; `P/mqtt_feature_test.exs` | — |
+| `U-041` | `SOURCE_AND_REGRESSION` | DISCONNECT 0x9E only with `shared_subscriptions: false` | `M/test/broker_shared_test.exs`; `P/mqtt_feature_test.exs` | `SHARED_OFF` (Paho, broker configured `shared_subscriptions: false`) |
+| `U-048`, `U-050` | `SOURCE_AND_REGRESSION` | unchanged codec | `M/test/codec/operational_packets_test.exs` | — |
+| `U-053` | `SOURCE_AND_REGRESSION` | multiple identifiers are now emitted by the broker and delivered to the client host | `M/test/{broker_subscription_identifier,client_alias}_test.exs` | Paho `subid`; Mosquitto → client Sub-IDs |
+| `U-055` | `SOURCE_AND_REGRESSION` | **partial / known deviation:** an alias above the advertised maximum → DISCONNECT 0x94 in both roles (`:topic_alias_invalid`); an alias of **0** is rejected by the properties codec as an invalid value and gets DISCONNECT **0x81** (Malformed), not the 0x94 that §3.3.4 lists. The pure `TopicAlias` helper maps 0 to `:topic_alias_invalid`, but the codec rejects 0 before it runs; only an encode-side alias-0 codec vector exists (`M/test/codec/operational_packets_test.exs`), no inbound wire-level alias-0 test | `M/test/{topic_alias,broker_alias,client_alias}_test.exs`; `P/mqtt_feature_test.exs` (out-of-range only) | Paho `alias-invalid` (alias 11 > 10 → 0x94) |
+| `U-056` | `SOURCE_AND_REGRESSION` | empty topic with an unknown alias → DISCONNECT 0x82 in both roles (was: every alias refused) | `M/test/{topic_alias,broker_alias,client_alias}_test.exs`; `P/mqtt_feature_test.exs` | Paho `alias-unknown` |
+| `U-061` | `SOURCE_AND_REGRESSION` | one SUBSCRIBE identifier is stored per subscription for every filter in it; re-SUBSCRIBE replaces it, including with none | `M/test/broker_subscription_identifier_test.exs` | Paho `subid` (removal) |
+
+Catalog changes: `CPROFILE` (client no longer forces Topic Alias Maximum 0;
+caller-supplied `topic_alias` stays rejected), `BASIC` (CONNACK advertises
+aliases 10, shared and Sub-IDs 1 by default; shared-off and 0xA1 paths remain
+behind switches), `CALIAS` (inbound aliases resolve instead of rejecting;
+see `M/test/client_alias_test.exs`), `OPER` (dedicated
+`:shared_subscription_no_local` decode reason, still class malformed) and
+`SHARED_OFF` (holds with `shared_subscriptions: false`). New evidence:
+`M/test/{topic,topic_alias,broker_alias,broker_subscription_identifier,broker_shared,broker_shared_redistribution,client_alias,broker_checkpoint,protocol_error_reason}_test.exs`;
+`B/test/mqtt/persistence_test.exs` (v1 WAL record recovery);
+`P/test/graviton_mq/{mqtt_feature,mqtt_feature_persistence}_test.exs`
+(raw-socket and owner-kill/restart recovery of shared memberships, IDs and
+bound deliveries; disabled feature → `:checkpoint_capability_mismatch`);
+independent `P/test/graviton_mq/{mqtt_feature_paho,mqtt_feature_mosquitto}_test.exs`,
+`C/test/{mqtt_feature_mosquitto,mqtt_peer_capabilities}_test.exs`.
+
+Status `COMMITTED_CI_INTEROP_PASS` for the rows above, except `U-055` alias 0
+(deviation) and `MQTT-4.8.2-4/5/6` (no independent-peer case; pure and
+raw-socket evidence only).
+
 ## Evidence boundaries and remaining qualification
 
 The linked [G0/G1](2026-10-29-g0-g1.md), [G2](2026-10-30-g2.md),

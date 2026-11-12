@@ -55,6 +55,16 @@ build during T0):
   resolve them itself. Sub-IDs supported as `SubscriptionIdentifier`
   (received as a list).
 
+T0 re-verification (hosted CI run 43177284736, `4967d89`): Mosquitto 2.1.2
+`max_topic_alias_broker` accepted (no "Unknown configuration variable" in the
+broker output; `apps/graviton_mq_client/test/mqtt_peer_capabilities_test.exs`);
+`mosquitto_pub --repeat 3 --repeat-delay 0 -D publish topic-alias 1` sends full
+topic then alias-only (the wire tap recorded `[{"probe/a", 1}, {"", 1}, {"",
+1}]`); Paho 2.1.0 manual TopicAlias with empty topic and
+SubscriptionIdentifier: pass (`mqtt_feature_paho_test.exs` T0 probe). No
+"missing pinned peer capability" failure occurred, so plan Task 20 Step 2
+required no test change.
+
 ## 2. Scope and non-goals
 
 ### 2.1 In scope
