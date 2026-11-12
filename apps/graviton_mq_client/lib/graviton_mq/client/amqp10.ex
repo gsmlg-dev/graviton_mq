@@ -331,11 +331,14 @@ defmodule GravitonMQ.Client.AMQP10 do
     facts = %{generation: state.endpoint.generation, now_ms: now(), event: event}
     {machine, effects} = Machine.step(state.sasl, facts)
 
-    # A failed `expect_header` switch re-enters the machine; once that nested
-    # step has replaced the machine, this step's remaining effects are stale.
+    # Once a nested step has replaced the machine, or an effect halted the
+    # negotiation, this step's remaining effects are stale.
     Enum.reduce_while(effects, %{state | sasl: machine}, fn effect, state ->
-      state = sasl_effect(effect, state)
-      if state.sasl == machine, do: {:cont, state}, else: {:halt, state}
+      case sasl_effect(effect, state) do
+        {:halt, state} -> {:halt, state}
+        state when state.sasl == machine -> {:cont, state}
+        state -> {:halt, state}
+      end
     end)
   end
 
@@ -345,10 +348,14 @@ defmodule GravitonMQ.Client.AMQP10 do
   defp sasl_effect({:wake_at, _, _, _, _} = wake, state), do: effect(wake, state)
   defp sasl_effect({:cancel_wake, _, _, _} = cancel, state), do: effect(cancel, state)
 
+  # The machine emits this with its successful outcome, already `:done`, so a
+  # failed switch must not be routed (it would reach the unstarted Endpoint)
+  # and must stop the following `{:start_endpoint, nil}`. The stream takes only
+  # the octets a frame needs, so the switch cannot fail from socket input.
   defp sasl_effect({:expect_header, accept}, state) do
     case Stream.expect_header(state.stream, accept) do
       {:ok, stream} -> %{state | stream: stream}
-      {:error, error} -> route(state, {:decode_error, error})
+      {:error, error} -> {:halt, sasl_effect({:close, {:decode_error, error.reason}}, state)}
     end
   end
 

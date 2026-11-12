@@ -136,6 +136,28 @@ defmodule GravitonMQ.AMQP10Client.SASLTest do
     end
   end
 
+  # The stream takes only the octets a frame needs, so a decoded outcome never
+  # leaves buffered bytes and the header switch cannot fail from socket input.
+  # The failure is forced here to pin the defensive path: it closes with the
+  # decode reason, sends no AMQP header and never starts the Endpoint.
+  test "a failed switch to the AMQP header closes without starting the Endpoint" do
+    {client, socket} = awaiting_outcome!()
+    outcome = sasl_frame(%Outcome{code: Value.ubyte(0)})
+
+    :sys.replace_state(client, fn state ->
+      %{state | stream: %{state.stream | buffer: outcome <> "AM"}}
+    end)
+
+    :ok = :gen_tcp.send(socket, "Q")
+
+    assert_receive {:graviton_mq, ^client, {:disconnected, {:decode_error, :invalid_stream}}},
+                   1_000
+
+    refute_received {:graviton_mq, ^client, {:connected, _}}
+    assert %{phase: :closed} = Client.status(client)
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
+  end
+
   test "no SASL offer, an unoffered mechanism, a challenge and silence close explicitly" do
     {listener, port} = server!()
     client = client!(port, sasl: :anonymous)
