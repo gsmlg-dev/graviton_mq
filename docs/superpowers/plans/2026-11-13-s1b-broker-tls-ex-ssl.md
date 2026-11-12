@@ -4091,3 +4091,45 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
   `{:unsupported_tls_option, :active_chunk_size}` (not on the allowlist). The
   runtime-owned `active_chunk_size: 16_384` is **not** set by `hell_options/1`;
   Task 5 adds it to HellHandoff's TLS transport options next to `buffer: 16_384`.
+
+### Tasks 3–5 (2026-11-12)
+
+- **Task 3.** `56f08d3` feat(mqtt): red (7 tests, 1 failure: `tls.([])` gave
+  `{:error, :invalid_mqtt_options}`) → green (7 tests, 0 failures). Deviation
+  per the amendment: the `# WORKAROUND(upstream): gsmlg-dev/http_fetch#168`
+  key-rejection assertion becomes an acceptance of an in-memory
+  `certs_keys: [%{cert:, key:}]` identity; an added assertion rejects a user
+  `active_chunk_size` with `{:unsupported_tls_option, :active_chunk_size}`.
+  `path?/1` and `@tls_keys` deleted (no other users).
+- **Task 4.** `cb69c01` feat(amqp): shared-file check clean; red (7 tests,
+  1 failure: `{:error, :invalid_listener}` for `active: true`) → green
+  (7 tests, 0 failures). Same amendment deviations: in-memory
+  `cert` + `key` is accepted (no WORKAROUND marker), and `active_chunk_size`
+  joins the rejected-key list. `certificate?/1` and `private_key?/1` deleted.
+- **Task 5.** `2463070` feat(runtime): shared-file check of
+  `amqp10/listener.ex` clean. Red (27 tests, 25 failures: Hell `:badarg`
+  from the settings map passed as `send_timeout`) → green (27 tests,
+  0 failures, three consecutive runs). Product check
+  `mqtt_connection_test.exs` + `amqp10_runtime_test.exs`: 30 tests, 0 failures
+  when run **from the umbrella root**; from `apps/graviton_mq` all 15 AMQP
+  runtime cases fail with "`GravitonMQ.AMQP10Client` ... does not exist"
+  because `graviton_mq` does not depend on the client app (environmental, not
+  this change). Deviations:
+  - Per the amendment, the TLS transport options carry the runtime-owned
+    `active_chunk_size: 16_384` (next to `buffer: 16_384`, before the user
+    options). An added `tls only` case, "every active-once delivery is
+    bounded to 16 KiB", sends 64 KiB while the probe is unarmed and asserts
+    four ≤ 16_384-byte deliveries; it fails without the option (verified).
+  - **Spec §4.8 / T4 conflict.** Hell's `num_connections` is **per
+    acceptor** (`hell.ex` docs: the server-wide maximum is
+    `num_acceptors * num_connections`; `acceptor_supervisor.ex:51`). With
+    HellHandoff's 4 acceptors and `num_connections: max_connections`, a
+    throwaway probe with `max_connections: 1` completed 4 concurrent TLS
+    handshakes and refused the 5th. The planned test (one connection, then a
+    refused second) failed. Implementation kept as planned; the test now
+    asserts the bound Hell enforces (4 × `max_connections`: four held, the
+    fifth refused within 500 ms, a new one accepted within 4 s after all four
+    close). Established Connections stay bounded by the `:connections`
+    supervisor's `max_children`. **Coordinator decision needed** on the spec
+    statement (accept 4 × `max_connections`, or e.g. a single TLS acceptor,
+    which would conflict with the parallel-release case that needs ≥ 2).
