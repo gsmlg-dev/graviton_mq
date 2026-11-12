@@ -40,6 +40,14 @@ defmodule GravitonMQ.AMQP10.SASL.Machine do
   Endpoint) or closes (the buffered bytes are discarded with the connection).
   Input is also paused while a final refusal is being flushed. Shells check
   `input_paused?/1` after every step, in addition to `active?/1`.
+
+  Pausing applies only to stream items. While paused the shell must keep
+  delivering non-stream events — `auth_result`, `write_result`, `timeout` and
+  `transport_down` — otherwise the negotiation deadline is the only exit.
+  The same `Codec.Stream` continues after the held header (its state and the
+  `expect_header/2` switch are carried over, not rebuilt). A shell that stops
+  reading its socket while paused must still learn about transport loss from
+  its transport monitor, not from reads.
   """
 
   alias GravitonMQ.AMQP10.{Frame, SASL, Value}
