@@ -94,8 +94,26 @@ TCP defaults to port 5672, TLS to 5671. TLS verifies the certificate chain and
 hostname using system CAs or a supplied CA. `verify_none`, disabling SNI, and
 overriding owner framing/read/write options are rejected.
 
-The current profile supports raw AMQP protocol ID 0 without SASL, format-zero
-messages, nontransactional unsettled sender/receiver-first settlement,
+The client supports raw AMQP protocol ID 0 (`sasl: :none`, default) or SASL
+ANONYMOUS/PLAIN (S2, 2026-11-12, unreleased): `sasl: :anonymous |
+{:anonymous, trace} | {:plain, user, password} | {:plain, user, password,
+authzid: id}`. The password may be a zero-arity function; it runs once per
+connect in the owner, after the socket connects and before the `sasl_timeout`
+deadline (default 5,000 ms, 1..10,000) is armed, so it must return promptly.
+PLAIN over `transport: :tcp` requires `allow_insecure_plain: true`; invalid
+values and PLAIN credentials whose sasl-init would exceed the 512-octet SASL
+frame fail `start_link/1` with `{:error, :invalid_options}`. The sasl-init
+hostname is the configured Open `hostname` (or absent). A SASL client never
+falls back to raw AMQP: it disconnects with `{:sasl, :auth | :sys | :sys_perm |
+:sys_temp | {:unknown, code}}`, `:sasl_not_offered` (the peer answered
+`AMQP 0 1 0 0`), `:sasl_mechanism_not_offered`, `:sasl_protocol_error` (for
+example a sasl-challenge), `:sasl_timeout` or `:invalid_sasl_credentials` (a
+provider raised or returned a non-binary), and `{:connected, _}` is sent only
+after Open. The credential, or its provider, stays in redacted owner state for
+the connection lifetime; an evaluated provider result does not outlive
+sasl-init. EXTERNAL, SCRAM and the TLS-upgrade header are not implemented.
+
+The current profile also uses format-zero messages, nontransactional unsettled sender/receiver-first settlement,
 volatile non-dynamic Source/Target, no filters, and no Link/session resume.
 Unsupported negotiation is rejected explicitly. Client reconnect/resumption
 and process/VM recovery remain unimplemented; broker queue persistence is a

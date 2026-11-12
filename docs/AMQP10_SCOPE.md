@@ -22,7 +22,8 @@ the external producer/consumer qualification is recorded separately.
 `Codec.Frame.encode/1,2` validates an existing Frame's declared size, offset,
 type, channel, extended-header alignment and configured bounds before joining
 bytes. The header and body remain opaque; decoder behavior is preserved.
-SASL frame encoding remains explicitly unsupported. Frame/scalar regressions
+SASL frames (type `0x01`) are encoded and decoded only on explicit request
+(`types: [:sasl]`), bounded to 512 octets (S2). Frame/scalar regressions
 are in `test/codec/frame_encode_test.exs` and `value_scalar_extension_test.exs`.
 These codec increments qualify binary transformations. G3 additionally now
 has pure Endpoint/SessionEngine behavior and an independent network client,
@@ -65,6 +66,24 @@ arrays use the shared bounded codec; application properties still require
 simple scalar/null values. Annotation
 understanding, durability acceptance and expiry are later endpoint/broker
 semantics. See the [G3 codec evidence](qualification/2026-10-30-g3-codec.md).
+
+## S2 SASL layer (2026-11-12, unreleased)
+
+S2 adds the Part 5 §5.3 SASL layer for ANONYMOUS (RFC 4505) and PLAIN
+(RFC 4616), without a security layer. `Codec.SASL` decodes and encodes the
+five frame bodies (sasl-mechanisms, -init, -challenge, -response, -outcome)
+with numeric and symbolic descriptors, exact tagged fields and exactly one
+value per frame; an empty SASL frame is an error. Mechanism lists are a
+non-empty symbol or symbol array of at most 16 names; sasl-code values 5..255
+decode as data and are not whitelisted. `SASL.Plain` and `SASL.Anonymous`
+parse the RFC messages; SASL body and Plain structs redact secrets in
+`inspect/1` only. `SASL.Machine` is a pure, generation-fenced negotiation
+machine for both roles that runs before the unchanged `Endpoint`; the
+Endpoint's `sasl:` option stays rejected. Codec errors carry the body and
+field index, never secret bytes. EXTERNAL, SCRAM and other mechanisms and the
+TLS-upgrade header (protocol ID 2) remain unsupported. Running-role behaviour
+is described in [AMQP10_BROKER.md](AMQP10_BROKER.md) and
+[AMQP10_CLIENT.md](AMQP10_CLIENT.md).
 
 ## Protocol target and clean-room constraint
 
@@ -277,9 +296,11 @@ return explicit structured errors. The generic value codec still preserves
 unknown described values without assigning them a schema.
 
 The raw AMQP protocol header recognizer accepts only protocol ID 0 and version
-1.0.0. SASL and other identifiers or versions are unsupported rather than
-negotiated. Frame validation accepts only AMQP frame type 0 and preserves the
-extended header, complete body, and trailing bytes exactly. It never invokes
+1.0.0 by default; `AMQP 3 1 0 0` is recognized only when a caller accepts
+protocol ID 3 (`recognize/2`, S2). Other identifiers or versions are
+unsupported rather than negotiated. Frame validation accepts only AMQP frame
+type 0 unless the caller requests SASL frames, and preserves the extended
+header, complete body, and trailing bytes exactly. It never invokes
 the performative codec automatically and does not decode a message payload.
 The authoritative encoded message content likewise remains opaque and
 byte-exact.
@@ -309,6 +330,11 @@ No module or test should imply that these capabilities work or that the
 bounded value and Open/Begin schema subset is complete AMQP compatibility. Any
 next performative codec slice requires separate design and review and remains
 pure, bounded, and independent of protocol processes and transport.
+
+This list records Milestone 1 only. Later authorized stages implemented
+several of these items; S2 (2026-11-12) adds SASL ANONYMOUS/PLAIN, while AMQP
+TLS-upgrade negotiation (protocol ID 2) and other SASL mechanisms remain
+unsupported.
 
 ## Post-Milestone-1 End/Close codec slice
 

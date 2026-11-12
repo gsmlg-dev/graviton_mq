@@ -43,18 +43,85 @@ or receive. The independent Elixir client is described in
 ## Profile and responsibility
 
 Only named, preconfigured move queues are supported. The default memory profile
-uses protocol ID 0 (no SASL), non-dynamic termini, format-zero messages,
-unsettled senders and receiver-first settlement. Unsupported termini, copy
+uses protocol ID 0 with optional SASL (below), non-dynamic termini, format-zero
+messages, unsettled senders and receiver-first settlement. Unsupported termini, copy
 distribution, required capabilities and settlement modes are rejected. Unknown
 addresses receive an error Detach after a null Attach. There are no implicit
 queues or successful placeholder operations.
 
-`auth: :anonymous` is mandatory and explicit. The optional `authorize/3`
-callback receives `:anonymous`, the peer action `:send` or `:receive`, and the
-configured address. Only `:allow` admits the Link. Tasks, concurrency and
-deadlines are bounded; denial, timeout and callback exceptions grant no Link
-or credit. Authorization applies to the Link lifetime. SASL, enhanced identity
-providers and ACL revalidation on an already admitted Link are unavailable.
+`auth` is mandatory and explicit: `:anonymous` or `{module, options}` with the
+`GravitonMQ.Runtime.AMQP10.Auth` behaviour (`authenticate(credentials,
+options)`). The optional `authorize/3` callback receives the connection's
+principal, the peer action `:send` or `:receive`, and the configured address.
+Only `:allow` admits the Link. Tasks, concurrency and deadlines are bounded;
+denial, timeout and callback exceptions grant no Link or credit. Authorization
+applies to the Link lifetime. ACL revalidation on an already admitted Link is
+unavailable.
+
+### SASL (S2, 2026-11-12, unreleased)
+
+SASL (AMQP 1.0 Part 5 §5.3) supports ANONYMOUS and PLAIN only, without a
+security layer, over TCP and implicit-TLS listeners.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `sasl` | `:optional` under `auth: :anonymous`; `:required` under `{module, options}` | `:optional` accepts peers with or without SASL; `:required` answers a no-SASL header with `AMQP 3 1 0 0` and closes; `:disabled` answers a SASL header with `AMQP 0 1 0 0` and closes |
+| `sasl_mechanisms` | `["ANONYMOUS"]` / `["PLAIN"]` | Ordered, duplicate-free subset of `"PLAIN"` and `"ANONYMOUS"` |
+| `allow_insecure_plain` | `false` | Must be `true` to offer PLAIN while any listener uses `transport: :tcp` |
+| `sasl_timeout` | 5,000 ms (1..10,000) | Bounds the header wait, the exchange and the post-outcome AMQP header |
+| `max_sasl_jobs` | 16 (1..128) | Concurrent authentication callbacks, separate from `max_auth_jobs` |
+| `auth_timeout` | 2,000 ms (1..3,000) | Existing Link-authorization bound, also applied to each authentication callback |
+
+Start fails with `:sasl_required_for_authentication` for a module policy with
+`sasl: :optional | :disabled` (no unauthenticated bypass),
+`:plain_requires_authentication` for `"PLAIN"` under `auth: :anonymous`,
+`:plain_requires_tls` for PLAIN on a TCP listener without the opt-in, and
+`:invalid_sasl_mechanisms` for an empty, duplicate or unknown mechanism list.
+
+Under `auth: :anonymous`, no-SASL and SASL ANONYMOUS peers get principal
+`:anonymous`; no callback runs, and PLAIN is not offered. A module policy
+invokes `authenticate/2` for PLAIN and for a listed `"ANONYMOUS"`
+(`mechanism: :anonymous`, with the optional trace). Credentials carry
+`mechanism`, `username`, `password`, `authzid`, `trace`, `hostname` and
+`peer: %{ip, port, transport, certificate, certificate_verified}`; the callback
+owns verification (constant-time comparison) and the `authzid` policy. Its
+`{:ok, principal}` becomes the first argument of `authorize/3` and is retained
+for the connection lifetime, so it must not contain secrets. Until a principal
+is reported, Link admission is denied without calling `authorize/3`;
+`:unauthenticated` is reserved for that state, always denied, and refused at
+SASL (`sys`) if a callback returns it.
+
+| Callback result or peer input | sasl-outcome |
+| --- | --- |
+| `{:ok, principal}` | `ok`, then the AMQP header exchange and Open |
+| `{:error, _}`, unoffered mechanism, invalid PLAIN/ANONYMOUS message | `auth` |
+| Invalid return, exception or exit | `sys` |
+| `auth_timeout` deadline, exhausted `max_sasl_jobs`, unavailable Authenticator | `sys-temp` |
+
+A failure outcome is flushed and the socket is closed. Protocol violations
+(out-of-order or malformed body, frame above 512 octets, empty frame, second
+sasl-init, a sasl-response without a challenge) and the `sasl_timeout`
+deadline close without an outcome. Callbacks run in sensitive tasks under a
+dedicated `:sasl_tasks` supervisor started by the policy-holding
+`Authenticator`; transport loss kills a running callback and late results are
+ignored. Passwords, usernames, authzid, initial responses and policy options
+are never logged, returned, put into status, published in the Listener's
+connection specification or stored in the Broker (Manager) state. Privacy
+tests assert this for the password and the policy options; usernames and
+authzid rely on the redacting `Inspect` of the SASL structs. `amqp10_status/1` adds `authenticating` (count) and `sasl_failures` by code
+(`auth`, `sys`, `sys_perm`, `sys_temp`). EXTERNAL, SCRAM, other mechanisms,
+SASL security layers and the TLS-upgrade header (protocol ID 2) are not
+implemented; credential storage, lockout and rate limiting belong to the host.
+
+Upgrade note (S2): the broker now always waits for the client's protocol
+header before sending its own, in every `sasl` mode (previously it sent
+`AMQP 0 1 0 0` and Open immediately after accept). A silent peer is closed by
+`sasl_timeout`, also under `sasl: :disabled`, instead of the Open deadline. A
+malformed or unsupported header receives the supported header and a socket
+close, but no AMQP Close frame, because the Endpoint is not started. Existing
+`auth: :anonymous` configurations need no change: no-SASL peers still connect
+and `authorize/3` still receives `:anonymous`; peers that default to SASL
+ANONYMOUS, such as Proton with `sasl_enabled=True`, now connect too.
 
 The default broker sends Accepted after the queue takes memory responsibility.
 It rejects durable messages in memory mode. Both profiles reject Header TTL
