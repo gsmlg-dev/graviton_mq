@@ -18,14 +18,18 @@ defmodule GravitonMQ.AMQP10TLSTest do
   use ExUnit.Case, async: true
 
   alias GravitonMQ.AMQP10.Value
-  alias GravitonMQ.AMQP10.Codec.{Frame, Performative}
+  alias GravitonMQ.AMQP10.Codec.{Frame, Limits, Performative}
+  alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
   alias GravitonMQ.AMQP10.Frame, as: Envelope
   alias GravitonMQ.AMQP10.Performative.Open
+  alias GravitonMQ.AMQP10.SASL.{Init, Mechanisms, Outcome, Plain}
+  alias GravitonMQ.AMQP10TLSTest.Auth
   alias GravitonMQ.Runtime.Test.TLS
 
   @compile {:no_warn_undefined, :ssl}
   @moduletag timeout: 30_000
   @amqp <<"AMQP", 0, 1, 0, 0>>
+  @sasl <<"AMQP", 3, 1, 0, 0>>
 
   setup_all do
     %{certificates: TLS.certificates!()}
@@ -54,9 +58,67 @@ defmodule GravitonMQ.AMQP10TLSTest do
     assert %{active: 0} = DynamicSupervisor.count_children(connections(broker))
   end
 
+  # T2
+  test "a TLS 1.2-only client is refused during the handshake and starts no Connection",
+       %{certificates: certificates} do
+    broker = broker!(certificates)
+
+    assert {:error, {:tls_alert, {:protocol_version, _description}}} =
+             TLS.connect(port(broker), certificates, versions: [:"tlsv1.2"])
+
+    assert %{active: 0} = DynamicSupervisor.count_children(connections(broker))
+  end
+
+  # T3 through SASL PLAIN over TLS: the Auth callback sees peer/1 facts.
+  test "optional client certificates give exact SASL peer facts and agree with ex_ssl",
+       %{certificates: certificates} do
+    broker =
+      broker!(certificates, [auth: {Auth, [test: self()]}],
+        cacertfile: certificates.ca,
+        verify: :verify_peer,
+        fail_if_no_peer_cert: false
+      )
+
+    port = port(broker)
+    {:ok, anonymous} = TLS.connect(port, certificates)
+    plain!(anonymous)
+    assert_receive {:peer, %{certificate: nil, certificate_verified: false, transport: :tls}}
+    assert {:ok, information} = SSL.connection_information(server_socket(connection!(broker)))
+    assert information[:peer_authenticated] == false
+    :ok = :ssl.close(anonymous)
+    assert eventually(fn -> DynamicSupervisor.count_children(connections(broker)).active == 0 end)
+
+    {:ok, identified} = TLS.connect(port, certificates, TLS.client_identity(certificates))
+    plain!(identified)
+    client_der = certificates.client_der
+    assert_receive {:peer, %{certificate: ^client_der, certificate_verified: true}}
+    assert {:ok, information} = SSL.connection_information(server_socket(connection!(broker)))
+    assert information[:peer_authenticated] == :client
+
+    case TLS.connect(port, certificates, TLS.stranger_identity(certificates)) do
+      {:error, _reason} -> :ok
+      {:ok, stranger} -> assert {:error, _reason} = :ssl.recv(stranger, 0, 2_000)
+    end
+
+    refute_receive {:peer, _peer}, 200
+  end
+
+  # T4: stalled mid-handshake (the silent case is the migrated test above)
+  test "a peer stalled inside its ClientHello is closed within connect_timeout",
+       %{certificates: certificates} do
+    broker = broker!(certificates, connect_timeout: 300)
+    {:ok, raw} = :gen_tcp.connect({127, 0, 0, 1}, port(broker), [:binary, active: false], 1_000)
+    started = System.monotonic_time(:millisecond)
+    :ok = :gen_tcp.send(raw, <<22, 3, 1, 0, 64, 1, 0, 0, 60>>)
+    assert :closed = closed(raw, started + 2_000)
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed >= 250 and elapsed < 1_500, "closed after #{elapsed} ms"
+    assert %{active: 0} = DynamicSupervisor.count_children(connections(broker))
+  end
+
   # Helpers (used by all AMQP TLS tests).
 
-  defp broker!(certificates, options \\ []) do
+  defp broker!(certificates, options \\ [], tls \\ []) do
     config =
       Keyword.merge(
         [
@@ -64,7 +126,7 @@ defmodule GravitonMQ.AMQP10TLSTest do
           auth: :anonymous,
           queues: ["q"],
           endpoint_options: [max_frame_size: 512],
-          listeners: [tls_listener(certificates)]
+          listeners: [tls_listener(certificates, tls)]
         ],
         options
       )
@@ -74,13 +136,13 @@ defmodule GravitonMQ.AMQP10TLSTest do
     )
   end
 
-  defp tls_listener(certificates),
+  defp tls_listener(certificates, tls),
     do: [
       id: :tls,
       transport: :tls,
       ip: {127, 0, 0, 1},
       port: 0,
-      tls_options: TLS.listener_options(certificates)
+      tls_options: TLS.listener_options(certificates, tls)
     ]
 
   defp port(broker) do
@@ -98,6 +160,31 @@ defmodule GravitonMQ.AMQP10TLSTest do
     assert %Open{} = read_pdu!(socket)
     :ok = :ssl.send(socket, wire(%Open{container_id: Value.string("tls-peer")}))
     socket
+  end
+
+  defp plain!(socket) do
+    :ok = :ssl.send(socket, @sasl)
+    assert {:ok, @sasl} = :ssl.recv(socket, 8, 2_000)
+    assert %Mechanisms{} = read_sasl!(socket)
+
+    {:ok, message} =
+      Plain.encode(%Plain{username: "graviton-user", password: "graviton-password"})
+
+    init = %Init{mechanism: Value.symbol("PLAIN"), initial_response: Value.binary(message)}
+    {:ok, frame} = SASLCodec.encode_frame(init)
+    :ok = :ssl.send(socket, frame)
+    assert %Outcome{code: %Value{type: :ubyte, value: 0}} = read_sasl!(socket)
+  end
+
+  defp read_sasl!(socket) do
+    {:ok, <<size::32, _::binary>> = header} = :ssl.recv(socket, 8, 2_000)
+    {:ok, body} = :ssl.recv(socket, size - 8, 2_000)
+
+    {:ok, %Envelope{type: :sasl} = frame, <<>>} =
+      Frame.decode(header <> body, Limits.default(), types: [:sasl])
+
+    {:ok, decoded} = SASLCodec.decode(frame.body)
+    decoded
   end
 
   defp wire(pdu, channel \\ 0) do
