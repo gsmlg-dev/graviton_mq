@@ -37,7 +37,7 @@ defmodule GravitonMQ.AMQP10SASLTest do
   alias GravitonMQ.AMQP10.Codec.{Frame, Limits, Performative}
   alias GravitonMQ.AMQP10.Codec.SASL, as: SASLCodec
   alias GravitonMQ.AMQP10.Frame, as: Envelope
-  alias GravitonMQ.AMQP10.Performative.{Attach, Begin, Open}
+  alias GravitonMQ.AMQP10.Performative.{Attach, Begin, Detach, Open}
   alias GravitonMQ.AMQP10.SASL.{Init, Mechanisms, Outcome, Plain}
   alias GravitonMQ.AMQP10.Terminus.{Source, Target}
   alias GravitonMQ.AMQP10SASLTest.Auth
@@ -293,6 +293,89 @@ defmodule GravitonMQ.AMQP10SASLTest do
              GravitonMQ.amqp10_status(broker)
   end
 
+  # Minor 6: the Broker's record default is a deny-only principal.
+  test "Link admission without a reported principal is denied without authorize/3" do
+    test = self()
+
+    authorize = fn principal, action, address ->
+      send(test, {:authorized, principal, action, address})
+      :allow
+    end
+
+    broker = broker!(authorize: authorize)
+    manager = child(amqp_supervisor(broker), GravitonMQ.Runtime.AMQP10.Broker)
+    socket = connect!(broker)
+
+    # Registered before any header: the default denies.
+    eventually!(fn -> principals(manager) != [] end)
+    assert [default] = principals(manager)
+    assert default == :unauthenticated
+
+    :ok = :gen_tcp.send(socket, @amqp <> wire(%Open{container_id: Value.string("raw-peer")}))
+    assert {:ok, @amqp} = :gen_tcp.recv(socket, 8, 1_000)
+    assert %Open{} = read_pdu!(socket)
+    eventually!(fn -> principals(manager) == [:anonymous] end)
+
+    # Put the record back to its default, as if no principal had arrived.
+    :sys.replace_state(manager, fn shell ->
+      state = :ets.lookup_element(shell.table, :state, 2)
+
+      connections =
+        Map.new(state.connections, fn {pid, record} -> {pid, %{record | principal: default}} end)
+
+      :ets.insert(shell.table, {:state, %{state | connections: connections}})
+      shell
+    end)
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        wire(
+          %Begin{
+            next_outgoing_id: Value.uint(0),
+            incoming_window: Value.uint(32),
+            outgoing_window: Value.uint(32)
+          },
+          1
+        ) <> wire(sender_attach(), 1)
+      )
+
+    assert %Begin{} = read_pdu!(socket)
+    assert %Attach{target: nil} = read_pdu!(socket)
+
+    assert %Detach{error: %{condition: %Value{value: "amqp:unauthorized-access"}}} =
+             read_pdu!(socket)
+
+    refute_received {:authorized, _principal, _action, _address}
+  end
+
+  defp principals(manager) do
+    caller = self()
+    reference = make_ref()
+
+    :sys.replace_state(manager, fn shell ->
+      state = :ets.lookup_element(shell.table, :state, 2)
+      send(caller, {reference, Enum.map(state.connections, fn {_, r} -> r.principal end)})
+      shell
+    end)
+
+    assert_receive {^reference, principals}, 1_000
+    principals
+  end
+
+  defp sender_attach do
+    %Attach{
+      name: Value.string("sasl-sender"),
+      handle: Value.uint(0),
+      role: Value.boolean(false),
+      snd_settle_mode: Value.ubyte(0),
+      rcv_settle_mode: Value.ubyte(0),
+      source: %Source{address: Value.string("raw")},
+      target: %Target{address: Value.string("orders")},
+      initial_delivery_count: Value.uint(0)
+    }
+  end
+
   defp broker!(options) do
     config =
       Keyword.merge(
@@ -357,18 +440,7 @@ defmodule GravitonMQ.AMQP10SASLTest do
 
     assert %Begin{} = read_pdu!(socket)
 
-    attach = %Attach{
-      name: Value.string("sasl-sender"),
-      handle: Value.uint(0),
-      role: Value.boolean(false),
-      snd_settle_mode: Value.ubyte(0),
-      rcv_settle_mode: Value.ubyte(0),
-      source: %Source{address: Value.string("raw")},
-      target: %Target{address: Value.string("orders")},
-      initial_delivery_count: Value.uint(0)
-    }
-
-    :ok = :gen_tcp.send(socket, wire(attach, 1))
+    :ok = :gen_tcp.send(socket, wire(sender_attach(), 1))
   end
 
   # The Connection keeps its state in a private ETS table; read it in-process.

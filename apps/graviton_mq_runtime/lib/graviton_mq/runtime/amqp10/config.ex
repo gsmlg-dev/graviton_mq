@@ -60,6 +60,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Config do
       Keyword.get(options, :sasl_mechanisms, if(authenticate, do: ["PLAIN"], else: ["ANONYMOUS"]))
 
     insecure = Keyword.get(options, :allow_insecure_plain, false)
+    # Also bounds the protocol-header wait under `sasl: :disabled`.
     timeout = Keyword.get(options, :sasl_timeout, 5_000)
     jobs = Keyword.get(options, :max_sasl_jobs, 16)
 

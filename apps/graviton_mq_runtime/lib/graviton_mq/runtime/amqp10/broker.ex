@@ -145,7 +145,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
           handle: handle,
           closing: nil,
           peer_container_id: nil,
-          principal: :anonymous
+          # Deny-only until the Connection reports its negotiated principal.
+          principal: :unauthenticated
         }
 
         %{state | connections: Map.put(state.connections, connection, record)}
@@ -153,8 +154,10 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   end
 
   # Connection-local SASL facts: a principal (sent before its Endpoint starts,
-  # hence before any Link event) and bounded counters. No credential or
-  # username ever reaches this process.
+  # hence before any Link event) and bounded counters. The principal returned
+  # by the host callback (including any username the host puts in it) is
+  # retained here for the connection's lifetime and passed to authorize/3.
+  # SASL credentials and the authentication policy never reach this process.
   defp info({:amqp10_principal, connection, principal}, state) do
     case Map.fetch(state.connections, connection) do
       {:ok, record} ->
@@ -472,14 +475,16 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   end
 
   defp authorize(state, key) do
-    if map_size(state.jobs) >= state.config.max_auth_jobs do
+    principal = Map.fetch!(state.connections, elem(key, 0)).principal
+
+    # A connection without a reported principal is never offered to the host.
+    if map_size(state.jobs) >= state.config.max_auth_jobs or principal == :unauthenticated do
       decide(state, key, :deny)
     else
       route = Map.fetch!(state.routes, key)
       action = if route.role == :receiver, do: :send, else: :receive
       callback = state.config.authorize
       address = route.address
-      principal = Map.fetch!(state.connections, elem(key, 0)).principal
 
       task =
         authorization_task(state.auth_supervisor, fn ->

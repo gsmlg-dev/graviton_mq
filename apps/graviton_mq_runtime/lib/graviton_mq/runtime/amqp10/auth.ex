@@ -16,6 +16,16 @@ defmodule GravitonMQ.Runtime.AMQP10.Auth do
   exception or exit refuses with `sys`; a missed deadline or exhausted
   concurrency refuses with `sys-temp`. Callback reasons are never logged,
   reported to the peer or returned.
+
+  The principal is retained by the broker for the connection's lifetime and
+  passed to every `authorize/3` call, so it must not contain secrets
+  (passwords, tokens or the policy options): return an identity such as
+  `{:user, username}`. Until a Connection reports its principal, Link
+  admission is denied without calling `authorize/3`.
+
+  The broker waits for the peer's protocol header under every `sasl` mode,
+  bounded by `sasl_timeout` (default 5_000 ms); `sasl: :disabled` uses the
+  same deadline for that header wait before refusing a SASL header.
   """
 
   @callback authenticate(credentials :: map(), options :: keyword()) ::
