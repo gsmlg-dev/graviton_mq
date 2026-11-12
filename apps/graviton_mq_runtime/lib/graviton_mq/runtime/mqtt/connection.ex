@@ -46,36 +46,29 @@ defmodule GravitonMQ.Runtime.MQTT.Connection do
   def handle_info(message, state), do: protect(fn -> info(message, state) end)
 
   defp info({:accepted, socket}, %{socket: nil} = state) do
-    case handshake(state.transport, socket, state.config.connect_timeout) do
-      {:ok, socket} ->
-        state = %{state | socket: socket}
+    state = %{state | socket: socket}
 
-        options = [
-          owner: state.broker,
-          lifetime_owner: self(),
-          connection_id: state.id,
-          generation: state.generation,
-          socket: socket,
-          transport: state.transport,
-          max_packets: state.config.max_writer_packets,
-          max_bytes: state.config.max_writer_bytes
-        ]
+    options = [
+      owner: state.broker,
+      lifetime_owner: self(),
+      connection_id: state.id,
+      generation: state.generation,
+      socket: socket,
+      transport: state.transport,
+      max_packets: state.config.max_writer_packets,
+      max_bytes: state.config.max_writer_bytes
+    ]
 
-        with {:ok, writer} <- Writer.start_link(options),
-             handle <- Writer.handle(writer),
-             :ok <-
-               GenServer.call(
-                 state.broker,
-                 {:writer_ready, state.id, state.generation, handle, peer(state)}
-               ) do
-          {:noreply, arm(%{state | writer: writer})}
-        else
-          _failure -> {:stop, :normal, state}
-        end
-
-      {:error, _reason} ->
-        close_socket(state.transport, socket)
-        {:stop, :normal, state}
+    with {:ok, writer} <- Writer.start_link(options),
+         handle <- Writer.handle(writer),
+         :ok <-
+           GenServer.call(
+             state.broker,
+             {:writer_ready, state.id, state.generation, handle, peer(state)}
+           ) do
+      {:noreply, arm(%{state | writer: writer})}
+    else
+      _failure -> {:stop, :normal, state}
     end
   end
 
@@ -168,7 +161,7 @@ defmodule GravitonMQ.Runtime.MQTT.Connection do
     result =
       case state.transport do
         :tcp -> :inet.setopts(state.socket, active: :once)
-        :tls -> :ssl.setopts(state.socket, active: :once)
+        :tls -> SSL.setopts(state.socket, active: :once)
       end
 
     case result do
@@ -185,7 +178,7 @@ defmodule GravitonMQ.Runtime.MQTT.Connection do
     address =
       case state.transport do
         :tcp -> :inet.peername(state.socket)
-        :tls -> :ssl.peername(state.socket)
+        :tls -> SSL.peername(state.socket)
       end
 
     context =
@@ -196,7 +189,7 @@ defmodule GravitonMQ.Runtime.MQTT.Connection do
 
     certificate =
       if state.transport == :tls do
-        case :ssl.peercert(state.socket) do
+        case SSL.peercert(state.socket) do
           {:ok, der} -> der
           _ -> nil
         end
@@ -208,10 +201,8 @@ defmodule GravitonMQ.Runtime.MQTT.Connection do
     })
   end
 
-  defp handshake(:tcp, socket, _timeout), do: {:ok, socket}
-  defp handshake(:tls, socket, timeout), do: :ssl.handshake(socket, timeout)
   defp close_socket(:tcp, socket), do: :gen_tcp.close(socket)
-  defp close_socket(:tls, socket), do: :ssl.close(socket)
+  defp close_socket(:tls, socket), do: SSL.close(socket)
 
   @impl true
   def terminate(reason, state), do: protect(fn -> finish(reason, state) end)
