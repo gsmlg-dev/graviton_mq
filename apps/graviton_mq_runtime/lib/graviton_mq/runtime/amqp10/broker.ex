@@ -7,7 +7,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   alias GravitonMQ.AMQP10.Error, as: ProtocolError
   alias GravitonMQ.Core.Message, as: CoreMessage
   alias GravitonMQ.Core.Outcome, as: CoreOutcome
-  alias GravitonMQ.Runtime.AMQP10.{Connection, Queue}
+  alias GravitonMQ.Runtime.AMQP10.{Connection, Queue, QueueRequests}
 
   # A busy Connection may miss one capacity query; its routes are retried after
   # this delay instead of closing the Connection or spinning the pump.
@@ -15,6 +15,10 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   @capacity_retry 50
   # A fenced queue is probed outside this process until it answers again.
   @probe_delay 1_000
+  # The Manager never waits for a queue. A request missing this deadline (the
+  # former GenServer.call timeout) is classified by taking it back.
+  @request_deadline 5_000
+  @max_queue_requests 4_096
   @uncertain [:unknown_outcome, :queue_call_failed, :closed]
 
   def start_link(configuration), do: GenServer.start_link(__MODULE__, configuration)
@@ -63,7 +67,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
          pump_remaining: [],
          pump_again: false,
          pump_busy: MapSet.new(),
-         retry_timer: nil
+         retry_timer: nil,
+         exchanges: %{},
+         requests: QueueRequests.new(@max_queue_requests),
+         reqids: :gen_server.reqids_new(),
+         request_timers: %{},
+         status_waiters: %{},
+         deferred: false,
+         queue_fences: 0
        }}
     )
 
@@ -84,6 +95,13 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
         end)
 
       state = %{state | auth_supervisor: auth, queues: queues}
+
+      # One caller-owned exchange per queue for the Manager's lifetime; the
+      # boot `watch` below is the only remaining blocking call (path 1).
+      exchanges =
+        Map.new(queues, fn {_, queue} -> {queue, :ets.new(__MODULE__, [:set, :public])} end)
+
+      state = %{state | exchanges: exchanges}
 
       state =
         Enum.reduce(Map.values(queues), state, fn queue, state ->
@@ -111,6 +129,8 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
           authenticating: MapSet.size(state.authenticating),
           sasl_failures: state.sasl_failures,
           operations: map_size(state.operations),
+          queue_requests: QueueRequests.size(state.requests),
+          queue_fences: state.queue_fences,
           queues:
             Map.new(state.queues, fn {address, queue} ->
               {address, if(fenced?(state, queue), do: :unavailable, else: Queue.status(queue))}
@@ -127,7 +147,20 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   def handle_call(_, _from, shell), do: {:reply, {:error, :unsupported_command}, shell}
 
   @impl true
-  def handle_info(message, shell), do: protect(fn -> save(shell, info(message, data(shell))) end)
+  def handle_info(message, shell),
+    do: protect(fn -> save(shell, receive_message(message, data(shell))) end)
+
+  # Replies and queue DOWNs for asynchronous requests are matched first; every
+  # other message keeps its existing handler.
+  defp receive_message(message, state) do
+    case :gen_server.check_response(message, state.reqids, true) do
+      {response, {queue, id}, reqids} ->
+        queue_response(%{state | reqids: reqids}, queue, id, response)
+
+      _no_request_or_no_reply ->
+        info(message, state)
+    end
+  end
 
   defp info({:amqp10_connection_started, connection, %{pid: connection} = handle}, state)
        when is_pid(connection) do
@@ -306,6 +339,24 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     end
   end
 
+  defp info({:queue_deadline, queue, token}, state) do
+    case Map.get(state.request_timers, queue) do
+      {^token, _timer, _deadline} ->
+        state = %{state | request_timers: Map.delete(state.request_timers, queue)}
+        {expired, requests} = QueueRequests.expire(state.requests, queue, now())
+        table = Map.fetch!(state.exchanges, queue)
+
+        expired
+        |> Enum.reduce(%{state | requests: requests}, fn entry, state ->
+          answered(state, entry, Queue.classify(table, entry.token))
+        end)
+        |> arm_requests(queue)
+
+      _ ->
+        state
+    end
+  end
+
   defp info(_, state), do: state
 
   defp event(connection, {:event, {:connected, container}}, state) do
@@ -357,6 +408,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
               consumer: nil,
               generation: nil,
               busy: nil,
+              queue_ref: nil,
               pending_delivery: nil,
               credit: false,
               receiving: false
@@ -425,7 +477,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     key = {connection, sid, identity}
 
     case Map.get(state.routes, key) do
-      %{phase: :active, role: :receiver} = route ->
+      %{phase: :active, role: :receiver, queue_ref: nil} = route ->
         state = put_route(state, key, %{route | credit: false, receiving: true})
         outcome = admit_message(route, raw, metadata, state.config)
 
@@ -671,19 +723,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
         _ -> %CoreOutcome.MakeAvailable{}
       end
 
-    case Queue.settle(route.queue, route.consumer, route.generation, operation.delivery, outcome) do
-      :ok ->
-        state = put_route(state, operation.key, %{route | busy: nil})
+    state = put_route(state, operation.key, %{route | busy: nil})
+    message = {:settle, route.consumer, route.generation, operation.delivery, outcome}
 
-        if match?({:ok, _}, result),
-          do: state,
-          else: detach(state, operation.key, "delivery interrupted")
-
-      {:error, reason} when reason in @uncertain ->
-        fence(state, route.queue)
-
-      {:error, _} ->
-        detach(state, operation.key, "settlement resource limit")
+    # Issued before any later cleanup disconnect of this route: one queue
+    # serves the Manager's requests in order (final outcomes before DOWN).
+    case queue_request(state, route.queue, :settle, message, operation.key, %{result: result}) do
+      {:ok, state} -> state
+      {:error, :full, state} -> fence(state, route.queue)
     end
   end
 
@@ -710,6 +757,89 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   defp complete(state, operation, _result),
     do: detach(state, operation.key, "link operation failed")
 
+  # Path 6. A lost peer outcome fences: claims return and the message is
+  # redelivered (at-least-once).
+  defp answered(state, %{kind: :settle} = entry, outcome) do
+    {route, state} = take_route(state, entry)
+
+    case {outcome, route} do
+      {{:known, _}, nil} ->
+        state
+
+      {{:known, :ok}, _route} ->
+        if match?({:ok, _}, entry.data.result),
+          do: schedule(state),
+          else: detach(state, entry.key, "delivery interrupted")
+
+      {{:known, {:error, _}}, _route} ->
+        detach(state, entry.key, "settlement resource limit")
+
+      {_not_executed_or_uncertain, _route} ->
+        fence(state, entry.queue)
+    end
+  end
+
+  # Path 10.
+  defp answered(state, %{kind: :claim} = entry, outcome) do
+    {route, state} = take_route(state, entry)
+    capacity = entry.data.capacity
+
+    case {outcome, route} do
+      {{:known, _}, nil} ->
+        # The route's cleanup disconnect was issued after this claim and
+        # returns anything it claimed.
+        state
+
+      {{:known, {:ok, [{delivery, message, metadata}]}}, route} ->
+        case Forwarding.prepare(message.encoded_content, metadata, capacity.max_message_bytes) do
+          {:ok, bytes} ->
+            state
+            |> put_route(entry.key, %{route | pending_delivery: {delivery.id, bytes}})
+            |> schedule()
+
+          {:error, _} ->
+            unfit(state, entry.key, route, delivery.id)
+        end
+
+      {{:known, {:ok, []}}, _route} ->
+        state |> drain_exhausted(entry.key, capacity) |> elem(0)
+
+      {{:known, {:error, _}}, _route} ->
+        detach(state, entry.key, "queue lease is unavailable")
+
+      {_not_executed_or_uncertain, _route} ->
+        # The claim may have executed; fencing releases it.
+        fence(state, entry.queue)
+    end
+  end
+
+  # Path 11.
+  defp answered(state, %{kind: :unfit} = entry, outcome) do
+    {route, state} = take_route(state, entry)
+
+    cond do
+      outcome in [:not_executed, :uncertain] -> fence(state, entry.queue)
+      route -> detach(state, entry.key, "message cannot fit this link")
+      true -> state
+    end
+  end
+
+  # Paths 7–9.
+  defp answered(state, %{kind: :status} = entry, outcome) do
+    {waiters, status_waiters} = Map.pop(state.status_waiters, entry.queue, MapSet.new())
+    state = %{state | status_waiters: status_waiters}
+
+    case outcome do
+      {:known, status} when is_map(status) ->
+        Enum.reduce(waiters, state, fn key, state ->
+          elem(continue_route(state, key, status), 0)
+        end)
+
+      _ ->
+        fence(state, entry.queue)
+    end
+  end
+
   defp pump(state) do
     {batch, remaining} = Enum.split(state.pump_remaining, state.config.max_pump_actions)
 
@@ -732,39 +862,50 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     end
   end
 
-  defp pump_route(state, key) do
+  defp pump_route(state, key), do: continue_route(state, key, nil)
+
+  # `status` is the queue status this route waited for, or nil inside a wave.
+  defp continue_route(state, key, status) do
     candidate = if closing?(state, elem(key, 0)), do: nil, else: Map.get(state.routes, key)
 
     case candidate do
-      %{phase: :active, busy: nil, role: :receiver, credit: false, receiving: false} = route ->
+      %{
+        phase: :active,
+        busy: nil,
+        queue_ref: nil,
+        role: :receiver,
+        credit: false,
+        receiving: false
+      } =
+          route ->
         maximum = session_maximum(state.config)
 
-        case Queue.status(route.queue) do
+        case status do
+          nil ->
+            need_status(state, key, route.queue)
+
           %{free_messages: messages, free_bytes: bytes} when messages > 0 and bytes >= maximum ->
             {issue(state, key, :demand, {:demand, elem(key, 2), 1, maximum}), true}
 
-          status when is_map(status) ->
-            {state, false}
-
           _ ->
-            {fence(state, route.queue), true}
+            {state, false}
         end
 
-      %{phase: :active, busy: nil, role: :sender} = route ->
+      %{phase: :active, busy: nil, queue_ref: nil, role: :sender} = route ->
         case capacity(state, key) do
           {:ok, %{messages: messages, bytes: bytes} = capacity} when messages > 0 and bytes > 0 ->
-            pump_sender(state, key, route, capacity)
+            pump_sender(state, key, route, capacity, status)
 
           {:ok, %{drain_token: _} = capacity} ->
-            case Queue.status(route.queue) do
+            case status do
+              nil ->
+                need_status(state, key, route.queue)
+
               %{ready: 0} when is_nil(route.pending_delivery) ->
                 drain_exhausted(state, key, capacity)
 
-              status when is_map(status) ->
-                {state, false}
-
               _ ->
-                {fence(state, route.queue), true}
+                {state, false}
             end
 
           {:ok, _} ->
@@ -782,7 +923,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     end
   end
 
-  defp pump_sender(state, key, %{pending_delivery: {delivery, bytes}} = route, capacity) do
+  defp pump_sender(state, key, %{pending_delivery: {delivery, bytes}} = route, capacity, _status) do
     if byte_size(bytes) <= capacity.bytes do
       state = put_route(state, key, %{route | pending_delivery: nil})
       {issue(state, key, {:send, delivery}, {:send, elem(key, 2), bytes, []}), true}
@@ -791,14 +932,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     end
   end
 
-  defp pump_sender(state, key, route, capacity) do
-    case Queue.status(route.queue) do
-      status when is_map(status) -> claim(state, key, route, capacity, status)
-      _ -> {fence(state, route.queue), true}
-    end
-  end
+  defp pump_sender(state, key, route, _capacity, nil), do: need_status(state, key, route.queue)
 
-  defp claim(state, key, route, capacity, status) do
+  defp pump_sender(state, key, route, capacity, status) do
     # Queue data charges include identity/index/mutations. Wire capacity
     # bounds only the outbound view; these are deliberately different units.
     charge_limit =
@@ -807,37 +943,42 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
         status.limits.max_message_bytes + status.limits.max_mutation_bytes
       )
 
-    case Queue.claim(route.queue, route.consumer, route.generation, 1, charge_limit) do
-      {:ok, [{delivery, message, metadata}]} ->
-        case Forwarding.prepare(message.encoded_content, metadata, capacity.max_message_bytes) do
-          {:ok, bytes} ->
-            route = %{route | pending_delivery: {delivery.id, bytes}}
-            state = put_route(state, key, route)
-            pump_sender(state, key, route, capacity)
+    message = {:claim, route.consumer, route.generation, 1, charge_limit}
 
-          {:error, _} ->
-            case Queue.settle(
-                   route.queue,
-                   route.consumer,
-                   route.generation,
-                   delivery.id,
-                   %CoreOutcome.MakeAvailable{}
-                 ) do
-              :ok -> {detach(state, key, "message cannot fit this link"), true}
-              {:error, reason} when reason in @uncertain -> {fence(state, route.queue), true}
-              {:error, _} -> {detach(state, key, "message cannot fit this link"), true}
-            end
+    case queue_request(state, route.queue, :claim, message, key, %{capacity: capacity}) do
+      {:ok, state} -> {state, true}
+      {:error, :full, state} -> {state, false}
+    end
+  end
+
+  # One status request per queue serves every route waiting on it.
+  defp need_status(state, key, queue) do
+    case Map.fetch(state.status_waiters, queue) do
+      {:ok, waiters} ->
+        {%{
+           state
+           | status_waiters: Map.put(state.status_waiters, queue, MapSet.put(waiters, key))
+         }, true}
+
+      :error ->
+        case queue_request(state, queue, :status, :status, nil, %{}) do
+          {:ok, state} ->
+            {%{state | status_waiters: Map.put(state.status_waiters, queue, MapSet.new([key]))},
+             true}
+
+          {:error, :full, state} ->
+            {state, false}
         end
+    end
+  end
 
-      {:ok, []} ->
-        drain_exhausted(state, key, capacity)
+  defp unfit(state, key, route, delivery) do
+    message =
+      {:settle, route.consumer, route.generation, delivery, %CoreOutcome.MakeAvailable{}}
 
-      {:error, reason} when reason in @uncertain ->
-        # The claim may have executed after the timeout; fencing releases it.
-        {fence(state, route.queue), true}
-
-      {:error, _} ->
-        {detach(state, key, "queue lease is unavailable"), true}
+    case queue_request(state, route.queue, :unfit, message, key, %{}) do
+      {:ok, state} -> state
+      {:error, :full, state} -> fence(state, route.queue)
     end
   end
 
@@ -885,6 +1026,91 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
     case Map.get(state.connections, connection) do
       %{handle: handle} -> Connection.command(handle, reference, command)
       nil -> {:error, :closed}
+    end
+  end
+
+  # Issues one asynchronous request. A route-scoped request (`key` not nil)
+  # occupies that route (`queue_ref`) until its reply, deadline or fence.
+  defp queue_request(state, queue, kind, message, key, data) do
+    if QueueRequests.full?(state.requests) do
+      {:error, :full, %{state | deferred: true}}
+    else
+      route = if key, do: Map.get(state.routes, key)
+      {request, token} = Queue.send_request(queue, Map.fetch!(state.exchanges, queue), message)
+
+      fields = %{
+        token: token,
+        kind: kind,
+        key: key,
+        route_token: route && route.token,
+        data: data
+      }
+
+      {:ok, entry, requests} =
+        QueueRequests.add(state.requests, queue, fields, now() + @request_deadline)
+
+      reqids = :gen_server.reqids_add(request, {queue, entry.id}, state.reqids)
+      state = %{state | requests: requests, reqids: reqids}
+      state = if route, do: put_route(state, key, %{route | queue_ref: entry.id}), else: state
+      {:ok, arm_requests(state, queue)}
+    end
+  end
+
+  defp queue_response(state, queue, id, response) do
+    case QueueRequests.resolve(state.requests, queue, id) do
+      {:pending, entry, requests} ->
+        state = arm_requests(%{state | requests: requests}, queue)
+        outcome = Queue.response(Map.fetch!(state.exchanges, queue), entry.token, response)
+        state |> answered(entry, outcome) |> resume_deferred()
+
+      {:waiting, entry, requests} ->
+        # Already classified at its deadline or fence; free its exchange slot.
+        :ets.delete(Map.fetch!(state.exchanges, queue), entry.token)
+        resume_deferred(%{state | requests: requests})
+
+      {:unknown, _requests} ->
+        state
+    end
+  end
+
+  defp resume_deferred(%{deferred: true} = state) do
+    if QueueRequests.full?(state.requests), do: state, else: schedule(%{state | deferred: false})
+  end
+
+  defp resume_deferred(state), do: state
+
+  # One timer per queue, for its head deadline only.
+  defp arm_requests(state, queue) do
+    deadline = QueueRequests.next_deadline(state.requests, queue)
+
+    case Map.get(state.request_timers, queue) do
+      {_token, _timer, ^deadline} ->
+        state
+
+      current ->
+        if current, do: Process.cancel_timer(elem(current, 1))
+        timers = Map.delete(state.request_timers, queue)
+
+        if deadline do
+          token = make_ref()
+          timer = Process.send_after(self(), {:queue_deadline, queue, token}, deadline, abs: true)
+          %{state | request_timers: Map.put(timers, queue, {token, timer, deadline})}
+        else
+          %{state | request_timers: timers}
+        end
+    end
+  end
+
+  # The route that issued `entry`, with its request slot cleared, or nil when
+  # that route was removed or replaced meanwhile.
+  defp take_route(state, entry) do
+    case Map.get(state.routes, entry.key) do
+      %{token: token, queue_ref: id} = route when token == entry.route_token and id == entry.id ->
+        route = %{route | queue_ref: nil}
+        {route, put_route(state, entry.key, route)}
+
+      _ ->
+        {nil, state}
     end
   end
 
@@ -988,10 +1214,11 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
   end
 
   # Fencing isolates one queue whose state may have diverged from this
-  # coordinator (an unanswered or failed lease command). Killing its lease
-  # anchor makes Queue return every claim held by this coordinator there when
-  # it next runs; only that queue's attached Links are detached. Messages stay
-  # in the queue process, so no memory-profile message is discarded.
+  # coordinator. Killing its lease anchor makes Queue return every claim held
+  # by this coordinator there when it next runs; only that queue's Links are
+  # detached. Messages stay in the queue process. Pending requests to it are
+  # taken back (never executed) or covered by the killed anchor; abandoned
+  # enqueues are answered before any Detach below.
   defp fence(state, queue) do
     case Map.pop(state.anchors, queue) do
       {nil, _} ->
@@ -999,18 +1226,39 @@ defmodule GravitonMQ.Runtime.AMQP10.Broker do
 
       {anchor, anchors} ->
         Process.exit(anchor, :kill)
-        state = %{state | anchors: anchors}
+
+        state = %{
+          state
+          | anchors: anchors,
+            queue_fences: state.queue_fences + 1,
+            status_waiters: Map.delete(state.status_waiters, queue)
+        }
+
+        {abandoned, requests} = QueueRequests.abandon_all(state.requests, queue)
+        state = arm_requests(%{state | requests: requests}, queue)
+        table = Map.fetch!(state.exchanges, queue)
+
+        state =
+          Enum.reduce(abandoned, state, fn entry, state ->
+            abandoned(state, entry, Queue.classify(table, entry.token))
+          end)
 
         state =
           state.routes
           |> Enum.filter(fn {_, route} ->
             route.queue == queue and route.phase != :authorizing
           end)
-          |> Enum.reduce(state, fn {key, _}, state -> detach(state, key, unavailable()) end)
+          |> Enum.reduce(state, fn
+            {key, %{phase: :registering}}, state -> reject(state, key, unavailable())
+            {key, _route}, state -> detach(state, key, unavailable())
+          end)
 
         state |> start_probe(queue, @probe_delay) |> schedule()
     end
   end
+
+  # Lease requests need nothing here: the killed anchor releases them.
+  defp abandoned(state, _entry, _outcome), do: state
 
   defp start_probe(state, queue, delay \\ 0) do
     Process.send_after(self(), {:probe_queue, queue}, delay)

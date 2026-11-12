@@ -6,10 +6,10 @@ defmodule GravitonMQ.AMQP10.AvailabilityTest do
   alias GravitonMQ.AMQP10Client, as: Client
   alias GravitonMQ.Runtime.AMQP10.{Broker, Queue}
 
-  # An unanswered Queue call waits for its 5 s GenServer timeout.
+  # A pending queue request is classified at its 5 s deadline.
   @moduletag timeout: 30_000
 
-  test "an unanswered queue fences only its own Links and keeps the Broker running" do
+  test "a suspended queue delays only its own Links and is fenced at the request deadline" do
     broker = broker!()
     supervisor = amqp_supervisor(broker)
     manager = child(supervisor, Broker)
@@ -29,37 +29,45 @@ defmodule GravitonMQ.AMQP10.AvailabilityTest do
     publisher = attach!(bystander, "other-publisher", :sender, "other")
     reader = attach!(bystander, "other-consumer", :receiver, "other")
     connection_count = DynamicSupervisor.count_children(connections).active
-
     :sys.suspend(orders)
 
     try do
-      # Settlement makes the Broker call the suspended queue and time out.
+      deadline = System.monotonic_time(:millisecond) + 5_000
+      # The Manager sends the settle to the suspended queue; it is never taken.
       assert {:ok, _} =
                operation(Client.settle(consumer, unsettled, %Outcome.Accepted{}), consumer)
 
-      assert_receive {:graviton_mq, ^consumer, {:session, 0, {:detached, ^link, error}}}, 8_000
-      assert {:peer_detach, %{condition: %Value{value: "amqp:internal-error"}}} = error
+      within!(500, fn ->
+        assert {:ok, %Outcome.Accepted{}} =
+                 operation(
+                   Client.send_message(bystander, 0, publisher, message("unaffected")),
+                   bystander
+                 )
+      end)
 
-      # Another queue, another Connection and the coordinator are unaffected.
-      assert Process.alive?(manager)
+      within!(500, fn -> attach!(bystander, "other-late", :receiver, "other") end)
+
+      within!(500, fn ->
+        assert {:ok, 1} =
+                 operation(Client.request(bystander, 0, reader, 1, 1_048_576), bystander)
+
+        assert_receive {:graviton_mq, ^bystander, {:delivery, reference, 0, ^reader, _, _}}, 500
+
+        assert {:ok, _} =
+                 operation(Client.settle(bystander, reference, %Outcome.Accepted{}), bystander)
+      end)
+
+      assert System.monotonic_time(:millisecond) < deadline,
+             "bystander work must complete before the 5 s request deadline"
+
+      assert child(supervisor, Broker) == manager
+      refute_received {:graviton_mq, ^consumer, {:session, 0, {:detached, ^link, _}}}
+
+      # The settle was not executed: the queue is fenced at its deadline.
+      assert_receive {:graviton_mq, ^consumer, {:session, 0, {:detached, ^link, error}}}, 7_000
+      assert {:peer_detach, %{condition: %Value{value: "amqp:internal-error"}}} = error
       assert child(supervisor, Broker) == manager
       assert DynamicSupervisor.count_children(connections).active == connection_count
-
-      assert {:ok, %Outcome.Accepted{}} =
-               operation(
-                 Client.send_message(bystander, 0, publisher, message("unaffected")),
-                 bystander
-               )
-
-      assert {:ok, 1} = operation(Client.request(bystander, 0, reader, 1, 1_048_576), bystander)
-
-      assert_receive {:graviton_mq, ^bystander, {:delivery, reference, 0, ^reader, _, _}},
-                     2_000
-
-      assert {:ok, _} =
-               operation(Client.settle(bystander, reference, %Outcome.Accepted{}), bystander)
-
-      eventually!(fn -> Queue.status(other).messages == 0 end)
 
       # A new Link on the fenced queue is refused explicitly, not hung.
       assert {:error, _} =
@@ -73,14 +81,12 @@ defmodule GravitonMQ.AMQP10.AvailabilityTest do
 
     # The fenced lease is released by the queue: no claimed message is lost.
     eventually!(fn -> match?(%{ready: 2, inflight: 0, consumers: 0}, Queue.status(orders)) end)
+    eventually!(fn -> Queue.status(other).messages == 0 end)
 
     # The probe restores the queue and new Links work again.
     eventually!(
       fn ->
-        match?(
-          {:ok, %{queues: %{"orders" => %{ready: 2}}}},
-          GravitonMQ.amqp10_status(broker)
-        )
+        match?({:ok, %{queues: %{"orders" => %{ready: 2}}}}, GravitonMQ.amqp10_status(broker))
       end,
       5_000
     )
@@ -194,6 +200,14 @@ defmodule GravitonMQ.AMQP10.AvailabilityTest do
     {_, pid, _, _} = List.keyfind(Supervisor.which_children(supervisor), identity, 0)
     assert is_pid(pid)
     pid
+  end
+
+  defp within!(milliseconds, callback) do
+    started = System.monotonic_time(:millisecond)
+    result = callback.()
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed < milliseconds, "took #{elapsed} ms, limit #{milliseconds} ms"
+    result
   end
 
   defp eventually!(predicate, timeout \\ 2_000),
