@@ -4229,3 +4229,69 @@ file. Every #168 marker is in `tls_options.ex` and its tests.
   `tls_listener` id/port and `port(broker, id)`. MQTT already has
   `monitor!/1`, `closed/2`, `refused!/1`, `subscribe!/1`, `in_tls_send/1`;
   T6 can reuse the strengthened blocked predicate.
+
+### Tasks 11–12 (2026-11-12)
+
+- **Task 11.** `18f59ff` test(runtime): shared-file check of
+  `connection_input_test.exs` clean. Per the amendment T6 is a normal test:
+  no `:requires_http_fetch_169` tag, and **neither `test_helper.exs` is
+  touched** (Step 1 dropped). Red evidence, both produced with throwaway
+  changes that were reverted: MQTT with `active_chunk_size: 16_384` removed
+  from HellHandoff → 1 failure (`:ssl.recv` `{:error, :closed}` mid-UNSUBACKs,
+  `:parser_limit`); AMQP without the option on the hand-made socket → 1
+  failure (the pipelined Open is never processed: input-limit close). Green:
+  MQTT 9 tests, AMQP input 6 tests, 0 failures (three runs each). Deviations:
+  - **Chunk sizes are not traceable.** Both Connections set
+    `Process.flag(:sensitive, true)`; `:erlang.trace(connection, true,
+    [:receive, ...])` returns 1 and `trace_info` shows `[:receive]`, yet no
+    trace message arrives. The amendment's "no delivered chunk exceeds
+    16 KiB" is therefore observed through the Connection's own bound: MQTT
+    T6 uses `max_packet_size: 128` (plan: 4_096), so any delivery above
+    16_512 bytes closes with `:parser_limit`. The exact 16_384 bound stays
+    proven by HellHandoff's "every active-once delivery is bounded to
+    16 KiB" case. Side finding (not fixed, out of scope): `idle_messages/2`
+    in `connection_input_test.exs` traces the same sensitive Connection, so
+    its `== []` assertions are vacuous.
+  - **AMQP T6 is Connection-level (D8),** so the test applies the runtime's
+    option itself: `SSL.setopts(socket, active_chunk_size: 16_384)` on the
+    `TLS.server_pair!` socket. The 15 s wait needs `@tag timeout: 30_000`
+    (the module default is 10 s).
+  - **The AMQP oversize-frame assertion was wrong.** An oversize declaration
+    makes the endpoint send `Close{error}` and wait in `:closing` (default
+    close timeout). It emits no `{:disconnected, _}` within 2 s: the endpoint
+    stayed `:closing` 500 ms later, consistent with the existing
+    `connection_test.exs` case. T6 now reads the broker's `%Close{error: %{}}`
+    from the peer (`read_tls_pdu/1`).
+  - MQTT UNSUBACKs are also asserted to carry `reason_codes: [0x11]`.
+  - The blocked-Writer predicate was not needed: the peer reads concurrently
+    and no deferred close was observed.
+  - Regressions: runtime `hell_handoff` + `amqp10/{connection_input,
+    connection,writer}` + `test/mqtt` 109 tests, 0 failures; umbrella
+    `mqtt_tls` + `amqp10_tls` 14 tests, 0 failures (three runs).
+- **Task 12.** `363d0dd` test(runtime): T7/T8 as planned (passed first run).
+  The T9 changes follow the amendment, because #168 is fixed:
+  - The in-memory-key **refusal assertions are replaced.** Each broker runs
+    two TLS listeners, `:tls` (encrypted `keyfile` + `password`) and `:key`
+    (`certfile` + `key: {:PrivateKeyInfo, der}`). Through each listener the
+    test makes a round trip. Neither the password nor the key DER appears in:
+    our Listener status, the MQTT/AMQP Connection status, the HellHandoff
+    handler status (`Hell.connection_pids/1`, precedent in
+    `amqp10_boundaries_test.exs`), Hell's listener state and status, or
+    Hell's server state and children. Neither appears in the captured logs
+    of killing both listeners, nor in any `[:hell, :listener, :start|:stop]`
+    metadata (MQTT; at least 4 starts plus one stop).
+  - `leaks?/2` also matches the inspected 24-byte prefix, which catches
+    truncated binaries in logs. An in-test assertion checks that it detects
+    an unredacted key. A throwaway control confirmed that Hell's
+    `ServerConfig` inspection shows `password: :redacted` and
+    `key: :redacted`.
+  - The AMQP `password: 4_242` refusal is kept.
+  - Restored helpers: MQTT `CaptureLog`, `Listener`, `tcp_connected/2`,
+    `listener!/2`, `find_listener/2`, `free_port/0`, `tls_listener/4`;
+    `Disconnect` and `Unsuback` were restored in Task 11. AMQP `CaptureLog`,
+    `Listener`, `listener!/2`, `find_listener/2`, `monitor!/1`,
+    `free_port/0`, `tls_listener/4`, `port/2`.
+  - Green: `mqtt_tls` + `amqp10_tls` 20 tests, 0 failures (three runs).
+    Umbrella `mqtt_connection` + `amqp10_sasl` + `amqp10_runtime` +
+    `mqtt_privacy` 45 tests, 0 failures. No compile warnings.
+    `DurableQueueTest` was not run in these sets.
