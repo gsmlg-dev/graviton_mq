@@ -13,13 +13,13 @@ defmodule GravitonMQ.Runtime.MQTT do
 
   def status(instance) do
     with {:ok, mqtt} <- mqtt(instance),
-         {:ok, broker} <- child(mqtt, Broker) do
+         {:ok, broker} <- child(mqtt, Broker),
+         {:ok, listeners} <- listeners(mqtt) do
       try do
         status = GenServer.call(broker, :status)
 
         listeners =
-          Supervisor.which_children(mqtt)
-          |> Enum.flat_map(fn
+          Enum.flat_map(listeners, fn
             {{Listener, _}, listener, _, _} when is_pid(listener) -> [Listener.info(listener)]
             _ -> []
           end)
@@ -47,11 +47,25 @@ defmodule GravitonMQ.Runtime.MQTT do
          do: {:ok, mqtt}
   end
 
+  # No `:listeners` child means none are configured.
+  defp listeners(mqtt) do
+    try do
+      case List.keyfind(Supervisor.which_children(mqtt), :listeners, 0) do
+        nil -> {:ok, []}
+        {:listeners, pid, _, _} when is_pid(pid) -> {:ok, Supervisor.which_children(pid)}
+        _restarting -> {:error, :not_running}
+      end
+    catch
+      :exit, _reason -> {:error, :not_running}
+    end
+  end
+
   defp child(supervisor, id) do
     try do
       case List.keyfind(Supervisor.which_children(supervisor), id, 0) do
         {^id, pid, _, _} when is_pid(pid) -> {:ok, pid}
-        _ -> {:error, :mqtt_not_enabled}
+        nil -> {:error, :mqtt_not_enabled}
+        _restarting -> {:error, :not_running}
       end
     catch
       :exit, _reason -> {:error, :not_running}

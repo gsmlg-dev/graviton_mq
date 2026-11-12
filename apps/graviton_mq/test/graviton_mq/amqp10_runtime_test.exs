@@ -6,7 +6,7 @@ defmodule GravitonMQ.AMQP10.RuntimeTest do
   alias GravitonMQ.AMQP10.Codec.Message, as: MessageCodec
   alias GravitonMQ.AMQP10.Codec.Value, as: ValueCodec
   alias GravitonMQ.AMQP10Client, as: Client
-  alias GravitonMQ.Runtime.AMQP10.{Broker, Queue}
+  alias GravitonMQ.Runtime.AMQP10.{Broker, Listener, Queue}
 
   @moduletag timeout: 10_000
 
@@ -361,6 +361,151 @@ defmodule GravitonMQ.AMQP10.RuntimeTest do
     assert queue_status(broker).messages == 1
   end
 
+  test "a listener failure closes its connections and restarts with the owner and queues retained" do
+    broker = broker!()
+    sender = client!(broker)
+    link = attach!(sender, "sender", :sender)
+
+    assert {:ok, %Outcome.Accepted{}} =
+             operation(Client.send_message(sender, 0, link, message("retained")), sender)
+
+    supervisor = amqp_supervisor(broker)
+    owner = child(supervisor, Broker)
+    queue = child(supervisor, {Queue, "orders"})
+
+    [{_, connection, _, _}] =
+      supervisor |> child(:connections) |> DynamicSupervisor.which_children()
+
+    connection_monitor = Process.monitor(connection)
+    listener = listener(supervisor, 0)
+    listener_monitor = Process.monitor(listener)
+
+    capture_log(fn ->
+      Process.exit(listener, :kill)
+      assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+      # Hell closes the sockets of the listener's handlers (accepted 2026-11-12).
+      assert_receive {:DOWN, ^connection_monitor, :process, ^connection, _reason}, 1_000
+
+      eventually!(fn ->
+        replacement = find_listener(supervisor, 0)
+        is_pid(replacement) and replacement != listener
+      end)
+
+      eventually!(fn ->
+        match?({:ok, %{connections: 0}}, GravitonMQ.amqp10_status(broker))
+      end)
+    end)
+
+    assert child(supervisor, Broker) == owner
+    assert child(supervisor, {Queue, "orders"}) == queue
+    assert queue_status(broker).messages == 1
+
+    replacement = client!(broker)
+    attach!(replacement, "receiver", :receiver)
+    assert {:ok, %{connections: 1}} = GravitonMQ.amqp10_status(broker)
+  end
+
+  test "a listener on a fixed port rebinds the same port after repeated kills" do
+    port = free_port()
+    broker = broker!(listeners: [[id: :tcp, transport: :tcp, ip: {127, 0, 0, 1}, port: port]])
+    assert {:ok, %{listeners: [%{port: ^port}]}} = GravitonMQ.amqp10_status(broker)
+    supervisor = amqp_supervisor(broker)
+    owner = child(supervisor, Broker)
+
+    capture_log(fn ->
+      # Three restarts is the most the listener supervisor's default
+      # intensity (3 in 5 s) absorbs.
+      for _round <- 1..3 do
+        listener = listener(supervisor, :tcp)
+        listener_monitor = Process.monitor(listener)
+        Process.exit(listener, :kill)
+        assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+
+        eventually!(fn ->
+          replacement = find_listener(supervisor, :tcp)
+          is_pid(replacement) and replacement != listener
+        end)
+
+        assert {:ok, %{listeners: [%{port: ^port}]}} = GravitonMQ.amqp10_status(broker)
+        assert child(supervisor, Broker) == owner
+        client = client_on!(port)
+        attach!(client, "sender", :sender)
+      end
+    end)
+  end
+
+  test "a listener failure leaves its sibling listener and that listener's connections alone" do
+    broker =
+      broker!(
+        listeners: [
+          [id: :a, transport: :tcp, ip: {127, 0, 0, 1}, port: 0],
+          [id: :b, transport: :tcp, ip: {127, 0, 0, 1}, port: 0]
+        ]
+      )
+
+    assert {:ok, %{listeners: listeners}} = GravitonMQ.amqp10_status(broker)
+    assert [:a, :b] = listeners |> Enum.map(& &1.id) |> Enum.sort()
+    %{port: b_port} = Enum.find(listeners, &(&1.id == :b))
+    client = client_on!(b_port)
+    supervisor = amqp_supervisor(broker)
+    a = listener(supervisor, :a)
+    b = listener(supervisor, :b)
+    a_monitor = Process.monitor(a)
+
+    capture_log(fn ->
+      Process.exit(a, :kill)
+      assert_receive {:DOWN, ^a_monitor, :process, ^a, :killed}, 1_000
+
+      eventually!(fn ->
+        replacement = find_listener(supervisor, :a)
+        is_pid(replacement) and replacement != a
+      end)
+    end)
+
+    assert listener(supervisor, :b) == b
+    link = attach!(client, "sender", :sender)
+
+    assert {:ok, %Outcome.Accepted{}} =
+             operation(Client.send_message(client, 0, link, message("sibling")), client)
+
+    assert {:ok, %{connections: 1, listeners: listeners}} = GravitonMQ.amqp10_status(broker)
+    assert [:a, :b] = listeners |> Enum.map(& &1.id) |> Enum.sort()
+  end
+
+  test "a listener restarted while its owner fails does not stall the AMQP supervisor" do
+    broker = broker!()
+    supervisor = amqp_supervisor(broker)
+    owner = child(supervisor, Broker)
+    listener = listener(supervisor, 0)
+    started = System.monotonic_time(:millisecond)
+
+    capture_log(fn ->
+      Process.exit(listener, :kill)
+      Process.exit(owner, :kill)
+
+      until!(
+        fn ->
+          replacement = find_child(supervisor, Broker)
+
+          is_pid(replacement) and replacement != owner and
+            match?({:ok, %{listeners: [_]}}, GravitonMQ.amqp10_status(broker))
+        end,
+        started + 3_000
+      )
+
+      client = client!(broker)
+      attach!(client, "sender", :sender)
+    end)
+
+    assert System.monotonic_time(:millisecond) - started < 3_000
+  end
+
+  test "an AMQP instance without listeners starts no listener supervisor and reports none" do
+    broker = broker!(listeners: [])
+    assert find_child(amqp_supervisor(broker), :listeners) == nil
+    assert {:ok, %{listeners: []}} = GravitonMQ.amqp10_status(broker)
+  end
+
   test "Manager debug status excludes a forwarded message and captured authorization data" do
     secret = "private-amqp-#{System.unique_integer([:positive])}"
     authorize = fn _, _, _ -> if byte_size(secret) > 0, do: :allow, else: :deny end
@@ -397,7 +542,10 @@ defmodule GravitonMQ.AMQP10.RuntimeTest do
 
   defp client!(broker) do
     assert {:ok, %{listeners: [%{port: port}]}} = GravitonMQ.amqp10_status(broker)
+    client_on!(port)
+  end
 
+  defp client_on!(port) do
     client =
       start_supervised!(
         {Client,
@@ -475,6 +623,26 @@ defmodule GravitonMQ.AMQP10.RuntimeTest do
     {_, pid, _, _} = List.keyfind(Supervisor.which_children(supervisor), identity, 0)
     assert is_pid(pid)
     pid
+  end
+
+  defp listener(supervisor, id) do
+    pid = find_listener(supervisor, id)
+    assert is_pid(pid)
+    pid
+  end
+
+  defp find_listener(supervisor, id) do
+    case find_child(supervisor, :listeners) do
+      nil -> nil
+      listeners -> find_child(listeners, {Listener, id})
+    end
+  end
+
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 
   defp find_child(supervisor, identity) do

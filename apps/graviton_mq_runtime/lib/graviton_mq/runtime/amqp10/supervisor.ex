@@ -3,6 +3,7 @@ defmodule GravitonMQ.Runtime.AMQP10.Supervisor do
   use Supervisor
 
   alias GravitonMQ.Runtime.AMQP10.{Broker, Listener, Queue, Store}
+  alias GravitonMQ.Runtime.ListenerSupervisor
 
   def start_link(configuration), do: Supervisor.start_link(__MODULE__, configuration)
 
@@ -21,6 +22,14 @@ defmodule GravitonMQ.Runtime.AMQP10.Supervisor do
 
     storage = if config.persistence, do: [{Store, config.persistence}], else: []
 
+    # Listeners share one one-for-one fault domain, started only when any are
+    # configured, so a failing listener does not restart its siblings; they
+    # still wire through this supervisor.
+    listeners =
+      Enum.map(config.listeners, fn listener ->
+        Supervisor.child_spec({Listener, {config, listener, parent}}, id: {Listener, listener.id})
+      end)
+
     children =
       storage ++
         queues ++
@@ -34,11 +43,9 @@ defmodule GravitonMQ.Runtime.AMQP10.Supervisor do
             id: :connections
           )
         ] ++
-        Enum.map(config.listeners, fn listener ->
-          Supervisor.child_spec({Listener, {config, listener, parent}},
-            id: {Listener, listener.id}
-          )
-        end)
+        if listeners == [],
+          do: [],
+          else: [Supervisor.child_spec({ListenerSupervisor, listeners}, id: :listeners)]
 
     # A queue failure closes later running owners before replacement admission.
     # Broker restart preserves surviving queues, whose owner monitors release leases.

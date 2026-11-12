@@ -138,32 +138,205 @@ defmodule GravitonMQ.MQTTBroker.ConnectionTest do
     end)
   end
 
-  test "listener failure preserves the owner, retained state and existing connection" do
+  test "listener failure closes its connections and restarts on a new port with the owner and retained state" do
     instance = broker()
     %{owner: owner, port: port} = status(instance)
-    socket = connected(port, "listener-survivor")
+    socket = connected(port, "listener-casualty")
     publish_retained(instance, owner)
     mqtt = mqtt_supervisor(instance)
-    listener = child(mqtt, {Listener, :tcp})
+    connections = child(mqtt, :connections)
+    [{_id, reader, _type, _modules}] = DynamicSupervisor.which_children(connections)
+    reader_monitor = Process.monitor(reader)
+    listener = listener(mqtt, :tcp)
     listener_monitor = Process.monitor(listener)
 
     capture_log(fn ->
       Process.exit(listener, :kill)
       assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+      # Hell closes the sockets of the listener's handlers (accepted 2026-11-12).
+      assert_receive {:DOWN, ^reader_monitor, :process, ^reader, _reason}, 1_000
+      assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
 
       assert eventually(fn ->
-               replacement = find_child(mqtt, {Listener, :tcp})
+               replacement = find_listener(mqtt, :tcp)
                is_pid(replacement) and replacement != listener
              end)
 
-      assert %{owner: ^owner, connections: 1, sessions: 1, retained: 1, port: new_port} =
-               status(instance)
+      assert eventually(fn ->
+               match?(
+                 %{owner: ^owner, connections: 0, sessions: 0, retained: 1},
+                 status(instance)
+               )
+             end)
 
-      assert_ping(socket)
+      %{port: new_port} = status(instance)
       replacement_socket = connected(new_port, "new-listener")
       assert_ping(replacement_socket)
-      assert %{owner: ^owner, connections: 2, sessions: 2, retained: 1} = status(instance)
+      assert %{owner: ^owner, connections: 1, sessions: 1, retained: 1} = status(instance)
     end)
+  end
+
+  test "a listener failure leaves its sibling listener and that listener's sessions alone" do
+    instance =
+      broker(
+        listeners: [
+          [id: :a, transport: :tcp, ip: {127, 0, 0, 1}, port: 0],
+          [id: :b, transport: :tcp, ip: {127, 0, 0, 1}, port: 0]
+        ]
+      )
+
+    assert {:ok, %{owner: owner, listeners: listeners}} = GravitonMQ.status(instance)
+    %{port: b_port} = Enum.find(listeners, &(&1.id == :b))
+    socket = connected(b_port, "sibling-survivor")
+    mqtt = mqtt_supervisor(instance)
+    a = listener(mqtt, :a)
+    b = listener(mqtt, :b)
+    a_monitor = Process.monitor(a)
+
+    capture_log(fn ->
+      Process.exit(a, :kill)
+      assert_receive {:DOWN, ^a_monitor, :process, ^a, :killed}, 1_000
+
+      assert eventually(fn ->
+               replacement = find_listener(mqtt, :a)
+               is_pid(replacement) and replacement != a
+             end)
+
+      assert listener(mqtt, :b) == b
+      assert_ping(socket)
+
+      assert {:ok, %{owner: ^owner, connections: 1, sessions: 1, listeners: listeners}} =
+               GravitonMQ.status(instance)
+
+      assert [:a, :b] = listeners |> Enum.map(& &1.id) |> Enum.sort()
+    end)
+  end
+
+  test "a listener restarted while its owner fails does not stall the MQTT supervisor" do
+    instance = broker()
+    %{owner: owner} = status(instance)
+    mqtt = mqtt_supervisor(instance)
+    listener = listener(mqtt, :tcp)
+    started = System.monotonic_time(:millisecond)
+
+    capture_log(fn ->
+      Process.exit(listener, :kill)
+      Process.exit(owner, :kill)
+
+      assert eventually(
+               fn ->
+                 match?(
+                   {:ok, %{owner: new_owner}} when new_owner != owner,
+                   GravitonMQ.status(instance)
+                 )
+               end,
+               System.monotonic_time(:millisecond) + 3_000
+             )
+
+      replacement_socket = connected(status(instance).port, "after-owner-and-listener")
+      assert_ping(replacement_socket)
+    end)
+
+    assert System.monotonic_time(:millisecond) - started < 3_000
+  end
+
+  test "an MQTT instance without listeners starts no listener supervisor and reports none" do
+    instance = broker(listeners: [])
+    mqtt = mqtt_supervisor(instance)
+
+    assert find_child(mqtt, :listeners) == nil
+    assert {:ok, %{listeners: []}} = GravitonMQ.status(instance)
+  end
+
+  test "a listener on a fixed port rebinds the same port after repeated kills" do
+    port = free_port()
+    instance = broker(listeners: [[id: :tcp, transport: :tcp, ip: {127, 0, 0, 1}, port: port]])
+    %{owner: owner, port: ^port} = status(instance)
+    mqtt = mqtt_supervisor(instance)
+
+    capture_log(fn ->
+      # Three restarts is the most the listener supervisor's default
+      # intensity (3 in 5 s) absorbs; a fourth kill within 5 s escalates to
+      # a restart of all listeners by the MQTT supervisor.
+      for round <- 1..3 do
+        listener = listener(mqtt, :tcp)
+        listener_monitor = Process.monitor(listener)
+        Process.exit(listener, :kill)
+        assert_receive {:DOWN, ^listener_monitor, :process, ^listener, :killed}, 1_000
+
+        assert eventually(fn ->
+                 replacement = find_listener(mqtt, :tcp)
+                 is_pid(replacement) and replacement != listener
+               end)
+
+        assert %{owner: ^owner, port: ^port} = status(instance)
+        socket = connected(port, "fixed-port-#{round}")
+        assert_ping(socket)
+      end
+    end)
+  end
+
+  test "a CONNECT accepted while a sibling listener retries its bind is served" do
+    first_port = free_port()
+
+    assert {:ok, holder} =
+             :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
+    {:ok, second_port} = :inet.port(holder)
+    test = self()
+
+    # Connects to the first listener while the second still cannot bind,
+    # then frees the second port after 300 ms.
+    spawn_link(fn ->
+      socket = connect_when_listening(first_port, 1_000)
+      :ok = :gen_tcp.send(socket, connect_packet("startup-window"))
+      :ok = :gen_tcp.controlling_process(socket, test)
+      send(test, {:connected, socket})
+      Process.sleep(300)
+      :ok = :gen_tcp.close(holder)
+      send(test, :released)
+    end)
+
+    capture_log(fn ->
+      broker(
+        listeners: [
+          [id: :first, transport: :tcp, ip: {127, 0, 0, 1}, port: first_port],
+          [id: :second, transport: :tcp, ip: {127, 0, 0, 1}, port: second_port]
+        ]
+      )
+    end)
+
+    assert_receive {:connected, socket}, 1_000
+    assert_receive :released, 1_000
+    assert %Connack{reason_code: 0} = receive_packet(socket)
+    assert_ping(socket)
+  end
+
+  test "a genuine bind conflict fails broker start after the bounded rebind budget" do
+    assert {:ok, holder} =
+             :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
+    {:ok, port} = :inet.port(holder)
+    on_exit(fn -> :gen_tcp.close(holder) end)
+    started = System.monotonic_time(:millisecond)
+
+    capture_log(fn ->
+      assert {:error, _reason} =
+               start_supervised(
+                 {GravitonMQ,
+                  name: nil,
+                  runtime_supervisor_name: nil,
+                  mqtt: [
+                    auth: :anonymous,
+                    host_principal: :test_host,
+                    listeners: [[id: :tcp, transport: :tcp, ip: {127, 0, 0, 1}, port: port]]
+                  ]}
+               )
+    end)
+
+    # Bounded by the 1_000 ms rebind budget plus the existing MQTT tree
+    # teardown after a failed child start (about 5 s, also seen for TLS).
+    assert System.monotonic_time(:millisecond) - started < 8_000
   end
 
   defp broker(options \\ []) do
@@ -184,6 +357,24 @@ defmodule GravitonMQ.MQTTBroker.ConnectionTest do
          )},
       id: make_ref()
     )
+  end
+
+  defp connect_when_listening(port, budget) do
+    case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 100) do
+      {:ok, socket} ->
+        socket
+
+      {:error, _reason} when budget > 0 ->
+        Process.sleep(5)
+        connect_when_listening(port, budget - 5)
+    end
+  end
+
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 
   defp status(instance) do
@@ -254,6 +445,19 @@ defmodule GravitonMQ.MQTTBroker.ConnectionTest do
     pid = find_child(supervisor, id)
     assert is_pid(pid)
     pid
+  end
+
+  defp listener(mqtt, id) do
+    pid = find_listener(mqtt, id)
+    assert is_pid(pid)
+    pid
+  end
+
+  defp find_listener(mqtt, id) do
+    case find_child(mqtt, :listeners) do
+      nil -> nil
+      listeners -> find_child(listeners, {Listener, id})
+    end
   end
 
   defp find_child(supervisor, id) do

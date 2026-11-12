@@ -2,6 +2,7 @@ defmodule GravitonMQ.Runtime.MQTT.Supervisor do
   @moduledoc false
   use Supervisor
 
+  alias GravitonMQ.Runtime.ListenerSupervisor
   alias GravitonMQ.Runtime.MQTT.{Broker, Listener}
 
   def start_link(configuration), do: Supervisor.start_link(__MODULE__, configuration)
@@ -13,6 +14,14 @@ defmodule GravitonMQ.Runtime.MQTT.Supervisor do
   def init(configuration) do
     config = configuration.()
     parent = self()
+
+    # Listeners share one one-for-one fault domain, started only when any are
+    # configured, so a failing listener does not restart its siblings; they
+    # still wire through this supervisor.
+    listeners =
+      Enum.map(config.listeners, fn listener ->
+        Supervisor.child_spec({Listener, {config, listener, parent}}, id: {Listener, listener.id})
+      end)
 
     children =
       [
@@ -32,11 +41,9 @@ defmodule GravitonMQ.Runtime.MQTT.Supervisor do
           id: :connections
         )
       ] ++
-        Enum.map(config.listeners, fn listener ->
-          Supervisor.child_spec({Listener, {config, listener, parent}},
-            id: {Listener, listener.id}
-          )
-        end)
+        if listeners == [],
+          do: [],
+          else: [Supervisor.child_spec({ListenerSupervisor, listeners}, id: :listeners)]
 
     Supervisor.init(children, strategy: :rest_for_one)
   end

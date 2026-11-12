@@ -5,7 +5,7 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
   alias GravitonMQ.AMQP10.{Outcome, Value}
   alias GravitonMQ.AMQP10.Codec.Message, as: MessageCodec
   alias GravitonMQ.AMQP10Client, as: Client
-  alias GravitonMQ.Runtime.AMQP10.{Broker, Queue}
+  alias GravitonMQ.Runtime.AMQP10.{Broker, Listener, Queue}
 
   @moduletag timeout: 15_000
 
@@ -67,7 +67,13 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
     assert_receive {:graviton_mq, ^receiver, {:delivery, _, 0, ^receive_link, ^raw, _}}, 1_000
     assert %{inflight: 1, consumers: 1} = Queue.status(queue)
     monitor = Process.monitor(manager)
+    # Since S1a the transport owner is the Connection plus its Hell handler:
+    # a stopping listener releases each handler's Connection with a system
+    # message that a suspended Connection still serves, so the handlers are
+    # suspended too.
+    handlers = handlers(instance)
     :ok = :sys.suspend(connection)
+    Enum.each(handlers, &(:ok = :sys.suspend(&1)))
 
     try do
       capture_log(fn ->
@@ -83,7 +89,7 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
                "queue responsibility must not wait for transport-owner shutdown"
       end)
     after
-      resume(connection)
+      Enum.each([connection | handlers], &resume/1)
     end
 
     # Let the intentional rest_for_one restart finish before test teardown.
@@ -295,6 +301,19 @@ defmodule GravitonMQ.AMQP10.RuntimeBoundariesTest do
       |> child(:connections)
       |> DynamicSupervisor.which_children()
       |> Enum.map(&elem(&1, 1))
+
+  # The listener's state holds its Hell server; `:sys.get_state/1` bypasses
+  # its redacted `format_status/1`.
+  defp handlers(instance) do
+    listener =
+      instance
+      |> amqp_supervisor()
+      |> child(:listeners)
+      |> child({Listener, 0})
+
+    {:ok, handlers} = Hell.connection_pids(:sys.get_state(listener).socket)
+    handlers
+  end
 
   defp amqp_supervisor(instance),
     do:

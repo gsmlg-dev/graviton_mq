@@ -2,12 +2,19 @@ defmodule GravitonMQ.Runtime.MQTT.Listener do
   @moduledoc false
   use GenServer
 
+  alias GravitonMQ.Runtime.HellHandoff
   alias GravitonMQ.Runtime.MQTT.{Broker, Connection}
 
   def start_link(configuration), do: GenServer.start_link(__MODULE__, configuration)
 
+  # TCP and TLS listeners share this shutdown; it exceeds the bounded
+  # Hell stop so the parent never kills a TCP listener mid-stop.
   def child_spec(options),
-    do: %{id: __MODULE__, start: {__MODULE__, :start_link, [fn -> options end]}}
+    do: %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [fn -> options end]},
+      shutdown: HellHandoff.owner_shutdown()
+    }
 
   def info(listener), do: GenServer.call(listener, :info)
 
@@ -29,9 +36,11 @@ defmodule GravitonMQ.Runtime.MQTT.Listener do
       send_timeout_close: true
     ]
 
+    handoff = if listener.transport == :tcp, do: HellHandoff.table()
+
     opened =
       case listener.transport do
-        :tcp -> :gen_tcp.listen(listener.port, options)
+        :tcp -> HellHandoff.start_link(listener, config.send_timeout, handoff)
         :tls -> :ssl.listen(listener.port, options ++ listener.tls_options)
       end
 
@@ -39,7 +48,7 @@ defmodule GravitonMQ.Runtime.MQTT.Listener do
       {:ok, socket} ->
         address =
           case listener.transport do
-            :tcp -> :inet.sockname(socket)
+            :tcp -> Hell.listener_info(socket)
             :tls -> :ssl.sockname(socket)
           end
 
@@ -64,10 +73,13 @@ defmodule GravitonMQ.Runtime.MQTT.Listener do
            config: config,
            parent: parent,
            socket: socket,
+           handoff: handoff,
            transport: listener.transport,
            info: %{id: listener.id, transport: listener.transport, ip: ip, port: port},
            broker: nil,
-           connections: nil
+           connections: nil,
+           wiring: nil,
+           waiting: []
          }, {:continue, :wire}}
 
       {:error, _reason} ->
@@ -75,50 +87,85 @@ defmodule GravitonMQ.Runtime.MQTT.Listener do
     end
   end
 
+  # Wiring asks the protocol supervisor for the Broker and connections
+  # without blocking: that supervisor may itself be stopping this listener's
+  # supervisor, which only works while this process still serves its own
+  # parent's exit. Plain TCP accept runs in Hell meanwhile; handlers accepted
+  # before wiring wait in `:connection_spec` and later read the published
+  # value.
+  # `:which_children` is the request `Supervisor.which_children/1` sends; OTP
+  # has no public asynchronous form, and a blocking call here can deadlock
+  # with a supervisor that is terminating this listener's ancestors.
   @impl true
-  def handle_continue(:wire, state) do
-    children = Supervisor.which_children(state.parent)
-    {_, broker, _, _} = List.keyfind(children, Broker, 0)
-    {_, connections, _, _} = List.keyfind(children, :connections, 0)
-    send(self(), :accept)
-    {:noreply, %{state | broker: broker, connections: connections}}
-  end
+  def handle_continue(:wire, state),
+    do: {:noreply, %{state | wiring: :gen_server.send_request(state.parent, :which_children)}}
 
   @impl true
   def handle_call(:info, _from, state), do: {:reply, state.info, state}
 
+  def handle_call(:connection_spec, from, %{transport: :tcp, broker: nil} = state),
+    do: {:noreply, %{state | waiting: [from | state.waiting]}}
+
+  def handle_call(:connection_spec, _from, %{transport: :tcp} = state),
+    do: {:reply, connection_spec(state), state}
+
   @impl true
-  def handle_info(:accept, state) do
-    result =
+  def handle_info(message, %{wiring: request} = state) when request != nil do
+    case :gen_server.check_response(message, request) do
+      {:reply, children} -> wire(children, %{state | wiring: nil})
+      {:error, {_reason, _parent}} -> {:stop, {:shutdown, :wiring_failed}, state}
+      :no_reply -> info(message, state)
+    end
+  end
+
+  def handle_info(message, state), do: info(message, state)
+
+  defp wire(children, state) do
+    with {_, broker, _, _} when is_pid(broker) <- List.keyfind(children, Broker, 0),
+         {_, connections, _, _} when is_pid(connections) <-
+           List.keyfind(children, :connections, 0) do
+      state = %{state | broker: broker, connections: connections}
+
       case state.transport do
-        :tcp -> :gen_tcp.accept(state.socket, 50)
-        :tls -> :ssl.transport_accept(state.socket, 50)
+        :tcp ->
+          :ok = HellHandoff.publish(state.handoff, connection_spec(state))
+
+          state.waiting
+          |> Enum.reverse()
+          |> Enum.each(&GenServer.reply(&1, connection_spec(state)))
+
+        :tls ->
+          send(self(), :accept)
       end
 
-    case result do
+      {:noreply, %{state | waiting: []}}
+    else
+      _not_running -> {:stop, {:shutdown, :wiring_failed}, state}
+    end
+  end
+
+  defp info({:EXIT, server, _reason}, %{transport: :tcp, socket: server} = state),
+    do: {:stop, :listener_closed, state}
+
+  defp info(:accept, %{transport: :tls} = state) do
+    case :ssl.transport_accept(state.socket, 50) do
       {:ok, socket} ->
         case DynamicSupervisor.start_child(
                state.connections,
-               {Connection, {state.config, state.broker, state.transport}}
+               {Connection, {state.config, state.broker, :tls}}
              ) do
           {:ok, reader} ->
-            transferred =
-              case state.transport do
-                :tcp -> :gen_tcp.controlling_process(socket, reader)
-                :tls -> :ssl.controlling_process(socket, reader)
-              end
-
-            case transferred do
+            case :ssl.controlling_process(socket, reader) do
               :ok ->
                 send(reader, {:accepted, socket})
 
               {:error, _reason} ->
-                close(state.transport, socket)
+                :ssl.close(socket)
                 Process.exit(reader, :kill)
             end
 
           {:error, _reason} ->
-            close(state.transport, socket)
+            :ssl.close(socket)
         end
 
         send(self(), :accept)
@@ -133,12 +180,16 @@ defmodule GravitonMQ.Runtime.MQTT.Listener do
     end
   end
 
-  def handle_info(_stale, state), do: {:noreply, state}
+  defp info(_stale, state), do: {:noreply, state}
+
+  defp connection_spec(state),
+    do: %{connections: state.connections, child: {Connection, {state.config, state.broker, :tcp}}}
 
   @impl true
-  def terminate(_reason, state), do: close(state.transport, state.socket)
-  defp close(:tcp, socket), do: :gen_tcp.close(socket)
-  defp close(:tls, socket), do: :ssl.close(socket)
+  def terminate(_reason, %{transport: :tcp, socket: server, handoff: table}),
+    do: HellHandoff.stop(server, table)
+
+  def terminate(_reason, %{transport: :tls, socket: socket}), do: :ssl.close(socket)
 
   @impl true
   def format_status(status),
