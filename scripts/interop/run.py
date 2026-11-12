@@ -119,10 +119,10 @@ def main():
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             tls_port = reservation.getsockname()[1]
-        acceptors = (f'<acceptors>\n<acceptor name="amqp">tcp://127.0.0.1:0?protocols=AMQP;useEpoll=false;amqpCredits=100;amqpLowCredits=30</acceptor>\n'
+        acceptors = (f'<acceptors>\n<acceptor name="amqp">tcp://127.0.0.1:0?protocols=AMQP;useEpoll=false;amqpCredits=100;amqpLowCredits=30;anycastPrefix=anycast://</acceptor>\n'
                      f'<acceptor name="amqp-tls">tcp://127.0.0.1:{tls_port}?protocols=AMQP;useEpoll=false;sslEnabled=true;'
                      f'keyStorePath={instance}/server.p12;keyStoreType=PKCS12;keyStorePassword=ephemeral-test-only;'
-                     'amqpCredits=100;amqpLowCredits=30</acceptor>\n</acceptors>')
+                     'amqpCredits=100;amqpLowCredits=30;anycastPrefix=anycast://</acceptor>\n</acceptors>')
         contents, count = re.subn(r"<acceptors>.*?</acceptors>", lambda _: acceptors, config.read_text(), flags=re.S)
         if count != 1:
             raise ValueError("Artemis acceptor template changed")

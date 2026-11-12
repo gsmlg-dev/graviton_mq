@@ -46,7 +46,11 @@ defmodule GravitonMQ.AMQP10Client.ArtemisReconnectTest do
       )
 
     session!(client)
-    address = address("r2")
+    # A bare address auto-creates as MULTICAST in Artemis (no
+    # default-address-routing-type): each receiver gets a temporary queue that
+    # is deleted with its connection, taking the unacked message with it. R2
+    # needs a queue that survives the cut, so it names the ANYCAST routing.
+    address = "anycast://" <> address("r2")
     receiver = attach!(client, "r2-receiver", :receiver, address, max_message_bytes: 1024)
     path = body!(context, "r2-redelivered")
     assert {_, 0} = proton(context, "send", address, path)
