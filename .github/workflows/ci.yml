@@ -51,6 +51,9 @@ jobs:
       - name: Check source cycles
         run: mix xref graph --format cycles --fail-above 0
 
+      - name: Performance baseline smoke (correctness gate only, no thresholds)
+        run: mix run --no-start scripts/bench/run.exs --profile smoke --data-dir "$RUNNER_TEMP/s5a-data" --out "$RUNNER_TEMP/s5a-smoke"
+
   interoperability:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
