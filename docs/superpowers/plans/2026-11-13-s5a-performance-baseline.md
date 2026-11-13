@@ -1685,3 +1685,39 @@ Expected: one commit and a successful push.
   - Smoke rerun with a fast disk (probe 0.03–0.04 s): `10 passed, 0 failed`, exit 0. The data directory was empty, and no broker VM was left. p99 figures: `mqtt_qos0_mem` 1/8 e2e 706/3272 µs; `mqtt_qos1_mem` 1/8 accept 913/26870 µs; `mqtt_qos1_durable` 1/8 accept 5936/218273 µs; `amqp_mem` 1/8 accept 44151/43938 µs; `amqp_durable` 1/8 accept 44094/44024 µs. The prototype observations were reproduced: AMQP acceptance takes about 42 ms (Nagle), and with N = 8 the single consumer lags (`mqtt_qos1_mem` 466 msg/s accepted vs 116.7 msg/s consumed).
   - Step 4 kill check: `FAIL mqtt_qos1_mem n=1: broker VM exited with status 137`, then every later scenario ran. Result: `8 passed, 2 failed` and `exit=1`. The second failure was a disk-contention `mqtt_qos1_durable n=8 :unknown_outcome`. The data directory was empty, and no broker VM was left.
   - Deviation in Step 4: as written, `pkill -KILL -f "broker_vm.exs mqtt memory"` also matched the `bash -c`/zsh wrapper, whose command line contains that string. That killed the check shell before it could record `exit=`. The broker VM was still killed, and the orphaned generator finished with the same FAIL line and no leftovers. The check was rerun with the pattern `broker_vm[.]exs mqtt memory`, which cannot match itself. Only the check command changed; `scripts/bench/` was not changed.
+
+### 2026-11-13 — Tasks 4–6 (implementer)
+
+- **Task 4: stopped at Step 3; no baseline committed.** Both full runs measured the committed tree (`409dcb1`, `dirty: false`). Each run's post-run disk probe exceeded the 10 ms/write gate.
+  - Run 1. Pre-run probe at 07:29: 0.0335 s, 0.17 ms/write, load `3.47 5.68 5.91`. Post-run probe at 07:39: 16.07 s, 80.35 ms/write, load `7.08 6.89 6.45`. Result: `13 passed, 2 failed`, `exit=1`.
+    - The failures were `mqtt_qos1_durable n=64` `{:error, :unknown_outcome}` and `amqp_durable n=64` `{:unknown, :closed}`.
+    - The disk was slow during the AMQP durable scenarios: `amqp_durable n=1` had 1.6 msg/s and an acceptance p50 of 551 ms, against about 42 ms when the disk is fast.
+  - Waiting. The disk was re-probed every 3 minutes from 07:40 to 07:56. It measured 15.6, 11.8, 7.8, 13.5 and 14.8 s per 200 writes, then 0.035 s at 07:56:19.
+  - Run 2, a full repeat from Step 1. Pre-run probe at 07:56: 0.0327 s, 0.16 ms/write, load `4.82 4.72 5.22`. Post-run probe at 08:06: 13.73 s, 68.66 ms/write, load `5.67 6.08 5.75`. Result: `12 passed, 3 failed`, `exit=1`.
+    - The failures were `mqtt_qos1_durable n=64` `{:error, :unknown_outcome}`, `amqp_durable n=8` `missing 1876, unexpected 0`, and `amqp_durable n=64` `{:unknown, :closed}`.
+    - A probe at 08:07 still measured 10.85 s.
+  - Cause. A postgres server outside this project (`postgres -D /tmp/secrethub-hk-pg/…`, about 30 GB written, plus its walwriter) and other host processes were writing to the same `/dev/mapper/root_vg-root`. This is host contention, not a fault in the benchmark tool.
+  - Following Step 3, both values go to the coordinator. The raw files stay uncommitted at `/tmp/gmq-s5a-tmp/full-run1{,.log}` and `/tmp/gmq-s5a-tmp/full{,.log}`.
+  - The memory-scenario figures matched across the two runs and reproduce the known broker findings:
+    - AMQP acceptance is about 42 ms. Nagle is on: `nodelay: false` in `runtime/hell_handoff.ex`.
+    - The single consumer lags at N ≥ 8. `mqtt_qos1_mem` n=8 accepted 218 msg/s but consumed 54.5 msg/s, with an end-to-end p50 of about 25 s. `amqp_mem` n=64 consumed 1.4 msg/s.
+    - The durable N = 64 scenarios fail.
+- **Task 5** (`84273ac`). One `checks` step was added after `Check source cycles`, adding 3 lines. `actionlint .github/workflows/ci.yml` passed (`actionlint-ok`), and `yq` shows the step's `run` as the smoke command.
+- **Task 6.** The sequence ran on a clean `git archive HEAD` export at `84273ac`, in `/tmp/gmq-verify` with `MIX_BUILD_ROOT=/tmp/gmq-verify/_build`.
+  - Every command exited 0: `mix deps.get`, `mix format --check-formatted`, `mix compile --warnings-as-errors`, `mix test`, `mix graviton_mq.check_architecture` (passed, 7943 source references across 7 applications), `mix help xref`, and `mix xref graph --format cycles --fail-above 0` (`No cycles found`).
+  - `mix test` reported 0 failures in every app: core 38, amqp10 532, mqtt 381, storage 82, client 171 (61 excluded), runtime 171, graviton_mq 268 (89 excluded). The 10 `bench_stats_test.exs` tests pass.
+  - The umbrella-wide `mix format` (no flag) was not run on the working tree. The `--check-formatted` run on the export passed.
+  - `git diff --name-only 70e0a5e..HEAD -- 'apps/*/lib'` is empty. No broker VM is left, and the data directory is empty.
+
+### 2026-11-13 — Task 4 rerun on `/data` (implementer)
+
+- **Coordinator and owner decisions.** The data directory moves to the separate disk `/data` (`/dev/sdb1`, ext4), as `--data-dir /data/gmq-s5a-bench`. The 10 ms/write gate is unchanged and is probed against that directory. Broker behaviour is recorded as it is, with failed scenarios kept as failed.
+- **Clean tree.** `run.exs` records `dirty` from `git status --porcelain` at start-up. The uncommitted Task 6 log entry was copied to `/tmp/gmq-s5a-tmp`, the plan was checked out for the run, and the copy was restored afterwards. The run recorded `84273ac`, `dirty: false`. Run 2's raw output moved to `/tmp/gmq-s5a-tmp/full-run2{,.log}`.
+- **Step 1.** Pre-run probe at 08:22:56: 0.866 s, 4.33 ms/write, load `4.28 5.49 5.87`.
+- **Step 2.** The full profile ran from 08:23:08 to 08:34. Result: `14 passed, 1 failed`, `exit=1`.
+  - The one failure was `mqtt_qos1_durable n=64`: `{:publisher, 53} … {:error, :unknown_outcome}`. This is broker behaviour (PUBACK beyond 60 s), so it is recorded as failed.
+  - `amqp_durable n=64` passed (70.0 msg/s, consume 0.7 msg/s).
+  - `amqp_durable n=8` passed (59.0 msg/s, consume 6.8 msg/s, duplicates 0). Run 2's `missing 1876` did not reproduce.
+  - The 27 `GenServer … terminating ** (stop) :redacted` log entries after `mqtt_qos1_durable n=64` also appeared in run 2. They are the client teardown of that failed scenario.
+- **Step 3.** Post-run probe at 08:34:31: 0.773 s, 3.86 ms/write, load `5.58 6.34 6.23`. The data directory was empty, and no broker VM was left.
+- **Steps 4–5.** The JSON was copied, and the record was rendered with the plan's renderer. The environment was `ext4` on `/dev/sdb1` instead of the plan's expected `/dev/mapper/root_vg-root`, which is the coordinator's decision. The record adds sections on the disk choice and its probe history, the toolchain (host Elixir 1.18.5 vs `.tool-versions` 1.18.4), and Known broker findings (Nagle, consumer lag, durable N = 64, and the unreproduced `amqp_durable` N = 8 missing messages). These are inputs to a follow-up hot-path fix sub-project and are not fixed in S5a.
