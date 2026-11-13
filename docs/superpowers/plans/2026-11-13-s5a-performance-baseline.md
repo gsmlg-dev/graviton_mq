@@ -1721,3 +1721,10 @@ Expected: one commit and a successful push.
   - The 27 `GenServer … terminating ** (stop) :redacted` log entries after `mqtt_qos1_durable n=64` also appeared in run 2. They are the client teardown of that failed scenario.
 - **Step 3.** Post-run probe at 08:34:31: 0.773 s, 3.86 ms/write, load `5.58 6.34 6.23`. The data directory was empty, and no broker VM was left.
 - **Steps 4–5.** The JSON was copied, and the record was rendered with the plan's renderer. The environment was `ext4` on `/dev/sdb1` instead of the plan's expected `/dev/mapper/root_vg-root`, which is the coordinator's decision. The record adds sections on the disk choice and its probe history, the toolchain (host Elixir 1.18.5 vs `.tool-versions` 1.18.4), and Known broker findings (Nagle, consumer lag, durable N = 64, and the unreproduced `amqp_durable` N = 8 missing messages). These are inputs to a follow-up hot-path fix sub-project and are not fixed in S5a.
+
+### Task 7 (2026-11-13, coordinator)
+
+- Pushed `2a9bbb3..023b132`. CI run 43338450615 passed: `checks` (including the new
+  smoke step, `10 passed, 0 failed`) and `interoperability`. Tests run 43338450472 passed.
+- The CI run id is recorded in `docs/qualification/2026-11-13-s5a-baseline.md`.
+- Follow-up: the hot-path fix sub-project takes the Known broker findings as input.

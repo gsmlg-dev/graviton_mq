@@ -132,4 +132,6 @@ mix run --no-start scripts/bench/run.exs --profile full --data-dir /data/gmq-s5a
 The `checks` job runs the `smoke` profile (1 s + 3 s, N in {1, 8}, all
 scenarios) and only checks that the tool runs and the correctness gate passes.
 Its figures come from the runner's temporary disk and are not part of this
-baseline. CI run: not yet recorded.
+baseline. CI run: 43338450615 (`checks` and `interoperability` passed) and Tests run
+43338450472 for `023b132`; the `checks` smoke step passed 10 of 10 scenarios
+(runner figures are not a baseline).
